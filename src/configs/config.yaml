@@ -1,0 +1,11 @@
+data_dir_x: data/without_reduced
+data_dir_y: data/with_reduced
+batch_size: 1
+use_dask: false
+save_model: true
+save_path: models/global_model.joblib
+log_batch_metrics: true
+
+use_comet: false
+comet_project: hcmr-ai
+comet_workspace: ioannisgkinis

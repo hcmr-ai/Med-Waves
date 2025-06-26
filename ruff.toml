@@ -1,0 +1,15 @@
+line-length = 88
+target-version = "py311"
+exclude = [
+  "notebooks",
+  "data",
+  "models",
+]
+
+[lint]
+select = ["E", "F", "B", "I", "W"]
+ignore = ["E501"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

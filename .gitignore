@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+
+# Virtual envs
+.env
+.venv
+env/
+venv/
+*.env
+
+# Poetry
+poetry.lock
+# allow pyproject.toml though
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# VSCode or PyCharm
+.vscode/
+.idea/
+
+# MacOS
+.DS_Store
+
+# Models and outputs
+models/
+outputs/
+checkpoints/
+logs/
+*.joblib
+*.pkl
+*.h5
+
+# Data
+data/
+!data/README.md   # keep instructions but ignore contents
+
+# Comet or MLflow artifacts
+comet.log
+mlruns/
+wandb/
+
+# Ruff cache
+ruff_cache/
+
+# Others
+*.log
+*.tmp
+*.bak
