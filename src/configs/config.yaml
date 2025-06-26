@@ -6,6 +6,6 @@ save_model: true
 save_path: models/global_model.joblib
 log_batch_metrics: true
 
-use_comet: false
+use_comet: true
 comet_project: hcmr-ai
 comet_workspace: ioannisgkinis

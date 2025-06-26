@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from src.data_engineering.split import holdout_split
 from src.evaluation.metrics import evaluate_model
+from src.evaluation.visuals import plot_residual_distribution
 from src.features.helpers import extract_features_from_file
 
 
@@ -71,7 +72,8 @@ class IncrementalTrainer:
             self.model.partial_fit(X_scaled, y)
 
             if self.log_batch_metrics:
-                metrics = evaluate_model(self.model, X, y, self.poly, self.scaler)
+                y_pred = self._predict(X)
+                metrics = evaluate_model(y_pred, y)
                 print(f"Batch {i // self.batch_size + 1} Metrics:")
                 for k, v in metrics.items():
                     print(f"{k.upper()}: {v}")
@@ -80,6 +82,11 @@ class IncrementalTrainer:
 
             if self.save_model:
                 joblib.dump(self.model, self.save_path)
+
+    def _predict(self, X):
+        X_poly = self.poly.transform(X)
+        X_scaled = self.scaler.transform(X_poly)
+        return self.model.predict(X_scaled)
 
     def evaluate(self, x_test_files: List[str], y_test_files: List[str]):
         test_dfs = []
@@ -95,13 +102,20 @@ class IncrementalTrainer:
         X = X_raw[mask]
         y = y_raw[mask]
 
-        metrics = evaluate_model(self.model, X, y, self.poly, self.scaler)
+        y_pred = self._predict(X)
+
+        metrics = evaluate_model(y_pred, y)
 
         print("\\nFinal Evaluation:")
         for k, v in metrics.items():
             print(f"{k.upper()}: {v}")
             if self.experiment:
                 self.experiment.log_metric(f"eval_{k.upper()}", v)
+
+        fig = plot_residual_distribution(y, y_pred, "residual_distibution")
+
+        if self.experiment:
+            self.experiment.log_figure(figure=fig, figure_name="residual_distribution")
 
 
 def main():
