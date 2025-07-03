@@ -1,6 +1,7 @@
-import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
+import matplotlib.pyplot as plt
 import pandas as pd
+
 
 def plot_spatial_feature_map(
     df_pd: pd.DataFrame,
@@ -31,7 +32,7 @@ def plot_spatial_feature_map(
     alpha : float, optional
         Marker transparency.
     """
-    fig = plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(10, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
     ax.set_title(title)
@@ -58,10 +59,10 @@ def plot_spatial_feature_map(
     plt.close()
 
 def plot_spatial_feature_heatmap(
-    df: pd.DataFrame, 
-    feature_col: str, 
-    output_dir: str, 
-    stat_name: str = "mean", 
+    df: pd.DataFrame,
+    feature_col: str,
+    output_dir: str,
+    stat_name: str = "mean",
     cmap: str = "viridis",
     label: str = ""
 ) -> None:
@@ -79,7 +80,7 @@ def plot_spatial_feature_heatmap(
     Returns:
         None. Saves the plot as a PNG file.
     """
-    fig = plt.figure(figsize=(12, 9))
+    plt.figure(figsize=(12, 9))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
     c = ax.scatter(
@@ -92,9 +93,11 @@ def plot_spatial_feature_heatmap(
         transform=ccrs.PlateCarree()
     )
     plt.colorbar(c, ax=ax, orientation="vertical", label=f"{stat_name.capitalize()} {feature_col} (m)")
-    ax.set_title(f"{stat_name.capitalize()} {feature_col} per grid cell")
+    title = f"{stat_name.capitalize()} {feature_col} per grid cell"
     if label:
         title += f" ({label})"
+    ax.set_title(title)
+
     plt.savefig(output_dir, bbox_inches="tight")
     plt.close()
 
@@ -110,7 +113,7 @@ def plot_missing_spatial_heatmap(df: pd.DataFrame, output_dir: str, label="") ->
 
     Returns:
         None. Saves the plot as a PNG file in the specified directory.
-    """    
+    """
     plt.figure(figsize=(12, 8))
     plt.imshow(df, origin="lower", aspect="auto", cmap="viridis")
     plt.colorbar(label="% Missing")

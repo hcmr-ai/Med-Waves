@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+
 def plot_time_series(ts: pd.Series, save_path=None, show=True):
     plt.figure(figsize=(14,5))
     plt.plot(ts.index, ts, label="Actual")

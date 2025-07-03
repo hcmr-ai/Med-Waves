@@ -1,5 +1,6 @@
 import polars as pl
 
+
 def hourly_timeseries(df: pl.DataFrame, value_col: str = "VHM0") -> pl.DataFrame:
     """
     Aggregate by hour to get mean per hour for the entire grid.

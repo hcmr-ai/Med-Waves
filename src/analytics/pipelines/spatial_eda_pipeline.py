@@ -1,9 +1,11 @@
-import polars as pl
-import matplotlib.pyplot as plt
-import cartopy.crs as ccrs
 from pathlib import Path
 
-from src.analytics.plots.spatial_plots import plot_missing_spatial_heatmap, plot_spatial_feature_heatmap
+import polars as pl
+
+from src.analytics.plots.spatial_plots import (
+    plot_missing_spatial_heatmap,
+    plot_spatial_feature_heatmap,
+)
 
 SEASON_MAP = {
     12: "WINTER", 1: "WINTER", 2: "WINTER",
@@ -24,24 +26,23 @@ def add_season_columns(df):
 class SpatialEDAPipeline:
     def __init__(
         self,
-        parquet_files_path: str,
-        exclude_cols: set = {"time", "latitude", "longitude"}
+        parquet_files_path: str
     ):
         self.parquet_files = parquet_files_path
 
     def load_data(self):
         print(f"Loading data: {self.parquet_files}")
         self.df = pl.read_parquet(self.parquet_files)
-        print(f"Loaded Data Successfully.")
+        print("Loaded Data Successfully.")
 
     def plot_missing_heatmap(self, df, label=""):
         """Plot percentage of missing values for each grid cell."""
         print("Computing missing data statistics...")
-        
+
         miss_pd = df.to_pandas().pivot(index="latitude", columns="longitude", values=f"{self.feature_col}_pct_missing")
         out_path = self.output_dir / f"missing_heatmap{('_' + label) if label else ''}.png"
         plot_missing_spatial_heatmap(miss_pd, out_path)
-        
+
         print(f"Saved missing heatmap to {out_path}")
 
     def plot_mean_std_heatmaps(self, df, label=""):
@@ -57,7 +58,7 @@ class SpatialEDAPipeline:
             cmap="viridis",
         )
         print(f"Saved mean map to {out_mean}")
-        
+
         # Plot std
         out_std = self.output_dir / f"{self.feature_col.lower()}_std_map{('_' + label) if label else ''}.png"
         plot_spatial_feature_heatmap(
@@ -80,7 +81,7 @@ class SpatialEDAPipeline:
             ])
         )
         return agg
-        
+
     def aggregate_seasonal(self):
         """Return a Polars DataFrame of seasonal averages per grid point."""
         df = add_season_columns(self.df)
