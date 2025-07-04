@@ -31,6 +31,7 @@ comet-ml = "^3.49.11"
 polars-lts-cpu = "^1.31.0"
 pyarrow = "^20.0.0"
 streamlit = "^1.46.1"
+statsmodels = "^0.14.4"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.12.1"
