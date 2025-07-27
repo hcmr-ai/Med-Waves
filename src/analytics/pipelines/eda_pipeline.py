@@ -3,12 +3,17 @@ from pathlib import Path
 import polars as pl
 
 from src.analytics.plots.eda_plots import (
+    plot_distribution,
     plot_hourly_by_weekday,
     plot_monthly_seasonality,
+    plot_outliers,
+    plot_smoothed_differenced,
+    plot_time_series,
     plot_time_series_decomposition,
     plot_weekly_month_seasonality,
     plot_weekly_seasonality,
 )
+from src.analytics.utils.eda_helpers import scale_series
 
 
 class EDAPipeline:
@@ -51,38 +56,39 @@ class EDAPipeline:
 
     def plot_all(self):
         # 1. Distribution
-        # plot_distribution(
-        #     self.ts_pd,
-        #     self.feature_col,
-        #     show=False,
-        #     save_path=self.main_output_path / "distribution.png"
-        # )
-        # # 2. Actual time series
-        # plot_time_series(
-        #     self.ts_pd,
-        #     show=False,
-        #     save_path=self.main_output_path / "actual_time_series.png"
-        # )
-        # # 3. Outliers
-        # outlier_mask = ((self.ts_pd - self.ts_pd.mean()).abs() / self.ts_pd.std()) > 3
-        # plot_outliers(
-        #     self.ts_pd,
-        #     outlier_mask,
-        #     show=False,
-        #     save_path=self.main_output_path / "filled_outliers.png"
-        # )
-        # # 4. Smoothed & differenced
-        # smoothed = self.ts_pd.rolling(7, center=True, min_periods=1).mean()
-        # differenced = self.ts_pd.diff().fillna(0)
-        # scaled_series = scale_series(self.ts_pd)
-        # plot_smoothed_differenced(
-        #     self.ts_pd,
-        #     smoothed,
-        #     differenced,
-        #     scaled_series,
-        #     show=False,
-        #     save_path=self.main_output_path / "smoothed_differenced.png"
-        # )
+        plot_distribution(
+            self.ts_pd[f"{self.feature_col}_mean"],
+            self.feature_col,
+            show=False,
+            save_path=self.main_output_path / "distribution.png"
+        )
+        # 2. Actual time series
+        plot_time_series(
+            self.ts_pd[f"{self.feature_col}_mean"],
+            show=False,
+            save_path=self.main_output_path / "actual_time_series.png"
+        )
+        # 3. Outliers
+        series = self.ts_pd[f"{self.feature_col}_mean"]
+        outlier_mask = ((series - series.mean()).abs() / series.std()) > 3
+        plot_outliers(
+            self.ts_pd[f"{self.feature_col}_mean"],
+            outlier_mask,
+            show=False,
+            save_path=self.main_output_path / "filled_outliers.png"
+        )
+        # 4. Smoothed & differenced
+        smoothed = self.ts_pd[f"{self.feature_col}_mean"].rolling(7, center=True, min_periods=1).mean()
+        differenced = self.ts_pd[f"{self.feature_col}_mean"].diff().fillna(0)
+        scaled_series = scale_series(self.ts_pd[f"{self.feature_col}_mean"])
+        plot_smoothed_differenced(
+            self.ts_pd[f"{self.feature_col}_mean"],
+            smoothed,
+            differenced,
+            scaled_series,
+            show=False,
+            save_path=self.main_output_path / "smoothed_differenced.png"
+        )
         monthly = (
             self.ts_pd
             .groupby("month")[f"{self.feature_col}_mean"]
@@ -126,20 +132,26 @@ class EDAPipeline:
             self.ts_pd[f"{self.feature_col}_mean"],
             save_path=self.main_output_path / "time_series_decomposition_add.png"
         )
-        plot_time_series_decomposition(
-            self.ts_pd[f"{self.feature_col}_mean"],
-            model="multivariate",
-            save_path=self.main_output_path / "time_series_decomposition_multi.png"
-        )
+        try:
+            plot_time_series_decomposition(
+                self.ts_pd[f"{self.feature_col}_mean"],
+                model="multivariate",
+                save_path=self.main_output_path / "time_series_decomposition_multi.png"
+            )
+        except ValueError:
+            pass
 
     def run(self):
         self.load_data()
         self.plot_all()
 
 if __name__ == "__main__":
-    years = ["2021", "2022", "2023"]
-    feature_cols = [ "WSPD", "VHM0", "VTM02", "WDIR", "VMDR" ]
-    data_origin = "with_reduced"
+    years = ["2022", "2023"]
+    # feature_cols = [ "WSPD", "VHM0", "VTM02", "WDIR", "VMDR" ]
+    feature_cols = ['WSPD', 'VHM0', 'VTM02', 'corrected_VHM0', 'corrected_VTM02', 'U10', 'V10',
+    'wave_dir_sin', 'wave_dir_cos', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy',
+    'sin_month', 'cos_month', 'lat_norm', 'lon_norm']
+    data_origin = "augmented_with_labels"
 
     for year in years:
         for feature_col in feature_cols:

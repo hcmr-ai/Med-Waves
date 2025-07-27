@@ -17,6 +17,7 @@ class YearlySpatialAggregator:
             self.exclude_cols = {"time", "latitude", "longitude"}
         self.parquet_files_path = Path(parquet_files_path)
         self.parquet_files_output_path = Path(parquet_files_output_path)
+        self.parquet_files_output_path.mkdir(parents=True, exist_ok=True)
         self.dry_run = dry_run
 
         self.agg_dfs = []
@@ -83,7 +84,7 @@ class YearlySpatialAggregator:
 
 if __name__ == "__main__":
     year = "2021"
-    data_origin = "without_reduced"
+    data_origin = "augmented_with_labels"
 
     parquet_files_path = f"/data/tsolis/AI_project/parquet/{data_origin}/hourly"
     parquet_files_output_path = f"/data/tsolis/AI_project/parquet/{data_origin}/monthly_spatial_stats"
