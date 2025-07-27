@@ -19,10 +19,10 @@ seasons = ["", "WINTER", "SPRING", "SUMMER", "AUTUMN"]  # '' is for annual/whole
 
 # --- Sidebar selections ---
 st.sidebar.title("Med-WAV Dashboard")
-origin = st.sidebar.selectbox("Data Origin", data_origins)
+# origin = st.sidebar.selectbox("Data Origin", data_origins)
 year = st.sidebar.selectbox("Year", years)
 feature = st.sidebar.selectbox("Feature", feature_cols)
-origin_raw = "with_reduced" if origin == "Ground Truth" else "augmented_with_labels" if "Training (without correction) + GT" else "without_reduced"
+origin_raw = "augmented_with_labels"
 
 # --- Main Display ---
 st.title("Med-WAV EDA Dashboard")
@@ -122,7 +122,7 @@ with main_tabs[0]:
 
         """)
 with main_tabs[1]:
-    st.subheader(f"{feature} — {year} ({origin})")
+    st.subheader(f"{feature} — {year}")
     feat_dir = OUTPUTS_ROOT /origin_raw / year / feature
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Distribution", "Time Series", "Decomposition", "Seasonality", "Descriptive Analytics", "Feature Correlation"])
@@ -203,7 +203,7 @@ with main_tabs[1]:
         st.image(str(path), caption="Correlation Heatmap Pearson", use_container_width=True)
 
 with main_tabs[2]:
-    st.subheader(f"Spatial Heatmaps — {feature} ({year}, {origin})")
+    st.subheader(f"Spatial Heatmaps — {feature} ({year})")
     spatial_dir = SPATIAL_ROOT / origin_raw / year / feature
 
     tab1, tab2, tab3 = st.tabs(["Annual Spatial Heatmaps", "Seasonal Heatmaps", "Missing Values Heatmaps"])

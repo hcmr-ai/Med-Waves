@@ -122,9 +122,11 @@ class SpatialEDAPipeline:
 
 
 if __name__ == "__main__":
-    years = ["2021"]
+    years = ["2022"]
     feature_cols = [ "WSPD", "VHM0", "VTM02", "WDIR", "VMDR" ]
-    data_origin = "without_reduced"
+    feature_cols = ['WSPD', 'VHM0', 'VTM02', 'corrected_VHM0', 'corrected_VTM02', 'U10', 'V10',
+    'wave_dir_sin', 'wave_dir_cos']
+    data_origin = "augmented_with_labels"
 
     for year in years:
         parquet_files_path = f"/data/tsolis/AI_project/parquet/{data_origin}/monthly_spatial_stats/spatial_stats_{year}.parquet"
@@ -135,5 +137,5 @@ if __name__ == "__main__":
         pipeline.load_data()
 
         for feature_col in feature_cols:
-            output_dir = f"outputs/eda/spatial_heatmaps/{data_origin}/{year}/{feature_col}"
+            output_dir = f"/data/tsolis/AI_project/output/eda/spatial_heatmaps/{data_origin}/{year}/{feature_col}"
             pipeline.run(feature_col, output_dir)
