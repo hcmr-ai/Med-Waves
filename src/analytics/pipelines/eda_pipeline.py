@@ -9,12 +9,13 @@ from src.analytics.plots.eda_plots import (
     plot_outliers,
     plot_smoothed_differenced,
     plot_time_series,
+    plot_hourly_by_weekday,
+    plot_monthly_seasonality,
     plot_time_series_decomposition,
     plot_weekly_month_seasonality,
     plot_weekly_seasonality,
 )
 from src.analytics.utils.eda_helpers import scale_series
-
 
 class EDAPipeline:
     def __init__(
@@ -132,6 +133,7 @@ class EDAPipeline:
             self.ts_pd[f"{self.feature_col}_mean"],
             save_path=self.main_output_path / "time_series_decomposition_add.png"
         )
+
         try:
             plot_time_series_decomposition(
                 self.ts_pd[f"{self.feature_col}_mean"],
