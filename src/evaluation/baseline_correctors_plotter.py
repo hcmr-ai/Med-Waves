@@ -366,16 +366,17 @@ class PredictionPlotter:
 
 def main(run_id: int, corrector: str):
     # Handle different directory structures
-    if corrector in ["DeltaCorrector", "EDCDFCorrector"]:
+    if corrector in ["DeltaCorrector", "EDCDFCorrector", "DiffCorrector"]:
         run_to_experiment_map = {
             "DeltaCorrector": "d74ddb4c81b94c7db381b5c901ebe0af",
             "EDCDFCorrector": "8c7f2b19ade34477b884f430d2d90dcb",
+            "DiffCorrector": "d39937d34aeb4544800345356e3106b8",
         }
         experiment = ExistingExperiment(
             api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
             previous_experiment=run_to_experiment_map[corrector]
         )
-        subfolder = "run_delta_v1" if corrector == "DeltaCorrector" else "run_edcdf_v1"
+        subfolder = "run_delta_v1" if corrector == "DeltaCorrector" else "run_edcdf_v1" if corrector == "EDCDFCorrector" else "run_diff_v1"
         prediction_dir = f"/data/tsolis/AI_project/output/experiments/{corrector}/{subfolder}/individual_predictions"
     else:
         run_to_experiment_map = {
@@ -401,4 +402,4 @@ def main(run_id: int, corrector: str):
 
 if __name__ == "__main__":
     for i in range(1):
-        main(run_id=i, corrector="EDCDFCorrector")
+        main(run_id=i, corrector="DiffCorrector")

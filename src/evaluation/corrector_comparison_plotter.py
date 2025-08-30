@@ -13,6 +13,7 @@ class CorrectorComparisonPlotter:
         self.base_dir = Path(base_dir)
         self.correctors = ["DeltaCorrector", "random_regressor", "DiffCorrector", "EDCDFCorrector"]
         self.metrics = ["rmse", "mae", "diff", "bias", "corr"]
+        self.metrics = ["var"]
         self.variables = ["VHM0", "VTM02"]
 
         # Set up plotting style
