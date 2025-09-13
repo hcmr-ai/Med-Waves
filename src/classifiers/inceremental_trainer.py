@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Dict, List, Tuple
 
@@ -7,6 +8,9 @@ import numpy as np
 import polars as pl
 from comet_ml import Experiment
 from tqdm import tqdm
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 from src.evaluation.metrics import evaluate_model
 from src.evaluation.visuals import plot_residual_distribution
@@ -230,13 +234,16 @@ class IncrementalTrainer:
 
     def _warmup_stage(self, x_train_files: List[str], y_train_files: List[str]):
         """Warmup stage: fit transforms on first warmup_days of data."""
-        print(f"Starting warmup stage with {self.warmup_days} days...")
+        logger.info(f"Starting warmup stage with {self.warmup_days} days...")
+        logger.info(f"Processing {min(self.warmup_days, len(x_train_files))} files for warmup")
 
         warmup_data = []
         warmup_targets = []
 
         # Collect warmup data
         for i in range(min(self.warmup_days, len(x_train_files))):
+            logger.info(f"Processing warmup file {i+1}/{min(self.warmup_days, len(x_train_files))}: {x_train_files[i]}")
+            
             # Check if we're using parquet files (same file for x and y)
             if x_train_files[i] == y_train_files[i] and x_train_files[i].endswith('.parquet'):
                 df = extract_features_from_parquet(
@@ -246,7 +253,11 @@ class IncrementalTrainer:
                 df = extract_features_from_file(
                     x_train_files[i], y_train_files[i], use_dask=self.use_dask
                 )
+            
+            logger.info(f"Extracted features from file, DataFrame shape: {df.shape}")
             X, y = self._prepare_features(df, is_warmup=True)
+            logger.info(f"Prepared features: X shape {X.shape}, y shape {y.shape}")
+            
             warmup_data.append(X)
             warmup_targets.append(y)
 
@@ -254,24 +265,29 @@ class IncrementalTrainer:
         X_warmup = np.vstack(warmup_data)
         # y_warmup = np.concatenate(warmup_targets)
 
-        print(f"Warmup data shape: {X_warmup.shape}")
+        logger.info(f"Combined warmup data shape: {X_warmup.shape}")
+        logger.info(f"Warmup data statistics - min: {X_warmup.min():.4f}, max: {X_warmup.max():.4f}, mean: {X_warmup.mean():.4f}")
 
         # Apply transforms and fit them
+        logger.info("Applying and fitting transforms...")
         X_transformed = self._apply_transforms(X_warmup, is_warmup=True)
+        logger.info(f"Transformed warmup data shape: {X_transformed.shape}")
 
         # Special handling for IncrementalPCA
         if self.dimred is not None and self.dimred_type == "ipca":
+            logger.info("Fitting IncrementalPCA on warmup data...")
             # Fit IncrementalPCA on warmup data
             self.dimred.fit(X_transformed)
             X_transformed = self.dimred.transform(X_transformed)
             self.feature_counts["after_dimred"] = X_transformed.shape[1]
+            logger.info(f"After IncrementalPCA: {X_transformed.shape}")
 
         self.warmup_completed = True
 
         # Log feature report
         self._log_feature_report()
 
-        print("Warmup stage completed!")
+        logger.info("Warmup stage completed successfully!")
 
     def _log_feature_report(self):
         """Log feature transformation report to Comet."""
@@ -315,15 +331,26 @@ class IncrementalTrainer:
 
     def train(self, x_train_files: List[str], y_train_files: List[str]):
         """Main training loop with warmup and streaming."""
+        logger.info(f"Starting training with {len(x_train_files)} training files")
+        logger.info(f"Batch size: {self.batch_size}")
+        
         # Warmup stage
         if not self.warmup_completed:
             self._warmup_stage(x_train_files, y_train_files)
 
         # Training stage
-        print("Starting training stage...")
+        logger.info("Starting training stage...")
+        total_batches = (len(x_train_files) + self.batch_size - 1) // self.batch_size
+        logger.info(f"Total batches to process: {total_batches}")
+        
         for i in tqdm(range(0, len(x_train_files), self.batch_size)):
+            batch_num = i // self.batch_size + 1
+            logger.info(f"Processing batch {batch_num}/{total_batches}")
+            
             batch_dfs = []
             for j in range(i, min(i + self.batch_size, len(x_train_files))):
+                logger.debug(f"Loading file {j+1}/{len(x_train_files)}: {x_train_files[j]}")
+                
                 # Check if we're using parquet files (same file for x and y)
                 if x_train_files[j] == y_train_files[j] and x_train_files[j].endswith('.parquet'):
                     df = extract_features_from_parquet(
@@ -336,16 +363,22 @@ class IncrementalTrainer:
                 batch_dfs.append(df)
 
             batch = pl.concat(batch_dfs)
+            logger.info(f"Batch {batch_num} combined DataFrame shape: {batch.shape}")
+            
             X, y = self._prepare_features(batch, is_warmup=False)
+            logger.info(f"Batch {batch_num} prepared features: X shape {X.shape}, y shape {y.shape}")
 
             if len(X) == 0:
+                logger.warning(f"Batch {batch_num} has no valid data, skipping...")
                 continue
 
             # Apply frozen transforms
             X_transformed = self._apply_transforms(X, is_warmup=False)
+            logger.debug(f"Batch {batch_num} transformed features shape: {X_transformed.shape}")
 
             # Train model
             self.model.partial_fit(X_transformed, y)
+            logger.debug(f"Batch {batch_num} model updated")
 
             if self.log_batch_metrics:
                 y_pred = self._predict_batch(X)

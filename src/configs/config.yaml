@@ -11,6 +11,7 @@ comet_workspace: ioannisgkinis
 
 feature_block:
   base_features: ["vhm0_x", "wspd", "lat", "lon"]
+  # ['time', 'latitude', 'longitude', 'WSPD', 'VHM0', 'VTM02', 'WDIR', 'VMDR', 'corrected_VHM0', 'corrected_VTM02', 'U10', 'V10', 'wave_dir_sin', 'wave_dir_cos', 'timestamp', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm']
   use_poly: false
   poly_degree: 2
   poly_scope: "subset"   # "subset" | "all"
