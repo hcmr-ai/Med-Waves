@@ -2,7 +2,7 @@ data_dir: /data/tsolis/AI_project/parquet/augmented_with_labels/hourly
 batch_size: 1
 use_dask: false
 save_model: true
-save_path: models/global_model.joblib
+save_path: models/baseline_sgd_model.joblib
 log_batch_metrics: true
 
 use_comet: true
@@ -13,12 +13,12 @@ feature_block:
   base_features: ["vhm0_x", "wspd", "lat", "lon"]
   use_poly: false
   poly_degree: 2
-  poly_scope: "subset"   # "subset" | "all"
+  poly_scope: "subset"
   use_selector: false
-  selector_type: "elasticnet"  # "lasso" | "elasticnet"
+  selector_type: "elasticnet"
   selector_alpha: 1e-3
   selector_l1_ratio: 0.1
   warmup_days: 7
   use_dimred: false
-  dimred_type: "ipca"     # "ipca" | "tsvd" | "rproj"
+  dimred_type: "ipca"
   dimred_components: 64

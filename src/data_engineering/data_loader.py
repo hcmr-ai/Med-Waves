@@ -1,7 +1,7 @@
 import polars as pl
 
 # Path to your converted .parquet file
-file_path = "/data/tsolis/AI_project/output/experiments/DeltaCorrector/run_delta_v1/individual_predictions/WAVEAN20230101.parquet"
+file_path = "/data/tsolis/AI_project/parquet/augmented_with_labels/hourly/WAVEAN20231231.parquet"
 
 # Load the file
 df = pl.read_parquet(file_path)
