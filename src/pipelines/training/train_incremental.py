@@ -2,7 +2,7 @@
 Script to run different feature engineering experiments with the IncrementalTrainer.
 
 Usage:
-    # Normal runs
+    # Normal runs (local data)
     python src/pipelines/training/train_incremental.py --config config_baseline_sgd
     python src/pipelines/training/train_incremental.py --config config_elasticnet_sgd
     python src/pipelines/training/train_incremental.py --config config_poly_lite
@@ -12,6 +12,10 @@ Usage:
     # Debug runs (quick testing with minimal data)
     python src/pipelines/training/train_incremental.py --config config_baseline_sgd --debug
     python src/pipelines/training/train_incremental.py --config config_poly_lite --debug --debug-train-days 2 --debug-test-days 1
+
+    # S3 runs
+    python src/pipelines/training/train_incremental.py --config config_baseline_sgd --s3-bucket medwav-dev-data --s3-prefix parquet/hourly
+    python src/pipelines/training/train_incremental.py --config config_baseline_sgd --s3-bucket medwav-dev-data --s3-prefix parquet/hourly --aws-profile myprofile
 """
 
 import argparse
@@ -26,6 +30,7 @@ import yaml
 # project_root = Path(__file__).parent.parent.parent.parent
 # sys.path.insert(0, str(project_root))
 from src.classifiers.inceremental_trainer import IncrementalTrainer
+from src.commons.aws.utils import list_s3_parquet_files
 from src.data_engineering.split import time_based_split
 
 
@@ -60,6 +65,23 @@ def main():
         default=1,
         help="Number of days to use for testing in debug mode"
     )
+    parser.add_argument(
+        "--s3-bucket",
+        type=str,
+        help="S3 bucket name for data loading (overrides local data_dir)"
+    )
+    parser.add_argument(
+        "--s3-prefix",
+        type=str,
+        default="",
+        help="S3 prefix for data files (e.g., 'parquet/hourly/')"
+    )
+    parser.add_argument(
+        "--aws-profile",
+        type=str,
+        default=None,
+        help="AWS profile to use for S3 access"
+    )
 
     args = parser.parse_args()
 
@@ -81,13 +103,27 @@ def main():
     trainer = IncrementalTrainer(config)
 
     # Get data files (parquet files contain both input and target data)
-    data_files = sorted(glob.glob(os.path.join(trainer.data_dir, "*.parquet")))
-
-    if not data_files:
-        print(f"No parquet files found in {trainer.data_dir}")
-        sys.exit(1)
-
-    print(f"Found {len(data_files)} parquet files")
+    if args.s3_bucket:
+        # Load from S3
+        print(f"Loading data from S3 bucket: {args.s3_bucket}")
+        if args.s3_prefix:
+            print(f"Using S3 prefix: {args.s3_prefix}")
+        data_files = list_s3_parquet_files(
+            bucket=args.s3_bucket,
+            prefix=args.s3_prefix,
+            aws_profile=args.aws_profile
+        )
+        if not data_files:
+            print(f"No parquet files found in s3://{args.s3_bucket}/{args.s3_prefix}")
+            sys.exit(1)
+        print(f"Found {len(data_files)} parquet files in S3")
+    else:
+        # Load from local directory
+        data_files = sorted(glob.glob(os.path.join(trainer.data_dir, "*.parquet")))
+        if not data_files:
+            print(f"No parquet files found in {trainer.data_dir}")
+            sys.exit(1)
+        print(f"Found {len(data_files)} parquet files locally")
 
     # Use time-based split for proper temporal evaluation
     x_train, y_train, x_test, y_test = time_based_split(
