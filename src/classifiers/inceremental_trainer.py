@@ -1,20 +1,28 @@
 import logging
 import os
-from typing import Any, Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Optional
 
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import polars as pl
 from comet_ml import Experiment
 from tqdm import tqdm
 from datetime import datetime
+from src.evaluation.helpers import TrainingMetricsStorage
 
 # Set up logger
 logger = logging.getLogger(__name__)
 
 from src.evaluation.metrics import evaluate_model
 from src.evaluation.visuals import plot_residual_distribution
+from src.data_engineering.split import (
+    stratified_sample_by_location,
+    random_sample_within_file,
+    temporal_sample_within_file
+)
 from src.features.helpers import (
     extract_features_from_file,
     extract_features_from_parquet,
@@ -66,6 +74,10 @@ class IncrementalTrainer:
         self.save_path = config["save_path"]
         self.log_batch_metrics = config["log_batch_metrics"]
 
+        # Training diagnostics configuration
+        self.diagnostics_config = config.get("training_diagnostics", {})
+        self.diagnostics_enabled = self.diagnostics_config.get("enabled", False)
+
         # Feature configuration
         self.feature_config = config.get("feature_block", {})
         self.base_features = self.feature_config.get("base_features", ["vhm0_x", "wspd", "lat", "lon"])
@@ -95,13 +107,16 @@ class IncrementalTrainer:
             )
         elif self.model_type == "xgb":
             self.model = XGBIncremental(
-                rounds_per_batch=25, # trees added per streamed batch
-                max_depth=8,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
+                rounds_per_batch=50, # trees added per streamed batch (increased)
+                max_depth=6,         # increased depth for more complex patterns
+                learning_rate=0.1,   # increased learning rate
+                subsample=0.9,       # increased subsample
+                colsample_bytree=0.9, # increased column sampling
                 tree_method="hist",
                 max_bin=256,
+                min_child_weight=1,  # reduced from 10 to allow more splits
+                reg_alpha=0.01,      # reduced L1 regularization
+                reg_lambda=0.1       # reduced L2 regularization
             )
         self.scaler = StandardScaler()
         self.poly = None
@@ -133,7 +148,7 @@ class IncrementalTrainer:
 
     def _generate_run_name(self) -> str:
         """Generate run name based on feature configuration."""
-        parts = ["sgd"]
+        parts = [self.model_type]
 
         if self.use_poly:
             parts.append(f"poly{self.poly_degree}")
@@ -188,8 +203,52 @@ class IncrementalTrainer:
                        if col not in ["vhm0_y", "vhm0_x", "corrected_VTM02","time", "lat", "lon"] and not col.startswith("_")]
         return feature_cols
 
-    def _prepare_features(self, df: pl.DataFrame, is_warmup: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    def _apply_sampling(self, df: pl.DataFrame, is_warmup: bool = False) -> pl.DataFrame:
+        """Apply sampling strategy to reduce file size."""
+        # Get sampling configuration
+        max_samples = self.feature_config.get("max_samples_per_file", None)
+        sampling_strategy = self.feature_config.get("sampling_strategy", "none")
+        sampling_seed = self.feature_config.get("sampling_seed", 42)
+        
+        # Skip sampling if not configured or during warmup
+        if max_samples is None or sampling_strategy == "none" or is_warmup:
+            return df
+        
+        logger.info(f"Applying {sampling_strategy} sampling: max {max_samples} samples")
+        
+        if sampling_strategy == "per_location":
+            samples_per_location = self.feature_config.get("samples_per_location", 20)
+            return stratified_sample_by_location(
+                df, 
+                max_samples_per_file=max_samples,
+                samples_per_location=samples_per_location,
+                seed=sampling_seed,
+                location_cols=["lat", "lon"]
+            )
+        elif sampling_strategy == "temporal":
+            samples_per_hour = self.feature_config.get("samples_per_hour", 100)
+            return temporal_sample_within_file(
+                df,
+                max_samples_per_file=max_samples,
+                samples_per_hour=samples_per_hour,
+                seed=sampling_seed
+            )
+        elif sampling_strategy == "random":
+            return random_sample_within_file(
+                df,
+                max_samples_per_file=max_samples,
+                seed=sampling_seed
+            )
+        else:
+            logger.warning(f"Unknown sampling strategy: {sampling_strategy}")
+            return df
+
+    def _prepare_features(self, df: pl.DataFrame, is_warmup: bool = False, apply_sampling: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """Prepare features based on configuration."""
+        # Apply sampling if configured
+        if apply_sampling:
+            df = self._apply_sampling(df, is_warmup)
+        
         # Get base features
         if self.poly_scope == "subset" and self.use_poly:
             # Use only base features for polynomial expansion
@@ -347,10 +406,125 @@ class IncrementalTrainer:
         self.experiment.log_figure(figure=plt, figure_name="selector_coefficients")
         plt.close()
 
+    def _create_validation_split(self, x_train_files: List[str], y_train_files: List[str]):
+        """Create validation set from training data using temporal split."""
+        validation_split = self.diagnostics_config.get("validation_split", 0.2)
+        
+        # Use temporal split (last portion of files chronologically)
+        split_idx = int(len(x_train_files) * (1 - validation_split))
+        
+        x_val_files = x_train_files[split_idx:]
+        y_val_files = y_train_files[split_idx:]
+        x_train_files = x_train_files[:split_idx]
+        y_train_files = y_train_files[:split_idx]
+        logger.info(f"x_train_files: {x_train_files}")
+        logger.info(f"y_train_files: {y_train_files}")
+        logger.info(f"x_val_files: {x_val_files}")
+        logger.info(f"y_val_files: {y_val_files}")
+
+        return x_train_files, y_train_files, x_val_files, y_val_files
+
+    def _quick_validation(self, val_files: List[str], max_files: int = 5) -> Dict[str, float]:
+        """Ultra-fast validation using minimal data."""
+        max_files = self.diagnostics_config.get("max_validation_files", max_files)
+        # samples_per_file = self.diagnostics_config.get("quick_validation_samples", 1000)
+        
+        sample_files = val_files[:max_files]
+        total_samples = 0
+        total_rmse = 0.0
+        total_mae = 0.0
+        all_y_true = []
+        all_y_pred = []
+        
+        for file_path in sample_files:
+            try:
+                # Load and process file
+                df = extract_features_from_parquet(file_path, use_dask=self.use_dask)
+                X, y = self._prepare_features(df, is_warmup=False, apply_sampling=True)
+                
+                if len(X) == 0:
+                    continue
+                
+                # Sample for speed
+                # if len(X) > samples_per_file:
+                #     indices = np.random.choice(len(X), samples_per_file, replace=False)
+                #     X, y = X[indices], y[indices]
+                
+                # Transform and predict
+                X_transformed = self._apply_transforms(X, is_warmup=False)
+                y_pred = self.model.predict(X_transformed)
+                
+                # Accumulate metrics
+                total_samples += len(y)
+                total_rmse += np.sum((y - y_pred) ** 2)
+                total_mae += np.sum(np.abs(y - y_pred))
+                
+                # Collect all predictions and true values for Pearson correlation
+                all_y_true.extend(y)
+                all_y_pred.extend(y_pred)
+                
+            except Exception as e:
+                logger.warning(f"Error processing validation file {file_path}: {e}")
+                continue
+        
+        if total_samples == 0:
+            return {"rmse": float('inf'), "mae": float('inf'), "pearson": 0.0, "samples": 0}
+        
+        # Calculate Pearson correlation using numpy
+        if len(all_y_true) > 1 and len(all_y_pred) > 1:
+            # Convert to numpy arrays for correlation calculation
+            y_true_array = np.array(all_y_true)
+            y_pred_array = np.array(all_y_pred)
+            
+            # Calculate Pearson correlation coefficient
+            correlation_matrix = np.corrcoef(y_true_array, y_pred_array)
+            pearson = correlation_matrix[0, 1] if not np.isnan(correlation_matrix[0, 1]) else 0.0
+        else:
+            pearson = 0.0
+        
+        return {
+            "rmse": np.sqrt(total_rmse / total_samples),
+            "mae": total_mae / total_samples,
+            "pearson": pearson,
+            "samples": total_samples
+        }
+
+    def _track_feature_importance(self, batch_idx: int) -> Optional[Dict[str, Any]]:
+        """Track feature importance efficiently."""
+        if not self.diagnostics_config.get("track_feature_importance", True):
+            return None
+            
+        frequency = self.diagnostics_config.get("feature_importance_frequency", 10)
+        if batch_idx % frequency != 0:
+            return None
+            
+        if not hasattr(self.model, 'feature_importances_'):
+            return None
+        
+        try:
+            importance = self.model.feature_importances_
+            return {
+                'batch': batch_idx,
+                'importance': importance.tolist(),  # Convert to list for JSON serialization
+                'top_features': np.argsort(importance)[-10:].tolist(),  # Top 10 features
+                'max_importance': float(np.max(importance)),
+                'mean_importance': float(np.mean(importance))
+            }
+        except Exception as e:
+            logger.warning(f"Error tracking feature importance: {e}")
+            return None
+
     def train(self, x_train_files: List[str], y_train_files: List[str]):
         """Main training loop with warmup and streaming."""
         logger.info(f"Starting training with {len(x_train_files)} training files")
         logger.info(f"Batch size: {self.batch_size}")
+        
+        # Create validation split if diagnostics enabled
+        x_val_files, y_val_files = [], []
+        if self.diagnostics_enabled:
+            x_train_files, y_train_files, x_val_files, y_val_files = \
+                self._create_validation_split(x_train_files, y_train_files)
+            logger.info(f"Created validation split: {len(x_val_files)} validation files, {len(x_train_files)} training files")
         
         # Warmup stage
         if not self.warmup_completed:
@@ -360,6 +534,14 @@ class IncrementalTrainer:
         logger.info("Starting training stage...")
         total_batches = (len(x_train_files) + self.batch_size - 1) // self.batch_size
         logger.info(f"Total batches to process: {total_batches}")
+
+        # Initialize diagnostics if enabled
+        metrics_storage = None
+        if self.diagnostics_enabled:
+            metrics_save_path = self.diagnostics_config.get("metrics_save_path", "training_metrics")
+            max_history = self.diagnostics_config.get("max_metrics_history", 1000)
+            metrics_storage = TrainingMetricsStorage(metrics_save_path, max_history)
+            logger.info(f"Training diagnostics enabled. Metrics will be saved to: {metrics_save_path}")
 
         for batch_idx in tqdm(range(0, len(x_train_files), self.batch_size), desc="Batches"):
             start = batch_idx
@@ -390,15 +572,53 @@ class IncrementalTrainer:
             y_batch = np.concatenate(y_parts)
 
             self.model.partial_fit(X_batch, y_batch)
-            if self.log_batch_metrics:
+            
+            # Enhanced batch metrics and diagnostics
+            if self.log_batch_metrics or self.diagnostics_enabled:
                 # we already have transformed X; predict directly
                 y_pred = self.model.predict(X_batch)
                 metrics = evaluate_model(y_pred, y_batch)
-                logger.info(f"Batch {(batch_idx // self.batch_size) + 1}/{total_batches} Metrics: " +
-                            ", ".join([f"{k.upper()}={v:.5f}" for k, v in metrics.items()]))
-                if self.experiment:
-                    for k, v in metrics.items():
-                        self.experiment.log_metric(f"train_{k.upper()}", v, step=batch_idx)
+                
+                if self.log_batch_metrics:
+                    logger.info(f"Batch {(batch_idx // self.batch_size) + 1}/{total_batches} Metrics: " +
+                                ", ".join([f"{k.upper()}={v:.5f}" for k, v in metrics.items()]))
+                    if self.experiment:
+                        for k, v in metrics.items():
+                            self.experiment.log_metric(f"train_{k.upper()}", v, step=batch_idx)
+            
+            # Training diagnostics tracking
+            if self.diagnostics_enabled and metrics_storage:
+                diagnostic_frequency = self.diagnostics_config.get("diagnostic_frequency", 10)
+                
+                if batch_idx % diagnostic_frequency == 0:
+                    # Save batch metrics
+                    batch_metrics = {
+                        'batch': batch_idx,
+                        'samples': len(y_batch),
+                        **metrics
+                    }
+                    metrics_storage.save_batch_metrics(batch_metrics)
+                    
+                    # Quick validation
+                    if x_val_files:
+                        val_metrics = self._quick_validation(x_val_files)
+                        val_metrics['batch'] = batch_idx
+                        metrics_storage.save_validation_metrics(val_metrics)
+                        logger.info(f"Validation RMSE: {val_metrics['rmse']:.5f}, MAE: {val_metrics['mae']:.5f}, Pearson: {val_metrics['pearson']:.5f}")
+                        if self.experiment:
+                            for k, v in val_metrics.items():
+                                self.experiment.log_metric(f"validation_{k.upper()}", v, step=batch_idx)
+                    
+                    # Feature importance tracking
+                    importance_data = self._track_feature_importance(batch_idx)
+                    if importance_data:
+                        metrics_storage.save_feature_importance(importance_data)
+                        logger.info(f"Top feature importance: {importance_data['max_importance']:.5f}")
+                
+                # Generate diagnostic plots
+                plot_frequency = self.diagnostics_config.get("plot_frequency", 50)
+                if batch_idx % plot_frequency == 0 and batch_idx > 0:
+                    self._create_training_diagnostics(metrics_storage)
 
             if self.save_model:
                 self._save_artifacts()
@@ -430,7 +650,7 @@ class IncrementalTrainer:
             df = extract_features_from_parquet(x_f, use_dask=self.use_dask) \
                 if x_f == y_f and x_f.endswith('.parquet') \
                     else extract_features_from_file(x_f, y_f, use_dask=self.use_dask)
-            X, y = self._prepare_features(df, is_warmup=False)
+            X, y = self._prepare_features(df, is_warmup=False, apply_sampling=False)
             if len(X) == 0:
                 continue
                 
@@ -500,9 +720,7 @@ class IncrementalTrainer:
         logger.info("="*60)
         for k, v in aggregate_metrics.items():
             logger.info(f"{k.upper()}: {v:.6f}")
-            # if self.experiment:
-            #     self.experiment.log_metric(f"eval_{k.upper()}", v)
-        
+
         # Log per-file statistics
         logger.info("\n" + "="*60)
         logger.info("PER-FILE STATISTICS:")
@@ -533,7 +751,6 @@ class IncrementalTrainer:
                 self.experiment.log_metric(f"eval_{metric}_std", np.std(values))
             
             # Log per-file metrics as a table
-            import pandas as pd
             df_metrics = pd.DataFrame(per_file_metrics)
             self.experiment.log_table("per_file_metrics.csv", df_metrics)
         
@@ -605,14 +822,14 @@ class IncrementalTrainer:
                 
             # Load and process the file
             df = extract_features_from_parquet(file_path, use_dask=self.use_dask)
-            X, y = self._prepare_features(df, is_warmup=False)
+            X, y = self._prepare_features(df, is_warmup=False, apply_sampling=True)
             if len(X) == 0:
                 continue
                 
             y_pred = self._predict_batch(X)
             
             # Sample from this file (max 10k points per file)
-            max_points_per_file = 10000
+            max_points_per_file = 250000
             if len(y) > max_points_per_file:
                 indices = np.random.choice(len(y), max_points_per_file, replace=False)
                 sample_y_true.extend(y[indices])
@@ -717,3 +934,171 @@ class IncrementalTrainer:
         logger.info("Diagnostic plots saved as 'diagnostic_plots.png'")
         
         plt.close()
+
+    def _create_training_diagnostics(self, metrics_storage: TrainingMetricsStorage):
+        """Create comprehensive training diagnostic plots."""
+        try:
+            # Load recent metrics from disk
+            recent_metrics = metrics_storage.load_recent_metrics(100)  # Last 100 batches
+            
+            if recent_metrics.empty:
+                logger.warning("No training metrics available for diagnostics")
+                return
+            
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            fig.suptitle('Training Diagnostics', fontsize=16)
+            
+            # 1. Learning Curves
+            self._plot_learning_curves(axes[0, 0], recent_metrics)
+            
+            # 2. Feature Importance Evolution (if available)
+            self._plot_feature_importance_evolution(axes[0, 1], metrics_storage)
+            
+            # 3. Training Speed Analysis
+            self._plot_training_speed(axes[0, 2], recent_metrics)
+            
+            # 4. Batch Metrics Distribution
+            self._plot_batch_metrics_distribution(axes[1, 0], recent_metrics)
+            
+            # 5. Validation vs Training (if validation data available)
+            self._plot_validation_comparison(axes[1, 1], metrics_storage)
+            
+            # 6. Model Performance Summary
+            self._plot_performance_summary(axes[1, 2], recent_metrics)
+            
+            plt.tight_layout()
+            plt.savefig('training_diagnostics.png', dpi=300, bbox_inches='tight')
+            
+            if self.experiment:
+                self.experiment.log_figure(figure=fig, figure_name="training_diagnostics")
+            
+            logger.info("Training diagnostic plots saved as 'training_diagnostics.png'")
+            plt.close()
+            
+        except Exception as e:
+            logger.error(f"Error creating training diagnostics: {e}")
+
+    def _plot_learning_curves(self, ax, metrics_df):
+        """Plot learning curves for training metrics."""
+        if 'batch' not in metrics_df.columns or 'rmse' not in metrics_df.columns:
+            ax.text(0.5, 0.5, 'No learning curve data available', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Learning Curves')
+            return
+        
+        ax.plot(metrics_df['batch'], metrics_df['rmse'], label='RMSE', alpha=0.7)
+        ax.plot(metrics_df['batch'], metrics_df['mae'], label='MAE', alpha=0.7)
+        ax.set_xlabel('Batch')
+        ax.set_ylabel('Error')
+        ax.set_title('Learning Curves')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    def _plot_feature_importance_evolution(self, ax, metrics_storage):
+        """Plot feature importance evolution over time."""
+        # This would require loading feature importance data from disk
+        # For now, show a placeholder
+        ax.text(0.5, 0.5, 'Feature Importance Evolution\n(Implementation pending)', 
+               ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Feature Importance Evolution')
+
+    def _plot_training_speed(self, ax, metrics_df):
+        """Plot training speed analysis."""
+        if 'batch' not in metrics_df.columns or 'samples' not in metrics_df.columns:
+            ax.text(0.5, 0.5, 'No training speed data available', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Training Speed')
+            return
+        
+        # Calculate samples per batch over time
+        ax.plot(metrics_df['batch'], metrics_df['samples'], alpha=0.7)
+        ax.set_xlabel('Batch')
+        ax.set_ylabel('Samples per Batch')
+        ax.set_title('Training Speed (Samples/Batch)')
+        ax.grid(True, alpha=0.3)
+
+    def _plot_batch_metrics_distribution(self, ax, metrics_df):
+        """Plot distribution of batch metrics."""
+        if 'rmse' not in metrics_df.columns:
+            ax.text(0.5, 0.5, 'No batch metrics data available', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Batch Metrics Distribution')
+            return
+        
+        ax.hist(metrics_df['rmse'], bins=20, alpha=0.7, edgecolor='black')
+        ax.set_xlabel('RMSE')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Batch RMSE Distribution')
+        ax.grid(True, alpha=0.3)
+
+    def _plot_validation_comparison(self, ax, metrics_storage):
+        """Plot validation vs training comparison."""
+        try:
+            # Load validation metrics from disk
+            validation_metrics = self._load_validation_metrics(metrics_storage)
+            
+            if validation_metrics.empty:
+                ax.text(0.5, 0.5, 'No validation data available', 
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Validation vs Training')
+                return
+            
+            # Load training metrics for comparison
+            training_metrics = metrics_storage.load_recent_metrics(100)
+            
+            if training_metrics.empty:
+                ax.text(0.5, 0.5, 'No training data available', 
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Validation vs Training')
+                return
+            
+            # Plot RMSE comparison
+            ax.plot(training_metrics['batch'], training_metrics['rmse'], 
+                   label='Training RMSE', alpha=0.7, marker='o', linewidth=2)
+            ax.plot(validation_metrics['batch'], validation_metrics['rmse'], 
+                   label='Validation RMSE', alpha=0.7, marker='s', linewidth=2)
+            
+            ax.set_xlabel('Batch')
+            ax.set_ylabel('RMSE')
+            ax.set_title('Training vs Validation RMSE')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+        except Exception as e:
+            ax.text(0.5, 0.5, f'Error loading validation data:\n{str(e)}', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Validation vs Training')
+
+    def _load_validation_metrics(self, metrics_storage):
+        """Load validation metrics from storage."""
+        return metrics_storage.load_validation_metrics(100)
+
+    def _plot_performance_summary(self, ax, metrics_df):
+        """Plot performance summary statistics."""
+        if metrics_df.empty:
+            ax.text(0.5, 0.5, 'No performance data available', 
+                   ha='center', va='center', transform=ax.transAxes)
+            ax.set_title('Performance Summary')
+            return
+        
+        # Calculate summary statistics
+        summary_text = f"""
+        PERFORMANCE SUMMARY:
+        
+        Total Batches: {len(metrics_df)}
+        Avg RMSE: {metrics_df['rmse'].mean():.5f}
+        Min RMSE: {metrics_df['rmse'].min():.5f}
+        Max RMSE: {metrics_df['rmse'].max():.5f}
+        
+        Avg MAE: {metrics_df['mae'].mean():.5f}
+        Min MAE: {metrics_df['mae'].min():.5f}
+        Max MAE: {metrics_df['mae'].max():.5f}
+        
+        Total Samples: {metrics_df['samples'].sum():,}
+        """
+        
+        ax.text(0.1, 0.9, summary_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        ax.axis('off')
+        ax.set_title('Performance Summary')

@@ -13,13 +13,32 @@ feature_block:
   base_features: ["vhm0_x", "wspd", "lat", "lon"]
   use_poly: false
   poly_degree: 2
-  poly_scope: "subset" # "subset" | "all"
+  poly_scope: "subset"
   use_selector: false
-  selector_type: "elasticnet" # "lasso" | "elasticnet"
+  selector_type: "elasticnet"
   selector_alpha: 1e-3
   selector_l1_ratio: 0.1
-  warmup_days: 7
+  warmup_days: 4 # Reduced warmup for debug
   use_dimred: false
-  dimred_type: "ipca" # "ipca" | "tsvd" | "rproj"
+  dimred_type: "ipca"
   dimred_components: 64
-  model_type: "sgd" # "sgd" | "xgb"
+  model_type: "xgb" # "sgd" | "xgb"
+  # Sampling configuration for large files
+  max_samples_per_file: 250000
+  sampling_strategy: "per_location" # "random" | "per_location" | "temporal"
+  samples_per_location: 5 # increased from 1 for better diversity
+  sampling_seed: 42
+
+# Training diagnostics configuration
+training_diagnostics:
+  enabled: true
+  validation_split: 0.005 # 20% of training data for validation
+  diagnostic_frequency: 100 # n_batches
+  plot_frequency: 100 # n_batches
+  max_validation_files: 5 # Max files for quick validation
+  save_metrics_to_disk: true
+  metrics_save_path: "training_metrics"
+  cleanup_old_metrics: true
+  max_metrics_history: 1000 # Keep last 1000 batch metrics
+  track_feature_importance: true
+  feature_importance_frequency: 10 # Every 10 batches

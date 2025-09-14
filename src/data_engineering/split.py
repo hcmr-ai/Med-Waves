@@ -2,7 +2,9 @@ import glob
 import os
 import re
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import polars as pl
+import numpy as np
 
 
 def pair_input_target_files(
@@ -157,3 +159,221 @@ def expanding_window_split(x_files, y_files, initial_size, step):
         x_val = x_files[start : start + step]
         y_val = y_files[start : start + step]
         yield x_train, y_train, x_val, y_val
+
+
+def stratified_sample_by_location(
+    df: pl.DataFrame, 
+    max_samples_per_file: int = 10000,
+    samples_per_location: int = 20,
+    location_cols: List[str] = ["latitude", "longitude"],
+    seed: int = 42
+) -> pl.DataFrame:
+    """
+    Optimized stratified sampling by location for large datasets.
+    
+    Args:
+        df: Input DataFrame
+        max_samples_per_file: Maximum total samples to keep
+        samples_per_location: Number of samples per location
+        location_cols: Columns that define a location
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Sampled DataFrame with balanced representation across locations
+    """
+    if len(df) <= max_samples_per_file:
+        return df
+    
+    # Count unique locations
+    unique_locations = df.group_by(location_cols).count()
+    n_locations = len(unique_locations)
+    print(f"n_locations: {n_locations}")
+    
+    # Calculate samples per location
+    if n_locations * samples_per_location > max_samples_per_file:
+        # Too many locations, reduce samples per location
+        samples_per_location = max_samples_per_file // n_locations
+        samples_per_location = max(1, samples_per_location)  # At least 1 per location
+    
+    # For very large numbers of locations, use a more efficient approach
+    if n_locations > 100000:  # Extremely large datasets
+        return _ultra_fast_stratified_sample(df, location_cols, samples_per_location, max_samples_per_file, seed)
+    elif n_locations > 50000:  # Large datasets
+        return _fast_stratified_sample(df, location_cols, samples_per_location, max_samples_per_file, seed)
+    
+    # Original approach for smaller datasets
+    return _standard_stratified_sample(df, location_cols, samples_per_location, seed)
+
+
+def _fast_stratified_sample(
+    df: pl.DataFrame,
+    location_cols: List[str],
+    samples_per_location: int,
+    max_samples_per_file: int,
+    seed: int
+) -> pl.DataFrame:
+    """
+    Fast stratified sampling for large numbers of locations using window functions.
+    """
+    # Add row numbers within each location group
+    df_with_rownum = df.with_row_index("_global_idx").with_columns(
+        pl.concat_str([pl.col(col) for col in location_cols], separator="_").alias("_location_id")
+    ).with_columns(
+        pl.int_range(pl.len()).over("_location_id").alias("_local_idx")
+    )
+    
+    # Sample by taking rows where local_idx < samples_per_location
+    # This gives us up to samples_per_location from each location
+    sampled_df = df_with_rownum.filter(
+        pl.col("_local_idx") < samples_per_location
+    ).drop(["_global_idx", "_location_id", "_local_idx"])
+    
+    # If we still have too many samples, randomly sample from the result
+    if len(sampled_df) > max_samples_per_file:
+        sampled_df = sampled_df.sample(n=max_samples_per_file, seed=seed)
+    
+    return sampled_df
+
+
+def _ultra_fast_stratified_sample(
+    df: pl.DataFrame,
+    location_cols: List[str],
+    samples_per_location: int,
+    max_samples_per_file: int,
+    seed: int
+) -> pl.DataFrame:
+    """
+    Ultra-fast stratified sampling for extremely large datasets using spatial grid sampling.
+    """
+    # For extremely large datasets, use spatial grid sampling instead of exact location sampling
+    # This trades some precision for massive speed gains
+    
+    # Create spatial grid bins
+    df_with_grid = df.with_columns([
+        (pl.col("lat") * 100).round().cast(pl.Int32).alias("_lat_bin"),
+        (pl.col("lon") * 100).round().cast(pl.Int32).alias("_lon_bin")
+    ]).with_columns(
+        pl.concat_str([pl.col("_lat_bin"), pl.col("_lon_bin")], separator="_").alias("_grid_id")
+    )
+    
+    # Sample from each grid cell
+    df_with_rownum = df_with_grid.with_columns(
+        pl.int_range(pl.len()).over("_grid_id").alias("_local_idx")
+    )
+    
+    # Take samples from each grid cell
+    sampled_df = df_with_rownum.filter(
+        pl.col("_local_idx") < samples_per_location
+    ).drop(["_lat_bin", "_lon_bin", "_grid_id", "_local_idx"])
+    
+    # If we still have too many samples, randomly sample from the result
+    if len(sampled_df) > max_samples_per_file:
+        sampled_df = sampled_df.sample(n=max_samples_per_file, seed=seed)
+    
+    return sampled_df
+
+
+def _standard_stratified_sample(
+    df: pl.DataFrame,
+    location_cols: List[str],
+    samples_per_location: int,
+    seed: int
+) -> pl.DataFrame:
+    """
+    Standard stratified sampling for smaller datasets.
+    """
+    # Create a location identifier column
+    df_with_location_id = df.with_row_index("_row_index").with_columns(
+        pl.concat_str([pl.col(col) for col in location_cols], separator="_").alias("_location_id")
+    )
+    
+    # Sample from each location using a more reliable approach
+    sampled_dfs = []
+    for location_id in df_with_location_id["_location_id"].unique():
+        location_data = df_with_location_id.filter(pl.col("_location_id") == location_id)
+        if len(location_data) > samples_per_location:
+            sampled_location = location_data.sample(n=samples_per_location, seed=seed)
+        else:
+            sampled_location = location_data
+        sampled_dfs.append(sampled_location)
+    
+    # Combine all sampled data
+    if sampled_dfs:
+        sampled_df = pl.concat(sampled_dfs).drop(["_row_index", "_location_id"])
+    else:
+        sampled_df = df
+    
+    return sampled_df
+
+
+def random_sample_within_file(
+    df: pl.DataFrame,
+    max_samples_per_file: int = 10000,
+    seed: int = 42
+) -> pl.DataFrame:
+    """
+    Simple random sampling within a file.
+    
+    Args:
+        df: Input DataFrame
+        max_samples_per_file: Maximum samples to keep
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Randomly sampled DataFrame
+    """
+    if len(df) <= max_samples_per_file:
+        return df
+    
+    return df.sample(n=max_samples_per_file, seed=seed)
+
+
+def temporal_sample_within_file(
+    df: pl.DataFrame,
+    max_samples_per_file: int = 10000,
+    time_col: str = "time",
+    samples_per_hour: int = 100,
+    seed: int = 42
+) -> pl.DataFrame:
+    """
+    Temporal sampling to ensure diversity across time periods.
+    
+    Args:
+        df: Input DataFrame
+        max_samples_per_file: Maximum samples to keep
+        time_col: Name of the time column
+        samples_per_hour: Number of samples per hour
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Temporally sampled DataFrame
+    """
+    if len(df) <= max_samples_per_file:
+        return df
+    
+    # Extract hour from time column
+    df_with_hour = df.with_columns(
+        pl.col(time_col).dt.hour().alias("hour")
+    )
+    
+    # Sample from each hour using a more reliable approach
+    sampled_dfs = []
+    for hour in df_with_hour["hour"].unique():
+        hour_data = df_with_hour.filter(pl.col("hour") == hour)
+        if len(hour_data) > samples_per_hour:
+            sampled_hour = hour_data.sample(n=samples_per_hour, seed=seed)
+        else:
+            sampled_hour = hour_data
+        sampled_dfs.append(sampled_hour)
+    
+    # Combine all sampled data
+    if sampled_dfs:
+        sampled_df = pl.concat(sampled_dfs).drop("hour")
+    else:
+        sampled_df = df
+    
+    # If still too many samples, randomly sample from the result
+    if len(sampled_df) > max_samples_per_file:
+        sampled_df = sampled_df.sample(n=max_samples_per_file, seed=seed)
+    
+    return sampled_df
