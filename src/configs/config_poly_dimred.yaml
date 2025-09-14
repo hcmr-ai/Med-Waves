@@ -22,3 +22,4 @@ feature_block:
   use_dimred: true
   dimred_type: "ipca"
   dimred_components: 64
+  model_type: "sgd"

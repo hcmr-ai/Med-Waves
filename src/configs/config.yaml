@@ -11,15 +11,15 @@ comet_workspace: ioannisgkinis
 
 feature_block:
   base_features: ["vhm0_x", "wspd", "lat", "lon"]
-  # ['time', 'latitude', 'longitude', 'WSPD', 'VHM0', 'VTM02', 'WDIR', 'VMDR', 'corrected_VHM0', 'corrected_VTM02', 'U10', 'V10', 'wave_dir_sin', 'wave_dir_cos', 'timestamp', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm']
   use_poly: false
   poly_degree: 2
-  poly_scope: "subset"   # "subset" | "all"
+  poly_scope: "subset" # "subset" | "all"
   use_selector: false
-  selector_type: "elasticnet"  # "lasso" | "elasticnet"
+  selector_type: "elasticnet" # "lasso" | "elasticnet"
   selector_alpha: 1e-3
   selector_l1_ratio: 0.1
   warmup_days: 7
   use_dimred: false
-  dimred_type: "ipca"     # "ipca" | "tsvd" | "rproj"
+  dimred_type: "ipca" # "ipca" | "tsvd" | "rproj"
   dimred_components: 64
+  model_type: "sgd" # "sgd" | "xgb"

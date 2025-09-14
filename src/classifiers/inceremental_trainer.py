@@ -19,6 +19,8 @@ from src.features.helpers import (
     extract_features_from_parquet,
 )
 
+from src.classifiers.incremental_xgb import XGBIncremental
+
 
 class FeatureSelector:
     """Custom feature selector that preserves indices for streaming application."""
@@ -77,12 +79,29 @@ class IncrementalTrainer:
         self.use_dimred = self.feature_config.get("use_dimred", False)
         self.dimred_type = self.feature_config.get("dimred_type", "ipca")
         self.dimred_components = self.feature_config.get("dimred_components", 64)
+        self.model_type = self.feature_config.get("model_type", "sgd")
 
         # Initialize components
         from sklearn.linear_model import SGDRegressor
         from sklearn.preprocessing import StandardScaler
 
-        self.model = SGDRegressor()
+        if self.model_type == "sgd":
+            self.model = SGDRegressor(
+                loss="huber", epsilon=1.0,
+                penalty="elasticnet", alpha=1e-4, l1_ratio=0.1,
+                learning_rate="invscaling", eta0=0.01, power_t=0.25,
+                random_state=42
+            )
+        elif self.model_type == "xgb":
+            self.model = XGBIncremental(
+                rounds_per_batch=25, # trees added per streamed batch
+                max_depth=8,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                tree_method="hist",
+                max_bin=256,
+            )
         self.scaler = StandardScaler()
         self.poly = None
         self.selector = None
@@ -164,7 +183,7 @@ class IncrementalTrainer:
         available_features = df.columns
         # Filter out target and non-feature columns
         feature_cols = [col for col in available_features
-                       if col not in ["vhm0_y", "time", "lat", "lon"] and not col.startswith("_")]
+                       if col not in ["vhm0_y", "vhm0_x", "corrected_VTM02","time", "lat", "lon"] and not col.startswith("_")]
         return feature_cols
 
     def _prepare_features(self, df: pl.DataFrame, is_warmup: bool = False) -> Tuple[np.ndarray, np.ndarray]:
@@ -178,7 +197,12 @@ class IncrementalTrainer:
             feature_cols = self._get_all_features(df)
 
         X_raw = df.select(feature_cols).to_numpy()
-        y_raw = df["vhm0_y"].to_numpy()
+        # y_raw = df["vhm0_y"].to_numpy()
+        # bias target = observed - simulated
+        y_raw = (df["vhm0_y"] - df["vhm0_x"]).to_numpy()
+        logger.info(f"y_raw shape: {y_raw.shape}")
+        logger.info(f"X_raw shape: {X_raw.shape}")
+        logger.info(f"X_raw columns: {feature_cols}")
 
         # Remove NaN values
         mask = ~np.isnan(X_raw).any(axis=1) & ~np.isnan(y_raw)
@@ -210,10 +234,14 @@ class IncrementalTrainer:
             X_transformed = self.scaler.transform(X_transformed)
 
         # Feature selection
+        # if self.selector is not None:
+        #     if is_warmup:
+        #         X_transformed = self.selector.fit(X_transformed).transform(X_transformed)
+        #         self.feature_counts["after_selection"] = X_transformed.shape[1]
         if self.selector is not None:
             if is_warmup:
-                X_transformed = self.selector.fit(X_transformed).transform(X_transformed)
-                self.feature_counts["after_selection"] = X_transformed.shape[1]
+                # needs y; stash it earlier in warmup (see next diff)
+                X_transformed = self.selector.fit(X_transformed, self._warmup_y).transform(X_transformed)
             else:
                 X_transformed = self.selector.transform(X_transformed)
 
@@ -237,43 +265,37 @@ class IncrementalTrainer:
         logger.info(f"Starting warmup stage with {self.warmup_days} days...")
         logger.info(f"Processing {min(self.warmup_days, len(x_train_files))} files for warmup")
 
-        warmup_data = []
-        warmup_targets = []
-
         # Collect warmup data
+        MAX_WARMUP_ROWS = 1_000_000  # cap ~1M rows to keep RAM sane
+        rows_seen = 0
+        X_accum, y_accum = [], []
         for i in range(min(self.warmup_days, len(x_train_files))):
-            logger.info(f"Processing warmup file {i+1}/{min(self.warmup_days, len(x_train_files))}: {x_train_files[i]}")
-            
-            # Check if we're using parquet files (same file for x and y)
-            if x_train_files[i] == y_train_files[i] and x_train_files[i].endswith('.parquet'):
-                df = extract_features_from_parquet(
-                    x_train_files[i], use_dask=self.use_dask
-                )
-            else:
-                df = extract_features_from_file(
-                    x_train_files[i], y_train_files[i], use_dask=self.use_dask
-                )
-            
-            logger.info(f"Extracted features from file, DataFrame shape: {df.shape}")
+            df = extract_features_from_parquet(x_train_files[i], use_dask=self.use_dask) \
+                if x_train_files[i] == y_train_files[i] and x_train_files[i].endswith('.parquet') \
+                    else extract_features_from_file(x_train_files[i], y_train_files[i], use_dask=self.use_dask)
             X, y = self._prepare_features(df, is_warmup=True)
-            logger.info(f"Prepared features: X shape {X.shape}, y shape {y.shape}")
-            
-            warmup_data.append(X)
-            warmup_targets.append(y)
-
+            if X.size == 0: 
+                continue
+            take = min(MAX_WARMUP_ROWS - rows_seen, X.shape[0])
+            if take <= 0:
+                break
+            X_accum.append(X[:take]); y_accum.append(y[:take])
+            rows_seen += take
         # Combine warmup data
-        X_warmup = np.vstack(warmup_data)
+        X_warmup = np.vstack(X_accum)
+        self._warmup_y = np.concatenate(y_accum)
+
         # y_warmup = np.concatenate(warmup_targets)
 
         logger.info(f"Combined warmup data shape: {X_warmup.shape}")
         logger.info(f"Warmup data statistics - min: {X_warmup.min():.4f}, max: {X_warmup.max():.4f}, mean: {X_warmup.mean():.4f}")
 
-        # Apply transforms and fit them
+        # Fit poly & scaler on the warmup slice
         logger.info("Applying and fitting transforms...")
         X_transformed = self._apply_transforms(X_warmup, is_warmup=True)
         logger.info(f"Transformed warmup data shape: {X_transformed.shape}")
 
-        # Special handling for IncrementalPCA
+        # IPCA supports streaming; do a single fit here and transform
         if self.dimred is not None and self.dimred_type == "ipca":
             logger.info("Fitting IncrementalPCA on warmup data...")
             # Fit IncrementalPCA on warmup data
@@ -342,44 +364,17 @@ class IncrementalTrainer:
         logger.info("Starting training stage...")
         total_batches = (len(x_train_files) + self.batch_size - 1) // self.batch_size
         logger.info(f"Total batches to process: {total_batches}")
-        
+
         for i in tqdm(range(0, len(x_train_files), self.batch_size)):
-            batch_num = i // self.batch_size + 1
-            logger.info(f"Processing batch {batch_num}/{total_batches}")
-            
-            batch_dfs = []
             for j in range(i, min(i + self.batch_size, len(x_train_files))):
-                logger.debug(f"Loading file {j+1}/{len(x_train_files)}: {x_train_files[j]}")
-                
-                # Check if we're using parquet files (same file for x and y)
-                if x_train_files[j] == y_train_files[j] and x_train_files[j].endswith('.parquet'):
-                    df = extract_features_from_parquet(
-                        x_train_files[j], use_dask=self.use_dask
-                    )
-                else:
-                    df = extract_features_from_file(
-                        x_train_files[j], y_train_files[j], use_dask=self.use_dask
-                    )
-                batch_dfs.append(df)
-
-            batch = pl.concat(batch_dfs)
-            logger.info(f"Batch {batch_num} combined DataFrame shape: {batch.shape}")
-            
-            X, y = self._prepare_features(batch, is_warmup=False)
-            logger.info(f"Batch {batch_num} prepared features: X shape {X.shape}, y shape {y.shape}")
-
-            if len(X) == 0:
-                logger.warning(f"Batch {batch_num} has no valid data, skipping...")
-                continue
-
-            # Apply frozen transforms
+                df = extract_features_from_parquet(x_train_files[j], use_dask=self.use_dask) \
+                    if x_train_files[j] == y_train_files[j] and x_train_files[j].endswith('.parquet') \
+                        else extract_features_from_file(x_train_files[j], y_train_files[j], use_dask=self.use_dask)
+                X, y = self._prepare_features(df, is_warmup=False)
+                if len(X) == 0:
+                    continue
             X_transformed = self._apply_transforms(X, is_warmup=False)
-            logger.debug(f"Batch {batch_num} transformed features shape: {X_transformed.shape}")
-
-            # Train model
             self.model.partial_fit(X_transformed, y)
-            logger.debug(f"Batch {batch_num} model updated")
-
             if self.log_batch_metrics:
                 y_pred = self._predict_batch(X)
                 metrics = evaluate_model(y_pred, y)
@@ -399,30 +394,27 @@ class IncrementalTrainer:
 
     def evaluate(self, x_test_files: List[str], y_test_files: List[str]):
         """Evaluate model on test data."""
-        print("Starting evaluation...")
-        test_dfs = []
+        logger.info("Starting evaluation...")
+
+        # metrics = evaluate_model(y_pred, y)
+        n, se, ae = 0, 0.0, 0.0
         for x_f, y_f in zip(x_test_files, y_test_files, strict=False):
-            # Check if we're using parquet files (same file for x and y)
-            if x_f == y_f and x_f.endswith('.parquet'):
-                df = extract_features_from_parquet(x_f, use_dask=self.use_dask)
-            else:
-                df = extract_features_from_file(x_f, y_f, use_dask=self.use_dask)
-            test_dfs.append(df)
-
-        test_batch = pl.concat(test_dfs)
-        X, y = self._prepare_features(test_batch, is_warmup=False)
-
-        if len(X) == 0:
-            print("No valid test data found!")
-            return
-
+            df = extract_features_from_parquet(x_f, use_dask=self.use_dask) \
+                if x_f == y_f and x_f.endswith('.parquet') \
+                    else extract_features_from_file(x_f, y_f, use_dask=self.use_dask)
+            X, y = self._prepare_features(df, is_warmup=False)
+            if len(X) == 0:
+                continue
         y_pred = self._predict_batch(X)
+        n += len(y); se += np.sum((y - y_pred) ** 2); ae += np.sum(np.abs(y - y_pred))
+        if n == 0:
+            logger.info("No valid test data found!"); return
+        rmse, mae = np.sqrt(se / n), ae / n
+        metrics = {"rmse": rmse, "mae": mae}
 
-        metrics = evaluate_model(y_pred, y)
-
-        print("\nFinal Evaluation:")
+        logger.info("\nFinal Evaluation:")
         for k, v in metrics.items():
-            print(f"{k.upper()}: {v}")
+            logger.info(f"{k.upper()}: {v}")
             if self.experiment:
                 self.experiment.log_metric(f"eval_{k.upper()}", v)
 
