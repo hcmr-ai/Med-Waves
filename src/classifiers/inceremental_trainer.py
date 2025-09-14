@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 from comet_ml import Experiment
 from tqdm import tqdm
+from datetime import datetime
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -119,7 +120,7 @@ class IncrementalTrainer:
         if config.get("use_comet", False):
             # Generate run name based on config
             run_name = self._generate_run_name()
-
+            run_name = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{run_name}"
             experiment = Experiment(
                 api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
                 project_name=config["comet_project"],
@@ -127,6 +128,7 @@ class IncrementalTrainer:
                 experiment_name=run_name
             )
             experiment.log_parameters(config)
+            experiment.set_name(run_name)
             self.experiment = experiment
 
     def _generate_run_name(self) -> str:
@@ -234,10 +236,6 @@ class IncrementalTrainer:
             X_transformed = self.scaler.transform(X_transformed)
 
         # Feature selection
-        # if self.selector is not None:
-        #     if is_warmup:
-        #         X_transformed = self.selector.fit(X_transformed).transform(X_transformed)
-        #         self.feature_counts["after_selection"] = X_transformed.shape[1]
         if self.selector is not None:
             if is_warmup:
                 # needs y; stash it earlier in warmup (see next diff)
@@ -284,8 +282,6 @@ class IncrementalTrainer:
         # Combine warmup data
         X_warmup = np.vstack(X_accum)
         self._warmup_y = np.concatenate(y_accum)
-
-        # y_warmup = np.concatenate(warmup_targets)
 
         logger.info(f"Combined warmup data shape: {X_warmup.shape}")
         logger.info(f"Warmup data statistics - min: {X_warmup.min():.4f}, max: {X_warmup.max():.4f}, mean: {X_warmup.mean():.4f}")
@@ -365,27 +361,49 @@ class IncrementalTrainer:
         total_batches = (len(x_train_files) + self.batch_size - 1) // self.batch_size
         logger.info(f"Total batches to process: {total_batches}")
 
-        for i in tqdm(range(0, len(x_train_files), self.batch_size)):
-            for j in range(i, min(i + self.batch_size, len(x_train_files))):
-                df = extract_features_from_parquet(x_train_files[j], use_dask=self.use_dask) \
-                    if x_train_files[j] == y_train_files[j] and x_train_files[j].endswith('.parquet') \
-                        else extract_features_from_file(x_train_files[j], y_train_files[j], use_dask=self.use_dask)
-                X, y = self._prepare_features(df, is_warmup=False)
-                if len(X) == 0:
+        for batch_idx in tqdm(range(0, len(x_train_files), self.batch_size), desc="Batches"):
+            start = batch_idx
+            end   = min(batch_idx + self.batch_size, len(x_train_files))
+            X_parts, y_parts = [], []
+
+            for j in range(start, end):
+                # load one file (x==y parquet or paired)
+                if x_train_files[j] == y_train_files[j] and x_train_files[j].endswith(".parquet"):
+                    df = extract_features_from_parquet(x_train_files[j], use_dask=self.use_dask)
+                else:
+                    df = extract_features_from_file(x_train_files[j], y_train_files[j], use_dask=self.use_dask)
+
+                X_j, y_j = self._prepare_features(df, is_warmup=False)
+                if X_j.size == 0:
                     continue
-            X_transformed = self._apply_transforms(X, is_warmup=False)
-            self.model.partial_fit(X_transformed, y)
+
+                # transform NOW to avoid holding large polars frames
+                X_j = self._apply_transforms(X_j, is_warmup=False)
+                X_parts.append(X_j)
+                y_parts.append(y_j)
+
+            if not X_parts:
+                continue
+
+            # true batch = concat transformed chunks
+            X_batch = np.vstack(X_parts)
+            y_batch = np.concatenate(y_parts)
+
+            self.model.partial_fit(X_batch, y_batch)
             if self.log_batch_metrics:
-                y_pred = self._predict_batch(X)
-                metrics = evaluate_model(y_pred, y)
-                print(f"Batch {i // self.batch_size + 1} Metrics:")
-                for k, v in metrics.items():
-                    print(f"{k.upper()}: {v}")
-                    if self.experiment:
-                        self.experiment.log_metric(f"train_{k.upper()}", v, step=i)
+                # we already have transformed X; predict directly
+                y_pred = self.model.predict(X_batch)
+                metrics = evaluate_model(y_pred, y_batch)
+                logger.info(f"Batch {(batch_idx // self.batch_size) + 1}/{total_batches} Metrics: " +
+                            ", ".join([f"{k.upper()}={v:.5f}" for k, v in metrics.items()]))
+                if self.experiment:
+                    for k, v in metrics.items():
+                        self.experiment.log_metric(f"train_{k.upper()}", v, step=batch_idx)
 
             if self.save_model:
                 self._save_artifacts()
+            
+            del X_parts, y_parts, X_batch, y_batch
 
     def _predict_batch(self, X: np.ndarray) -> np.ndarray:
         """Predict on a batch of data."""
@@ -393,35 +411,145 @@ class IncrementalTrainer:
         return self.model.predict(X_transformed)
 
     def evaluate(self, x_test_files: List[str], y_test_files: List[str]):
-        """Evaluate model on test data."""
+        """Evaluate model on test data with both per-file and aggregate metrics."""
         logger.info("Starting evaluation...")
-
-        # metrics = evaluate_model(y_pred, y)
-        n, se, ae = 0, 0.0, 0.0
-        for x_f, y_f in zip(x_test_files, y_test_files, strict=False):
+        
+        # Initialize running statistics for aggregate metrics
+        n_total = 0
+        sum_y_true = 0.0
+        sum_y_pred = 0.0
+        sum_y_true_sq = 0.0
+        sum_y_pred_sq = 0.0
+        sum_y_true_y_pred = 0.0
+        sum_abs_error = 0.0
+        
+        per_file_metrics = []
+        
+        for i, (x_f, y_f) in enumerate(zip(x_test_files, y_test_files, strict=False)):
+            # Load and prepare data
             df = extract_features_from_parquet(x_f, use_dask=self.use_dask) \
                 if x_f == y_f and x_f.endswith('.parquet') \
                     else extract_features_from_file(x_f, y_f, use_dask=self.use_dask)
             X, y = self._prepare_features(df, is_warmup=False)
             if len(X) == 0:
                 continue
-        y_pred = self._predict_batch(X)
-        n += len(y); se += np.sum((y - y_pred) ** 2); ae += np.sum(np.abs(y - y_pred))
-        if n == 0:
-            logger.info("No valid test data found!"); return
-        rmse, mae = np.sqrt(se / n), ae / n
-        metrics = {"rmse": rmse, "mae": mae}
-
-        logger.info("\nFinal Evaluation:")
-        for k, v in metrics.items():
-            logger.info(f"{k.upper()}: {v}")
-            if self.experiment:
-                self.experiment.log_metric(f"eval_{k.upper()}", v)
-
-        fig = plot_residual_distribution(y, y_pred, "residual_distribution")
-
+                
+            # Predict
+            y_pred = self._predict_batch(X)
+            
+            # Calculate per-file metrics using evaluate_model
+            file_metrics = evaluate_model(y_pred, y)
+            file_name = os.path.basename(x_f)
+            
+            # Store per-file results
+            per_file_metrics.append({
+                'file': file_name,
+                'samples': len(y),
+                **file_metrics  # Unpack rmse, mae, bias, pearson
+            })
+            
+            # Update running statistics for aggregate metrics
+            n_total += len(y)
+            sum_y_true += np.sum(y)
+            sum_y_pred += np.sum(y_pred)
+            sum_y_true_sq += np.sum(y**2)
+            sum_y_pred_sq += np.sum(y_pred**2)
+            sum_y_true_y_pred += np.sum(y * y_pred)
+            sum_abs_error += np.sum(np.abs(y - y_pred))
+            
+            # Log per-file metrics
+            logger.info(f"File {i+1}/{len(x_test_files)} ({file_name}): "
+                       f"RMSE={file_metrics['rmse']:.5f}, MAE={file_metrics['mae']:.5f}, "
+                       f"Bias={file_metrics['bias']:.5f}, Pearson={file_metrics['pearson']:.5f}, "
+                       f"Samples={len(y)}")
+        
+        if n_total == 0:
+            logger.info("No valid test data found!")
+            return
+        
+        # Calculate aggregate metrics from running statistics
+        mean_y_true = sum_y_true / n_total
+        mean_y_pred = sum_y_pred / n_total
+        
+        # Calculate aggregate RMSE
+        mse = (sum_y_true_sq - 2 * sum_y_true_y_pred + sum_y_pred_sq) / n_total
+        aggregate_rmse = np.sqrt(mse)
+        
+        # Calculate aggregate MAE
+        aggregate_mae = sum_abs_error / n_total
+        
+        # Calculate aggregate bias
+        aggregate_bias = mean_y_pred - mean_y_true
+        
+        # Calculate aggregate Pearson correlation
+        numerator = sum_y_true_y_pred - n_total * mean_y_true * mean_y_pred
+        denominator = np.sqrt((sum_y_true_sq - n_total * mean_y_true**2) * 
+                             (sum_y_pred_sq - n_total * mean_y_pred**2))
+        aggregate_pearson = numerator / denominator if denominator != 0 else 0.0
+        
+        aggregate_metrics = {
+            "rmse": aggregate_rmse,
+            "mae": aggregate_mae,
+            "bias": aggregate_bias,
+            "pearson": aggregate_pearson
+        }
+        
+        # Log aggregate results
+        logger.info("\n" + "="*60)
+        logger.info("AGGREGATE EVALUATION RESULTS:")
+        logger.info("="*60)
+        for k, v in aggregate_metrics.items():
+            logger.info(f"{k.upper()}: {v:.6f}")
+            # if self.experiment:
+            #     self.experiment.log_metric(f"eval_{k.upper()}", v)
+        
+        # Log per-file statistics
+        logger.info("\n" + "="*60)
+        logger.info("PER-FILE STATISTICS:")
+        logger.info("="*60)
+        
+        metrics_to_analyze = ['rmse', 'mae', 'bias', 'pearson']
+        for metric in metrics_to_analyze:
+            values = [m[metric] for m in per_file_metrics]
+            logger.info(f"{metric.upper()} - Mean: {np.mean(values):.6f}, "
+                    f"Std: {np.std(values):.6f}, "
+                    f"Min: {np.min(values):.6f}, Max: {np.max(values):.6f}")
+        
+        # Log worst performing files (by RMSE)
+        worst_rmse_files = sorted(per_file_metrics, key=lambda x: x['rmse'], reverse=True)[:3]
+        logger.info(f"\nWorst RMSE files:")
+        for i, file_metric in enumerate(worst_rmse_files, 1):
+            logger.info(f"  {i}. {file_metric['file']}: RMSE={file_metric['rmse']:.6f}")
+        
+        # Log to Comet ML
         if self.experiment:
-            self.experiment.log_figure(figure=fig, figure_name="residual_distribution")
+            # Aggregate metrics
+            for k, v in aggregate_metrics.items():
+                self.experiment.log_metric(f"eval_{k.upper()}", v)
+            
+            # Per-file statistics
+            for metric in metrics_to_analyze:
+                values = [m[metric] for m in per_file_metrics]
+                self.experiment.log_metric(f"eval_{metric}_std", np.std(values))
+            
+            # Log per-file metrics as a table
+            import pandas as pd
+            df_metrics = pd.DataFrame(per_file_metrics)
+            self.experiment.log_table("per_file_metrics.csv", df_metrics)
+        
+        # Generate visualizations using sampled data
+        self._create_diagnostic_plots_sampled(per_file_metrics, x_test_files, y_test_files)
+        
+        return {
+            'aggregate': aggregate_metrics,
+            'per_file': per_file_metrics,
+            'statistics': {
+                metric: {
+                    'mean': np.mean([m[metric] for m in per_file_metrics]),
+                    'std': np.std([m[metric] for m in per_file_metrics])
+                } for metric in metrics_to_analyze
+            }
+        }
 
     def _save_artifacts(self):
         """Save all pipeline artifacts."""
@@ -447,4 +575,145 @@ class IncrementalTrainer:
             joblib.dump(self.dimred, os.path.join(base_path, "dimred.joblib"))
 
         # Save model
-        joblib.dump(self.model, self.save_path)
+        if hasattr(self.model, "save"):
+            self.model.save(self.save_path if self.save_path.endswith(".json") else self.save_path + ".json")
+        else:
+            joblib.dump(self.model, self.save_path)
+
+    def _create_diagnostic_plots_sampled(self, per_file_metrics, x_test_files, y_test_files):
+        """Create diagnostic plots using sampled data from a few files."""
+
+        # Sample a few files for plotting (e.g., best, worst, and middle performance)
+        sorted_files = sorted(per_file_metrics, key=lambda x: x['rmse'])
+        sample_files = [
+            sorted_files[0],  # Best
+            sorted_files[len(sorted_files)//2],  # Middle
+            sorted_files[-1]   # Worst
+        ]
+        
+        logger.info(f"Creating diagnostic plots using sample files: {[f['file'] for f in sample_files]}")
+        
+        # Collect sample data
+        sample_y_true, sample_y_pred = [], []
+        
+        for file_metric in sample_files:
+            file_name = file_metric['file']
+            # Find the corresponding file path
+            file_path = next((f for f in x_test_files if f.endswith(file_name)), None)
+            if file_path is None:
+                continue
+                
+            # Load and process the file
+            df = extract_features_from_parquet(file_path, use_dask=self.use_dask)
+            X, y = self._prepare_features(df, is_warmup=False)
+            if len(X) == 0:
+                continue
+                
+            y_pred = self._predict_batch(X)
+            
+            # Sample from this file (max 10k points per file)
+            max_points_per_file = 10000
+            if len(y) > max_points_per_file:
+                indices = np.random.choice(len(y), max_points_per_file, replace=False)
+                sample_y_true.extend(y[indices])
+                sample_y_pred.extend(y_pred[indices])
+            else:
+                sample_y_true.extend(y)
+                sample_y_pred.extend(y_pred)
+        
+        if not sample_y_true:
+            logger.warning("No sample data available for diagnostic plots")
+            return
+        
+        sample_y_true = np.array(sample_y_true)
+        sample_y_pred = np.array(sample_y_pred)
+        
+        # Create a figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle('Model Diagnostic Plots (Sampled Data)', fontsize=16)
+        
+        # 1. Predictions vs Actual (Scatter Plot)
+        ax1 = axes[0, 0]
+        ax1.scatter(sample_y_true, sample_y_pred, alpha=0.3, s=0.5, color='blue')
+        
+        # Add perfect prediction line
+        min_val = min(sample_y_true.min(), sample_y_pred.min())
+        max_val = max(sample_y_true.max(), sample_y_pred.max())
+        ax1.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+        
+        # Add trend line
+        z = np.polyfit(sample_y_true, sample_y_pred, 1)
+        p = np.poly1d(z)
+        ax1.plot(sample_y_true, p(sample_y_true), "g--", alpha=0.8, linewidth=2, label=f'Trend Line (slope={z[0]:.3f})')
+        
+        ax1.set_xlabel('Actual Values')
+        ax1.set_ylabel('Predicted Values')
+        ax1.set_title('Predictions vs Actual Values')
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Residuals vs Predicted
+        ax2 = axes[0, 1]
+        residuals_plot = sample_y_pred - sample_y_true
+        ax2.scatter(sample_y_pred, residuals_plot, alpha=0.3, s=0.5, color='green')
+        ax2.axhline(y=0, color='r', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Predicted Values')
+        ax2.set_ylabel('Residuals (Predicted - Actual)')
+        ax2.set_title('Residuals vs Predicted Values')
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Distribution Comparison
+        ax3 = axes[1, 0]
+        ax3.hist(sample_y_true, bins=50, alpha=0.7, label='Actual', density=True, color='blue')
+        ax3.hist(sample_y_pred, bins=50, alpha=0.7, label='Predicted', density=True, color='red')
+        ax3.set_xlabel('Values')
+        ax3.set_ylabel('Density')
+        ax3.set_title('Distribution Comparison')
+        ax3.legend(loc='upper right')
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Statistics Summary
+        ax4 = axes[1, 1]
+        ax4.axis('off')
+        
+        # Calculate statistics using sampled data
+        stats_text = f"""
+        STATISTICS SUMMARY (Sampled):
+        
+        Actual Values:
+        • Mean: {sample_y_true.mean():.6f}
+        • Std:  {sample_y_true.std():.6f}
+        • Min:  {sample_y_true.min():.6f}
+        • Max:  {sample_y_true.max():.6f}
+        
+        Predicted Values:
+        • Mean: {sample_y_pred.mean():.6f}
+        • Std:  {sample_y_pred.std():.6f}
+        • Min:  {sample_y_pred.min():.6f}
+        • Max:  {sample_y_pred.max():.6f}
+        
+        Model Performance:
+        • RMSE: {np.sqrt(np.mean((sample_y_true - sample_y_pred)**2)):.6f}
+        • MAE:  {np.mean(np.abs(sample_y_true - sample_y_pred)):.6f}
+        • Bias: {np.mean(sample_y_pred - sample_y_true):.6f}
+        • Pearson: {np.corrcoef(sample_y_true, sample_y_pred)[0,1]:.6f}
+        
+        Sample Size: {len(sample_y_true):,}
+        Files Used: {len(sample_files)}
+        """
+        
+        ax4.text(0.1, 0.9, stats_text, transform=ax4.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        # Log to Comet ML
+        if self.experiment:
+            self.experiment.log_figure(figure=fig, figure_name="diagnostic_plots")
+        
+        # Also save locally
+        plt.savefig('diagnostic_plots.png', dpi=300, bbox_inches='tight')
+        logger.info("Diagnostic plots saved as 'diagnostic_plots.png'")
+        
+        plt.close()

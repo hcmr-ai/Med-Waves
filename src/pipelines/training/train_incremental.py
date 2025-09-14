@@ -10,8 +10,8 @@ Usage:
     python src/pipelines/training/train_incremental.py --config config_poly_dimred
 
     # Debug runs (quick testing with minimal data)
-    python src/pipelines/training/train_incremental.py --config config_baseline_sgd --debug
-    python src/pipelines/training/train_incremental.py --config config_poly_lite --debug --debug-train-days 2 --debug-test-days 1
+    python src/pipelines/training/train_incremental.py --config config_debug --debug
+    python src/pipelines/training/train_incremental.py --config config_debug --debug --debug-train-days 2 --debug-test-days 1
 
     # S3 runs
     python src/pipelines/training/train_incremental.py --config config_baseline_sgd --s3-bucket medwav-dev-data --s3-prefix parquet/hourly
@@ -38,8 +38,8 @@ logging.basicConfig(
 )
 
 # Add project root to path
-# project_root = Path(__file__).parent.parent.parent.parent
-# sys.path.insert(0, str(project_root))
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
 from src.classifiers.inceremental_trainer import IncrementalTrainer
 from src.commons.aws.utils import list_s3_parquet_files
 from src.data_engineering.split import time_based_split
@@ -159,7 +159,7 @@ def main():
     x_train, y_train, x_test, y_test = time_based_split(
         data_files, data_files,
         train_end_year=2021,
-        test_start_year=2022,
+        test_start_year=2023,
         debug_mode=args.debug,
         debug_train_days=args.debug_train_days,
         debug_test_days=args.debug_test_days
@@ -167,6 +167,8 @@ def main():
 
     logger.info(f"Training files: {len(x_train)}")
     logger.info(f"Test files: {len(x_test)}")
+    logger.info(f"Training files: {x_train}")
+    logger.info(f"Test files: {x_test}")
 
     # Run experiment
     logger.info("Starting training and evaluation...")
@@ -174,8 +176,8 @@ def main():
         trainer.train(x_train, y_train)
         logger.info("Training completed successfully!")
         
-        # trainer.evaluate(x_test, y_test)
-        # logger.info("Evaluation completed successfully!")
+        trainer.evaluate(x_test, y_test)
+        logger.info("Evaluation completed successfully!")
         
         logger.info("="*60)
         logger.info("EXPERIMENT COMPLETED SUCCESSFULLY!")
