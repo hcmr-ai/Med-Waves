@@ -89,15 +89,37 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
     # Build feature selection list
     feature_columns = []
     
+    # Debug: Log the actual columns we have
+    logger.info(f"DataFrame columns: {df.columns}")
+
+    # Convert columns to list for more reliable checking
+    columns_list = list(df.columns)
+    logger.info(f"Columns as list: {columns_list}")
+    logger.info(f"Checking 'vhm0_x' in list: {'vhm0_x' in columns_list}")
+    
+    # Check if this is already processed data (has vhm0_x, etc.) or raw data (has VHM0, etc.)
+    if "vhm0_x" in columns_list:
+        # This is already processed data - use columns as-is
+        logger.info("Detected pre-processed data, using columns as-is")
+        # Just return the DataFrame as-is since it's already processed
+        return df
+    
+    # This is raw data - need to process it
+    logger.info("Detected raw data, processing columns")
+    
     # Add base features
     if "VHM0" in df.columns:
         feature_columns.append(pl.col("VHM0").alias("vhm0_x"))
     if "WSPD" in df.columns:
         feature_columns.append(pl.col("WSPD").alias("wspd"))
+    
+    # Handle latitude column (try both possible names)
     if "latitude" in df.columns:
         feature_columns.append(pl.col("latitude").alias("lat"))
     elif "lat" in df.columns:
         feature_columns.append(pl.col("lat"))
+    
+    # Handle longitude column (try both possible names)
     if "longitude" in df.columns:
         feature_columns.append(pl.col("longitude").alias("lon"))
     elif "lon" in df.columns:
