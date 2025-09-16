@@ -107,16 +107,18 @@ class IncrementalTrainer:
             )
         elif self.model_type == "xgb":
             self.model = XGBIncremental(
-                rounds_per_batch=50, # trees added per streamed batch (increased)
+                rounds_per_batch=25, # trees added per streamed batch (increased)
                 max_depth=6,         # increased depth for more complex patterns
-                learning_rate=0.1,   # increased learning rate
+                learning_rate=0.08,   # increased learning rate
                 subsample=0.9,       # increased subsample
-                colsample_bytree=0.9, # increased column sampling
+                colsample_bytree=0.8, # increased column sampling
                 tree_method="hist",
                 max_bin=256,
-                min_child_weight=1,  # reduced from 10 to allow more splits
-                reg_alpha=0.01,      # reduced L1 regularization
-                reg_lambda=0.1       # reduced L2 regularization
+                min_child_weight=2,
+                reg_alpha=0.01,      # L1 regularization
+                reg_lambda=0.1,       # L2 regularization
+                objective="reg:squarederror",
+                eval_metric="rmse",
             )
         self.scaler = StandardScaler()
         self.poly = None
@@ -200,7 +202,7 @@ class IncrementalTrainer:
         available_features = df.columns
         # Filter out target and non-feature columns
         feature_cols = [col for col in available_features
-                       if col not in ["vhm0_y", "vhm0_x", "corrected_VTM02","time", "lat", "lon"] and not col.startswith("_")]
+                       if col not in ["vhm0_y", "corrected_VTM02","time", "lat", "lon"] and not col.startswith("_")]
         return feature_cols
 
     def _apply_sampling(self, df: pl.DataFrame, is_warmup: bool = False) -> pl.DataFrame:
@@ -260,7 +262,8 @@ class IncrementalTrainer:
         X_raw = df.select(feature_cols).to_numpy()
         # y_raw = df["vhm0_y"].to_numpy()
         # bias target = observed - simulated
-        y_raw = (df["vhm0_y"] - df["vhm0_x"]).to_numpy()
+        # y_raw = (df["vhm0_y"] - df["vhm0_x"]).to_numpy()
+        y_raw = df["vhm0_y"].to_numpy()
         logger.info(f"y_raw shape: {y_raw.shape}")
         logger.info(f"X_raw shape: {X_raw.shape}")
         logger.info(f"X_raw columns: {feature_cols}")
