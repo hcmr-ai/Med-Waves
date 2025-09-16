@@ -144,8 +144,27 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
         "model_config": config["model"],
         "data_config": config["data"]
     }
-    # Save results
+    
+    # Save results locally
     save_results(results, save_path, trainer.experiment_logger.experiment)
+    
+    # Save results to S3 if enabled
+    s3_config = config["output"].get("s3", {})
+    if s3_config.get("enabled", False):
+        logger.info("Saving results to S3...")
+        plots_dir = config.get("diagnostics", {}).get("plots_save_path", "diagnostic_plots")
+        s3_upload_results = trainer.save_results_to_s3(results, model_save_path, plots_dir)
+        
+        # Log S3 URLs
+        if s3_upload_results:
+            experiment_name = config["output"]["experiment_name"]
+            s3_files = trainer.s3_results_saver.list_experiment_files(experiment_name)
+            logger.info(f"S3 experiment files: {len(s3_files)} files uploaded")
+            for s3_key in s3_files[:5]:  # Show first 5 files
+                s3_url = trainer.s3_results_saver.get_s3_url(s3_key)
+                logger.info(f"  - {s3_url}")
+            if len(s3_files) > 5:
+                logger.info(f"  ... and {len(s3_files) - 5} more files")
 
     # End Comet experiment
     trainer.end_experiment()

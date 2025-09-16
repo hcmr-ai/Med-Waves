@@ -25,6 +25,7 @@ from sklearn.decomposition import PCA, TruncatedSVD
 import xgboost as xgb
 
 from src.commons.memory_monitor import MemoryMonitor
+from src.commons.aws.s3_results_saver import S3ResultsSaver
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class FullDatasetTrainer:
         self.diagnostic_plotter = DiagnosticPlotter(self.config)
         self.experiment_logger = ExperimentLogger(self.config)
         self.memory_monitor = MemoryMonitor(self.config)
+        self.s3_results_saver = S3ResultsSaver(self.config)
         
         # Initialize model
         self._initialize_model()
@@ -1051,6 +1053,54 @@ class FullDatasetTrainer:
             self.training_history = joblib.load(load_path / "training_history.pkl")
         
         logger.info(f"Model and components loaded from {load_path}")
+    
+    def save_results_to_s3(self, results: Dict[str, Any], model_path: str = None, plots_dir: str = None) -> Dict[str, bool]:
+        """
+        Save training results, model, and plots to S3.
+        
+        Args:
+            results: Results dictionary to save
+            model_path: Path to saved model directory
+            plots_dir: Path to diagnostic plots directory
+            
+        Returns:
+            Dictionary with upload status for each component
+        """
+        if not self.s3_results_saver.enabled:
+            logger.warning("S3 saving is disabled. Enable it in config to save results to S3.")
+            return {}
+        
+        experiment_name = self.config.get("output", {}).get("experiment_name", "experiment")
+        upload_results = {}
+        
+        logger.info(f"Saving results to S3 for experiment: {experiment_name}")
+        
+        # Save results JSON
+        logger.info("Uploading results JSON to S3...")
+        upload_results['results_json'] = self.s3_results_saver.save_results_json(results, experiment_name)
+        
+        # Save model artifacts if model path provided
+        if model_path:
+            logger.info("Uploading model artifacts to S3...")
+            model_uploads = self.s3_results_saver.save_model_artifacts(model_path, experiment_name)
+            upload_results['model_artifacts'] = model_uploads
+        
+        # Save diagnostic plots if plots directory provided
+        if plots_dir:
+            logger.info("Uploading diagnostic plots to S3...")
+            plots_uploads = self.s3_results_saver.save_diagnostic_plots(plots_dir, experiment_name)
+            upload_results['diagnostic_plots'] = plots_uploads
+        
+        # Log summary
+        total_uploads = sum(1 for status in upload_results.values() if status)
+        total_attempts = len(upload_results)
+        
+        if total_uploads == total_attempts:
+            logger.info(f"✅ All results successfully uploaded to S3")
+        else:
+            logger.warning(f"⚠️  {total_uploads}/{total_attempts} uploads successful")
+        
+        return upload_results
     
     def end_experiment(self):
         """End the Comet ML experiment."""

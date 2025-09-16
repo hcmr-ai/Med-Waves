@@ -110,3 +110,11 @@ output:
   model_save_path: "trained_models"
   results_save_path: "training_results"
   experiment_name: "full_dataset_experiment"
+
+  # S3 configuration for saving results
+  s3:
+    enabled: false
+    bucket: "your-results-bucket"
+    prefix: "experiments"
+    region: "us-east-1"
+    aws_profile: null # Use default profile if null
