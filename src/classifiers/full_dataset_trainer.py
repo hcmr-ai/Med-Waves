@@ -9,6 +9,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 import glob
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import joblib
 import matplotlib.pyplot as plt
@@ -43,6 +45,75 @@ from src.features.helpers import (
 from src.commons.aws.utils import list_s3_parquet_files
 from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
+
+
+def _load_single_file_worker(args):
+    """
+    Worker function for parallel file loading.
+    This function needs to be at module level for multiprocessing.
+    
+    Args:
+        args: Tuple of (file_path, feature_config)
+        
+    Returns:
+        Tuple of (file_path, df, success_flag)
+    """
+    file_path, feature_config = args
+    
+    try:
+        # Import everything at the top to avoid import issues
+        import sys
+        import os
+        import logging
+        from io import BytesIO
+        
+        # Add the project root to the path to ensure imports work
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        # Now import our modules
+        from src.features.helpers import extract_features_from_parquet
+        from src.data_engineering.split import stratified_sample_by_location, temporal_sample_within_file
+        
+        # Load the file
+        df = extract_features_from_parquet(file_path, use_dask=False)
+        
+        # Apply sampling if configured
+        max_samples = feature_config.get("max_samples_per_file", None)
+        sampling_strategy = feature_config.get("sampling_strategy", "none")
+        
+        if max_samples is not None and sampling_strategy != "none":
+            original_size = len(df)
+            if original_size <= max_samples:
+                pass  # No sampling needed
+            else:
+                sampling_seed = feature_config.get("sampling_seed", 42)
+                
+                if sampling_strategy == "random":
+                    df = df.sample(n=max_samples, seed=sampling_seed)
+                elif sampling_strategy == "per_location":
+                    samples_per_location = feature_config.get("samples_per_location", 20)
+                    # Use correct column names based on data format
+                    location_cols = ["lat", "lon"] if "lat" in df.columns else ["latitude", "longitude"]
+                    df = stratified_sample_by_location(df, max_samples, samples_per_location, location_cols, sampling_seed)
+                elif sampling_strategy == "temporal":
+                    samples_per_hour = feature_config.get("samples_per_hour", 100)
+                    df = temporal_sample_within_file(df, samples_per_hour, sampling_seed)
+                else:
+                    # Default to random sampling
+                    df = df.sample(n=max_samples, seed=sampling_seed)
+        
+        return (file_path, df, True)
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error loading file {file_path}: {e}")
+        import traceback
+        logging.getLogger(__name__).warning(f"Traceback: {traceback.format_exc()}")
+        return (file_path, None, False)
+
+
 
 
 class FullDatasetTrainer:
@@ -260,11 +331,26 @@ class FullDatasetTrainer:
         if isinstance(data_paths, str):
             data_paths = [data_paths]
         
-        # Expand paths to get all individual files
+        # Check if we already have individual files or need to expand directory paths
         all_files = []
+        individual_files_count = 0
+        directory_paths_count = 0
+        
         for path in data_paths:
-            files = self._expand_data_path(path)
-            all_files.extend(files)
+            # If path ends with .parquet, it's already an individual file
+            if path.endswith('.parquet'):
+                all_files.append(path)
+                individual_files_count += 1
+            else:
+                # It's a directory path, need to expand it
+                files = self._expand_data_path(path)
+                all_files.extend(files)
+                directory_paths_count += 1
+        
+        if individual_files_count > 0:
+            logger.info(f"Using {individual_files_count} individual file(s) directly (no S3 listing needed)")
+        if directory_paths_count > 0:
+            logger.info(f"Expanding {directory_paths_count} directory path(s) to find files")
         
         logger.info(f"Loading data from {len(all_files)} files...")
         
@@ -282,33 +368,81 @@ class FullDatasetTrainer:
         else:
             logger.info("No sampling configured - using all available data")
         
+        # Determine number of workers for parallel processing
+        parallel_loading = self.data_config.get("parallel_loading", True)
+        if parallel_loading and len(all_files) > 1:
+            max_workers = min(mp.cpu_count(), len(all_files), 4)  # Reduced to 4 to be more conservative
+            logger.info(f"Attempting parallel loading with {max_workers} workers")
+        else:
+            max_workers = 1
+            logger.info("Using sequential file loading")
+        
         all_dataframes = []
         successful_files = []
         
-        for file_path in tqdm(all_files, desc="Loading files"):
+        if max_workers > 1:
+            # Try parallel processing first
             try:
-                df = extract_features_from_parquet(file_path, use_dask=False)
-                original_size = len(df)
+                # Process files in batches to avoid overwhelming the system
+                batch_size = max_workers * 2  # Process 2x the number of workers at a time
+                logger.info(f"Processing files in batches of {batch_size}")
                 
-                # Apply sampling if configured
-                df = self._apply_sampling(df)
-                
-                if len(df) > 0:
-                    all_dataframes.append(df)
-                    successful_files.append(file_path)
+                for i in tqdm(range(0, len(all_files), batch_size), desc="Processing batches"):
+                    batch_files = all_files[i:i + batch_size]
+                    batch_args = [(file_path, self.feature_config) for file_path in batch_files]
                     
-                    # Log sampling results for first few files
-                    if len(successful_files) <= 3:
-                        final_size = len(df)
-                        if original_size != final_size:
-                            reduction = ((original_size - final_size) / original_size) * 100
-                            logger.info(f"File {len(successful_files)}: {original_size:,} → {final_size:,} samples ({reduction:.1f}% reduction)")
-                        else:
-                            logger.info(f"File {len(successful_files)}: {original_size:,} samples (no sampling)")
-                    
+                    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                        # Submit batch tasks
+                        futures = [executor.submit(_load_single_file_worker, args) for args in batch_args]
+                        
+                        # Collect results
+                        for future in futures:
+                            try:
+                                file_path_result, df, success = future.result(timeout=300)  # 5 minute timeout
+                                
+                                if success and df is not None and len(df) > 0:
+                                    all_dataframes.append(df)
+                                    successful_files.append(file_path_result)
+                                    
+                                    # Log sampling results for first few files
+                                    if len(successful_files) <= 3:
+                                        logger.info(f"File {len(successful_files)}: {len(df):,} samples loaded successfully")
+                                
+                            except Exception as e:
+                                logger.warning(f"Error processing file: {e}")
+                                continue
+                            
             except Exception as e:
-                logger.warning(f"Error loading file {file_path}: {e}")
-                continue
+                logger.warning(f"Parallel processing failed: {e}")
+                logger.info("Falling back to sequential processing...")
+                max_workers = 1  # Force sequential processing
+        
+        if max_workers == 1:
+            # Sequential processing (fallback)
+            for file_path in tqdm(all_files, desc="Loading files"):
+                try:
+                    df = extract_features_from_parquet(file_path, use_dask=False)
+                    original_size = len(df)
+                    
+                    # Apply sampling if configured
+                    df = self._apply_sampling(df)
+                    
+                    if len(df) > 0:
+                        all_dataframes.append(df)
+                        successful_files.append(file_path)
+                        
+                        # Log sampling results for first few files
+                        if len(successful_files) <= 3:
+                            final_size = len(df)
+                            if original_size != final_size:
+                                reduction = ((original_size - final_size) / original_size) * 100
+                                logger.info(f"File {len(successful_files)}: {original_size:,} → {final_size:,} samples ({reduction:.1f}% reduction)")
+                            else:
+                                logger.info(f"File {len(successful_files)}: {original_size:,} samples (no sampling)")
+                        
+                except Exception as e:
+                    logger.warning(f"Error loading file {file_path}: {e}")
+                    continue
         
         if not all_dataframes:
             raise ValueError("No data loaded successfully")
@@ -387,10 +521,19 @@ class FullDatasetTrainer:
         s3_config = self.data_config.get("s3", {})
         aws_profile = s3_config.get("aws_profile", None)
         
-        logger.info(f"Listing S3 files in bucket: {bucket}, prefix: {prefix}")
+        # Get year-based filtering configuration
+        split_config = self.data_config.get("split", {})
+        eval_months = split_config.get("eval_months", None)
+        train_end_year = split_config.get("train_end_year", None)
+        test_start_year = split_config.get("test_start_year", None)
         
-        # List parquet files
-        parquet_files = list_s3_parquet_files(bucket, prefix, aws_profile)
+        logger.info(f"Listing S3 files in bucket: {bucket}, prefix: {prefix}")
+        logger.info(f"Year-based filtering: train_end_year={train_end_year}, test_start_year={test_start_year}")
+        if eval_months:
+            logger.info(f"Month filtering for test years: {eval_months}")
+        
+        # List parquet files with year-aware filtering
+        parquet_files = list_s3_parquet_files(bucket, prefix, aws_profile, eval_months, train_end_year, test_start_year)
         
         logger.info(f"Found {len(parquet_files)} parquet files in S3")
         return parquet_files

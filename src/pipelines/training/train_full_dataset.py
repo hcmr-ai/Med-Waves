@@ -35,26 +35,27 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def get_data_files(data_path: str, file_pattern: str = "*.parquet") -> List[str]:
+def get_data_files(data_path: str, file_pattern: str = "*.parquet", config: Dict[str, Any] = None) -> List[str]:
     """
     Get list of data files to process from local or S3 paths.
     
     Args:
         data_path: Path to data (can be local path or S3 URI)
         file_pattern: File pattern for local directories
+        config: Configuration dictionary for month filtering
         
     Returns:
         List of file paths
     """
     if data_path.startswith('s3://'):
         # Handle S3 URI
-        return get_s3_data_files(data_path)
+        return get_s3_data_files(data_path, config)
     else:
         # Handle local path
         return get_local_data_files(data_path, file_pattern)
 
 
-def get_s3_data_files(s3_uri: str) -> List[str]:
+def get_s3_data_files(s3_uri: str, config: Dict[str, Any] = None) -> List[str]:
     """Get list of parquet files from S3."""
     from src.commons.aws.utils import list_s3_parquet_files
     
@@ -66,10 +67,24 @@ def get_s3_data_files(s3_uri: str) -> List[str]:
         bucket = s3_path
         prefix = ""
     
-    logger.info(f"Listing S3 files in bucket: {bucket}, prefix: {prefix}")
+    # Get year-based filtering configuration
+    filter_months = None
+    train_end_year = None
+    test_start_year = None
+    if config:
+        split_config = config.get("data", {}).get("split", {})
+        filter_months = split_config.get("eval_months", None)
+        train_end_year = split_config.get("train_end_year", None)
+        test_start_year = split_config.get("test_start_year", None)
     
-    # List parquet files
-    parquet_files = list_s3_parquet_files(bucket, prefix)
+    logger.info(f"Listing S3 files in bucket: {bucket}, prefix: {prefix}")
+    logger.info(f"Year-based filtering: train_end_year={train_end_year}, test_start_year={test_start_year}")
+    if filter_months:
+        logger.info(f"Month filtering for test years: {filter_months}")
+    
+    # List parquet files with year-aware filtering
+    parquet_files = list_s3_parquet_files(bucket, prefix, filter_months=filter_months, 
+                                        train_end_year=train_end_year, test_start_year=test_start_year)
     
     logger.info(f"Found {len(parquet_files)} parquet files in S3")
     return parquet_files
@@ -233,7 +248,7 @@ def main():
         config["data"]["s3"]["aws_profile"] = args.aws_profile
     
     # Get data files
-    data_files = get_data_files(config["data"]["data_path"], config["data"]["file_pattern"])
+    data_files = get_data_files(config["data"]["data_path"], config["data"]["file_pattern"], config)
     
     if not data_files:
         raise ValueError(f"No data files found in {args.data_path} with pattern {args.file_pattern}")
