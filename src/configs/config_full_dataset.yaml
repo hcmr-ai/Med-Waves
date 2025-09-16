@@ -1,0 +1,112 @@
+# Full Dataset Trainer Configuration
+# This configuration is optimized for loading all data into memory
+# and training models on the complete dataset for research purposes
+
+# Model configuration
+model:
+  type: "xgb" # Options: xgb, rf, elasticnet, lasso, ridge
+  n_estimators: 2000
+  max_depth: 6
+  learning_rate: 0.08
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_alpha: 0.01
+  reg_lambda: 1.0
+  min_child_weight: 2
+  random_state: 42
+  n_jobs: -1
+  early_stopping_rounds: 50
+  eval_metric: ["rmse", "mae"]
+  objective: "reg:squarederror"
+  tree_method: hist
+  gamma: 0.5
+  max_bin: 256
+  verbose: false
+
+# Data configuration
+data:
+  # Data splitting strategy
+  split:
+    type: "year_based" # Options: random, temporal, stratified, year_based
+    # For year_based split:
+    train_end_year: 2022 # Train data up to this year (exclusive)
+    test_start_year: 2023 # Test data from this year onwards
+    val_months: [8] # Months to use for validation (April 2021)
+    eval_months: [12] # Months to use for evaluation (first 4 months of 2023)
+    # For other split types:
+    test_size: 0.2 # 20% for testing
+    val_size: 0.2 # 20% for validation
+    random_state: 42
+    n_bins: 10 # For stratified splitting
+
+  # Data loading
+  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly" # Can be local path or S3 URI (s3://bucket/prefix)
+  file_pattern: "*.parquet"
+  target_column: "vhm0_y"
+
+  # S3 configuration (only needed if using S3)
+  s3:
+    aws_profile: null # AWS profile name (optional)
+    region: "eu-central-1" # AWS region (optional)
+    max_retries: 10 # Max retries for S3 operations
+
+# Feature engineering configuration
+feature_block:
+  # Sampling (optional - can be disabled for full dataset)
+  max_samples_per_file: 250000 # Set to null to use all data
+  sampling_strategy: "per_location" # Options: none, random, per_location, temporal
+  samples_per_location: 1
+  samples_per_hour: 100
+  sampling_seed: 42
+
+  # Preprocessing
+  scaler: "standard" # Options: standard, robust, minmax
+
+  # Feature selection
+  feature_selection:
+    enabled: false
+    type: "kbest" # Options: kbest, rfe
+    k: 100
+
+  # Dimension reduction
+  dimension_reduction:
+    enabled: false
+    type: "pca" # Options: pca, svd
+    n_components: 50
+
+# Evaluation configuration
+evaluation:
+  metrics: ["rmse", "mae", "bias", "pearson"]
+  save_predictions: true
+  predictions_save_path: "evaluation_results"
+
+# Training diagnostics
+training_diagnostics:
+  enabled: true
+  plots_save_path: "diagnostic_plots"
+  save_training_history: true
+  create_learning_curves: true
+  create_residual_plots: true
+  create_prediction_plots: true
+
+# Logging configuration
+logging:
+  level: "INFO"
+  save_logs: true
+  log_file: "full_dataset_training.log"
+  use_comet: true
+  comet_project: hcmr-ai
+  comet_workspace: ioannisgkinis
+
+# Memory monitoring configuration
+memory_monitoring:
+  enabled: true
+  log_detailed_memory: true
+  log_system_memory: true
+  log_to_comet: true
+
+# Output configuration
+output:
+  model_save_path: "trained_models"
+  results_save_path: "training_results"
+  experiment_name: "full_dataset_experiment"
