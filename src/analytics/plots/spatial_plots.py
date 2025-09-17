@@ -11,6 +11,7 @@ def plot_spatial_feature_map(
     colorbar_label: str,
     s: int = 8,
     alpha: float = 0.85,
+    cmap: str = "viridis",
 ):
     """
     Plot a spatial map of feature values across grid positions.
@@ -18,7 +19,7 @@ def plot_spatial_feature_map(
     Parameters
     ----------
     df_pd : pandas.DataFrame
-        DataFrame with 'latitude', 'longitude', and feature_col columns.
+        DataFrame with 'latitude'/'lat', 'longitude'/'lon', and feature_col columns.
     feature_col : str, default="VHM0"
         Column to use for coloring the points.
     save_path : str, default="outputs/eda/map.png"
@@ -32,26 +33,34 @@ def plot_spatial_feature_map(
     alpha : float, optional
         Marker transparency.
     """
+    # Determine coordinate column names
+    if "latitude" in df_pd.columns and "longitude" in df_pd.columns:
+        lat_col, lon_col = "latitude", "longitude"
+    elif "lat" in df_pd.columns and "lon" in df_pd.columns:
+        lat_col, lon_col = "lat", "lon"
+    else:
+        raise ValueError("DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns")
+    
     plt.figure(figsize=(10, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
     ax.set_title(title)
 
     sc = ax.scatter(
-        df_pd["longitude"],
-        df_pd["latitude"],
+        df_pd[lon_col],
+        df_pd[lat_col],
         c=df_pd[feature_col],
-        cmap="viridis",
+        cmap=cmap,
         s=s,
         alpha=alpha,
         transform=ccrs.PlateCarree(),
     )
     plt.colorbar(sc, ax=ax, orientation="vertical", label=colorbar_label)
     ax.set_extent([
-        df_pd["longitude"].min(),
-        df_pd["longitude"].max(),
-        df_pd["latitude"].min(),
-        df_pd["latitude"].max()
+        df_pd[lon_col].min(),
+        df_pd[lon_col].max(),
+        df_pd[lat_col].min(),
+        df_pd[lat_col].max()
     ], crs=ccrs.PlateCarree())
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
@@ -70,7 +79,7 @@ def plot_spatial_feature_heatmap(
     Plot and save a spatial heatmap of a given statistic for a grid feature.
 
     Args:
-        df (pd.DataFrame): DataFrame with 'longitude', 'latitude', and the statistic column (e.g. 'VHM0_mean').
+        df (pd.DataFrame): DataFrame with 'longitude'/'lon', 'latitude'/'lat', and the statistic column (e.g. 'VHM0_mean').
         feature_col (str): The name of the statistic column to plot (e.g. 'VHM0_mean').
         output_dir (Path): Directory to save the output plot.
         stat_name (str, optional): Name of the statistic for labeling. Defaults to "mean".
@@ -80,12 +89,20 @@ def plot_spatial_feature_heatmap(
     Returns:
         None. Saves the plot as a PNG file.
     """
+    # Determine coordinate column names
+    if "latitude" in df.columns and "longitude" in df.columns:
+        lat_col, lon_col = "latitude", "longitude"
+    elif "lat" in df.columns and "lon" in df.columns:
+        lat_col, lon_col = "lat", "lon"
+    else:
+        raise ValueError("DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns")
+    
     plt.figure(figsize=(12, 9))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
     c = ax.scatter(
-        df["longitude"],
-        df["latitude"],
+        df[lon_col],
+        df[lat_col],
         c=df[feature_col],
         cmap="viridis",
         s=10,

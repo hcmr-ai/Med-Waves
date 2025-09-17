@@ -1,11 +1,11 @@
-data_dir: /data/tsolis/AI_project/parquet/augmented_with_labels/hourly
+data_dir: /Users/deeplab/Documents/projects/hcmr/data/hourly
 batch_size: 1
 use_dask: false
 save_model: true
-save_path: models/global_model.joblib
+save_path: models/debug_model.joblib
 log_batch_metrics: true
 
-use_comet: true
+use_comet: true # Disable Comet for debug runs
 comet_project: hcmr-ai
 comet_workspace: ioannisgkinis
 
@@ -18,7 +18,7 @@ feature_block:
   selector_type: "elasticnet"
   selector_alpha: 1e-3
   selector_l1_ratio: 0.1
-  warmup_days: 7 # Reduced warmup for debug
+  warmup_days: 4 # Reduced warmup for debug
   use_dimred: false
   dimred_type: "ipca"
   dimred_components: 64
@@ -32,13 +32,14 @@ feature_block:
 # Training diagnostics configuration
 training_diagnostics:
   enabled: true
-  validation_split: 0.005 # 20% of training data for validation
-  diagnostic_frequency: 100 # n_batches
-  plot_frequency: 100 # n_batches
-  max_validation_files: 5 # Max files for quick validation
+  validation_split: 0.01 # 20% of training data for validation
+  diagnostic_frequency: 1 # Every 1 batch (for testing)
+  plot_frequency: 1 # Every 1 batch (for testing)
+  max_validation_files: 2 # Max files for quick validation
   save_metrics_to_disk: true
   metrics_save_path: "training_metrics"
   cleanup_old_metrics: true
   max_metrics_history: 1000 # Keep last 1000 batch metrics
   track_feature_importance: true
   feature_importance_frequency: 10 # Every 10 batches
+  quick_validation_samples: 2000 # Samples per file for validation (increased)
