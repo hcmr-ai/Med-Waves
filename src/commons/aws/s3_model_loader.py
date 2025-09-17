@@ -127,9 +127,14 @@ class S3ModelLoader:
     
     def _ensure_local_file(self, file_path: Union[str, Path]) -> Optional[Path]:
         """Ensure file is available locally, downloading from S3 if necessary."""
-        file_path = Path(file_path)
+        # Handle S3 paths properly - don't convert to Path if it's an S3 URL
+        if isinstance(file_path, str) and file_path.startswith('s3://'):
+            file_path_str = file_path
+        else:
+            file_path = Path(file_path)
+            file_path_str = str(file_path)
         
-        if not self._is_s3_path(file_path):
+        if not self._is_s3_path(file_path_str):
             # Local path - check if exists
             if file_path.exists():
                 return file_path
@@ -148,11 +153,13 @@ class S3ModelLoader:
             logger.info(f"Created temporary directory: {self.temp_dir}")
         
         # Create local path in temp directory
-        local_path = self.temp_dir / file_path.name
+        # Extract filename from S3 URI
+        filename = file_path_str.split('/')[-1]
+        local_path = self.temp_dir / filename
         
         # Download if not already cached
         if not local_path.exists():
-            if not self._download_from_s3(str(file_path), local_path):
+            if not self._download_from_s3(file_path_str, local_path):
                 return None
         
         return local_path
@@ -170,7 +177,12 @@ class S3ModelLoader:
         logger.info(f"Loading model from: {model_path}")
         
         components = {}
-        model_path = Path(model_path)
+        # Handle S3 paths properly - don't convert to Path if it's an S3 URL
+        if isinstance(model_path, str) and model_path.startswith('s3://'):
+            model_path_str = model_path
+        else:
+            model_path = Path(model_path)
+            model_path_str = str(model_path)
         
         # Define component files to load
         component_files = {
@@ -184,7 +196,12 @@ class S3ModelLoader:
         
         # Load each component
         for component_name, filename in component_files.items():
-            component_path = model_path / filename
+            if isinstance(model_path, str) and model_path.startswith('s3://'):
+                # For S3 paths, construct the full S3 URI
+                component_path = f"{model_path_str.rstrip('/')}/{filename}"
+            else:
+                # For local paths, use Path operations
+                component_path = model_path / filename
             
             # Ensure file is available locally
             local_path = self._ensure_local_file(component_path)

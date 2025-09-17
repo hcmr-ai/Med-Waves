@@ -74,7 +74,11 @@ class ModelEvaluator:
             output_dir: Directory to save evaluation results
             config: Configuration dictionary (optional)
         """
-        self.model_path = Path(model_path)
+        # Handle S3 paths properly - don't convert to Path if it's an S3 URL
+        if model_path.startswith('s3://'):
+            self.model_path = model_path
+        else:
+            self.model_path = Path(model_path)
         self.output_dir = Path(output_dir)
         self.config = config or {}
         self.metrics_to_plot = self.config.get('evaluation', {}).get('plots', {}).get('metrics_to_plot', ["bias", "mae", "rmse", "pearson", "diff", "var_true", "var_pred", "snr", "snr_db"])
@@ -175,7 +179,7 @@ class ModelEvaluator:
         
         # Check if S3 model loading is enabled and model path is S3
         if (self.s3_model_loader and self.s3_model_loader.enabled and 
-            self.s3_model_loader._is_s3_path(self.model_path)):
+            self.s3_model_loader._is_s3_path(str(self.model_path))):
             logger.info("Loading model from S3...")
             components = self.s3_model_loader.load_model(self.model_path)
             
@@ -194,6 +198,10 @@ class ModelEvaluator:
             return
         
         # Local model loading (existing logic)
+        if isinstance(self.model_path, str):
+            # This is an S3 path, should have been handled above
+            raise FileNotFoundError(f"S3 model loading failed for: {self.model_path}")
+        
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {self.model_path}")
         
@@ -247,8 +255,8 @@ class ModelEvaluator:
         Returns:
             Dictionary with evaluation results
         """
-        logger.info(f"Starting parallel evaluation of {len(data_files)} files")
-        logger.info(f"Using {self.n_workers} workers with batch size {self.batch_size}")
+        logger.info(f"🚀 Starting parallel evaluation of {len(data_files)} files")
+        logger.info(f"⚙️ Using {self.n_workers} workers with batch size {self.batch_size}")
         
         # Prepare arguments for workers
         worker_args = [
@@ -266,50 +274,68 @@ class ModelEvaluator:
             for i in range(0, len(worker_args), self.batch_size)
         ]
         
-        logger.info(f"Processing {len(batches)} batches")
+        logger.info(f"📦 Processing {len(batches)} batches")
         
-        for batch_idx, batch in enumerate(batches):
-            logger.info(f"Processing batch {batch_idx + 1}/{len(batches)} ({len(batch)} files)")
+        # Create global progress bar for all files
+        with tqdm(total=len(data_files), desc="📊 Parallel Evaluation", 
+                 unit="file", ncols=120,
+                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as global_pbar:
             
-            # Choose executor based on configuration
-            if self.use_multiprocessing:
-                executor = ProcessPoolExecutor(max_workers=self.max_workers)
-            else:
-                executor = ThreadPoolExecutor(max_workers=self.max_workers)
-            
-            try:
-                # Submit batch jobs
-                future_to_file = {
-                    executor.submit(self._evaluate_file_worker, args): args[0]
-                    for args in batch
-                }
+            for batch_idx, batch in enumerate(batches):
+                logger.info(f"🔄 Processing batch {batch_idx + 1}/{len(batches)} ({len(batch)} files)")
                 
-                # Collect results with progress bar
-                with tqdm(total=len(batch), desc=f"Batch {batch_idx + 1}") as pbar:
-                    for future in as_completed(future_to_file):
-                        file_path = future_to_file[future]
-                        try:
-                            result = future.result()
-                            if result is not None:
-                                all_results[file_path] = result
-                                successful_evaluations += 1
-                                pbar.set_postfix({
-                                    'successful': successful_evaluations,
-                                    'failed': len(all_results) - successful_evaluations
+                # Choose executor based on configuration
+                if self.use_multiprocessing:
+                    executor = ProcessPoolExecutor(max_workers=self.max_workers)
+                else:
+                    executor = ThreadPoolExecutor(max_workers=self.max_workers)
+                
+                try:
+                    # Submit batch jobs
+                    future_to_file = {
+                        executor.submit(self._evaluate_file_worker, args): args[0]
+                        for args in batch
+                    }
+                    
+                    # Collect results with batch progress bar
+                    with tqdm(total=len(batch), desc=f"Batch {batch_idx + 1}", 
+                             unit="file", leave=False, ncols=80) as batch_pbar:
+                        for future in as_completed(future_to_file):
+                            file_path = future_to_file[future]
+                            file_name = Path(file_path).name
+                            try:
+                                result = future.result()
+                                if result is not None:
+                                    all_results[file_path] = result
+                                    successful_evaluations += 1
+                                    
+                                    # Log success with metrics
+                                    rmse = result.get("metrics", {}).get("rmse", "N/A")
+                                    mae = result.get("metrics", {}).get("mae", "N/A")
+                                    logger.info(f"✅ Evaluated {file_name}: RMSE={rmse:.4f}, MAE={mae:.4f}")
+                                    
+                                    batch_pbar.set_postfix({
+                                        'Success': successful_evaluations,
+                                        'Current': file_name[:15] + "..." if len(file_name) > 15 else file_name
+                                    })
+                                else:
+                                    logger.warning(f"❌ Failed to evaluate {file_name}")
+                            except Exception as e:
+                                logger.error(f"❌ Error evaluating {file_name}: {e}")
+                            finally:
+                                batch_pbar.update(1)
+                                global_pbar.update(1)
+                                global_pbar.set_postfix({
+                                    'Success': successful_evaluations,
+                                    'Batch': f"{batch_idx + 1}/{len(batches)}"
                                 })
-                            else:
-                                logger.warning(f"Failed to evaluate {file_path}")
-                        except Exception as e:
-                            logger.error(f"Error evaluating {file_path}: {e}")
-                        finally:
-                            pbar.update(1)
-                            
-            finally:
-                executor.shutdown(wait=True)
-            
-            # Memory cleanup after each batch
-            gc.collect()
-            logger.info(f"Batch {batch_idx + 1} completed. Memory cleaned up.")
+                
+                finally:
+                    executor.shutdown(wait=True)
+                
+                # Memory cleanup after each batch
+                gc.collect()
+                logger.info(f"✅ Batch {batch_idx + 1} completed. Memory cleaned up.")
         
         logger.info(f"Parallel evaluation completed: {successful_evaluations}/{len(data_files)} files successful")
         
@@ -585,6 +611,80 @@ class ModelEvaluator:
             except Exception as e:
                 logger.error(f"Error creating {metric} map for {file_name}: {e}")
     
+    def create_spatial_maps_parallel(self) -> None:
+        """
+        Create spatial maps for all files in parallel.
+        """
+        if not self.file_results:
+            logger.warning("No file results available for spatial map creation")
+            return
+        
+        # Prepare results for parallel processing
+        results_to_process = [
+            (file_path, results) 
+            for file_path, results in self.file_results.items() 
+            if results is not None
+        ]
+        
+        if not results_to_process:
+            logger.warning("No valid results to process for spatial maps")
+            return
+        
+        logger.info(f"🗺️ Creating spatial maps for {len(results_to_process)} files in parallel...")
+        
+        # Use ThreadPoolExecutor for I/O-bound spatial map creation
+        with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
+            # Submit all spatial map creation tasks
+            future_to_file = {
+                executor.submit(self._create_spatial_maps_worker, results): file_path
+                for file_path, results in results_to_process
+            }
+            
+            # Process results with progress bar
+            with tqdm(total=len(results_to_process), desc="🗺️ Creating Spatial Maps", 
+                     unit="file", ncols=100,
+                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
+                
+                successful_maps = 0
+                for future in as_completed(future_to_file):
+                    file_path = future_to_file[future]
+                    file_name = Path(file_path).name
+                    
+                    try:
+                        success = future.result()
+                        if success:
+                            successful_maps += 1
+                            logger.info(f"✅ Created spatial maps for {file_name}")
+                        else:
+                            logger.warning(f"❌ Failed to create spatial maps for {file_name}")
+                    except Exception as e:
+                        logger.error(f"❌ Error creating spatial maps for {file_name}: {e}")
+                    finally:
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            'Success': successful_maps,
+                            'Current': file_name[:20] + "..." if len(file_name) > 20 else file_name
+                        })
+        
+        logger.info(f"✅ Spatial map creation completed: {successful_maps}/{len(results_to_process)} files successful")
+    
+    def _create_spatial_maps_worker(self, results: Dict[str, Any]) -> bool:
+        """
+        Worker function for creating spatial maps for a single file.
+        
+        Args:
+            results: Results dictionary from evaluate_file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.create_spatial_maps(results)
+            return True
+        except Exception as e:
+            logger.error(f"Error in spatial maps worker: {e}")
+            return False
+    
     def create_aggregated_spatial_maps(self) -> None:
         """Create aggregated spatial maps across all files."""
         logger.info("Creating aggregated spatial maps...")
@@ -758,41 +858,57 @@ class ModelEvaluator:
             parallel_results = self.evaluate_files_parallel(data_files)
             successful_evaluations = parallel_results["successful_files"]
             
-            # Create spatial maps for each file (sequential for now to avoid conflicts)
+            # Create spatial maps for each file in parallel
             save_plots = self.config.get("output", {}).get("save_plots", True)
             if save_plots:
-                logger.info("Creating spatial maps for all files...")
-                for file_path, results in self.file_results.items():
-                    if results:
-                        self.create_spatial_maps(results)
+                logger.info("🗺️ Creating spatial maps for all files in parallel...")
+                self.create_spatial_maps_parallel()
             else:
                 logger.info("Skipping spatial maps (save_plots disabled in config)")
         else:
             logger.info("Using sequential processing")
-            # Process each file sequentially
+            # Process each file sequentially with global progress bar
             successful_evaluations = 0
-            for i, file_path in enumerate(data_files, 1):
-                logger.info(f"Processing file {i}/{len(data_files)}: {Path(file_path).name}")
+            
+            # Create global progress bar for all files
+            with tqdm(total=len(data_files), desc="📊 Evaluating files", 
+                     unit="file", ncols=100, 
+                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as global_pbar:
                 
-                try:
-                    # Evaluate file
-                    results = self.evaluate_file(file_path)
+                for i, file_path in enumerate(data_files, 1):
+                    file_name = Path(file_path).name
+                    logger.info(f"🔄 Processing file {i}/{len(data_files)}: {file_name}")
                     
-                    if results:
-                        self.file_results[results["file_name"]] = results
+                    try:
+                        # Evaluate file
+                        results = self.evaluate_file(file_path)
                         
-                        # Create spatial maps for this file
-                        save_plots = self.config.get("output", {}).get("save_plots", True)
-                        if save_plots:
-                            self.create_spatial_maps(results)
-                        
-                        successful_evaluations += 1
-                    else:
-                        logger.warning(f"Failed to evaluate {file_path}")
-                        
-                except Exception as e:
-                    logger.error(f"Error processing {file_path}: {e}")
-                    continue
+                        if results:
+                            self.file_results[results["file_name"]] = results
+                            successful_evaluations += 1
+                            
+                            # Log success with metrics
+                            rmse = results.get("metrics", {}).get("rmse", "N/A")
+                            mae = results.get("metrics", {}).get("mae", "N/A")
+                            logger.info(f"✅ Evaluated {file_name}: RMSE={rmse:.4f}, MAE={mae:.4f}")
+                            
+                            # Create spatial maps for this file
+                            save_plots = self.config.get("output", {}).get("save_plots", True)
+                            if save_plots:
+                                logger.info(f"🗺️ Creating spatial maps for {file_name}")
+                                self.create_spatial_maps(results)
+                        else:
+                            logger.warning(f"❌ Failed to evaluate {file_name}")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error evaluating {file_name}: {e}")
+                    
+                    # Update global progress bar
+                    global_pbar.update(1)
+                    global_pbar.set_postfix({
+                        'Success': successful_evaluations,
+                        'Current': file_name[:20] + "..." if len(file_name) > 20 else file_name
+                    })
         
         logger.info(f"Successfully evaluated {successful_evaluations}/{len(data_files)} files")
         
