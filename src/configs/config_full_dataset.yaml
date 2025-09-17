@@ -31,8 +31,8 @@ data:
     # For year_based split:
     train_end_year: 2022 # Train data up to this year (exclusive)
     test_start_year: 2023 # Test data from this year onwards
-    val_months: [8] # Months to use for validation (April 2021)
-    eval_months: [12] # Months to use for evaluation (first 4 months of 2023)
+    val_months: [12] # Months to use for validation (August 2021)
+    eval_months: [12] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
     # For other split types:
     test_size: 0.2 # 20% for testing
     val_size: 0.2 # 20% for validation
@@ -40,7 +40,7 @@ data:
     n_bins: 10 # For stratified splitting
 
   # Data loading
-  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly" # Can be local path or S3 URI (s3://bucket/prefix)
+  data_path: "s3://medwav-dev-data/parquet/hourly/" # Can be local path or S3 URI (s3://bucket/prefix)
   file_pattern: "*.parquet"
   target_column: "vhm0_y"
 
@@ -49,13 +49,16 @@ data:
     aws_profile: null # AWS profile name (optional)
     region: "eu-central-1" # AWS region (optional)
     max_retries: 10 # Max retries for S3 operations
+  
+  # Parallel loading configuration
+  parallel_loading: true # Enable parallel file loading for faster data loading
 
 # Feature engineering configuration
 feature_block:
   # Sampling (optional - can be disabled for full dataset)
-  max_samples_per_file: 250000 # Set to null to use all data
+  max_samples_per_file: 500000 # Set to null to use all data
   sampling_strategy: "per_location" # Options: none, random, per_location, temporal
-  samples_per_location: 1
+  samples_per_location: 2
   samples_per_hour: 100
   sampling_seed: 42
 
@@ -114,7 +117,7 @@ output:
   # S3 configuration for saving results
   s3:
     enabled: false
-    bucket: "your-results-bucket"
-    prefix: "experiments"
-    region: "us-east-1"
+    bucket: "medwav-dev-data"
+    prefix: "experiments/full_dataset_experiment/<model_type>_<configuration>_<timestamp>"
+    region: "eu-central-1"
     aws_profile: null # Use default profile if null
