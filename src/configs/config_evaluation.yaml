@@ -4,14 +4,14 @@
 data:
   # Data path will be specified via command line
   target_column: "vhm0_y" # Target column name (currently hardcoded in code)
-  model_path: "trained_models"
-  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
+  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_500k_samples_20250917/models/"
+  data_path: "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "*.parquet"
 
 # Evaluation configuration
 evaluation:
   year: "2023"
-  max_files: 3
+  max_files: null # Process all December 2023 files (31 days) for faster evaluation
   # Spatial metrics to compute and plot
   spatial_metrics:
     - "bias"
@@ -39,6 +39,13 @@ evaluation:
     colormap: "RdYlBu_r"
     metrics_to_plot: ["bias", "mae", "rmse", "diff"]
 
+# S3 configuration for model loading and results saving
+s3:
+  enabled: true # Enable S3 model loading
+  bucket: "medwav-dev-data" # S3 bucket name
+  region: "eu-central-1" # AWS region
+  aws_profile: null # AWS profile name (optional, uses default if null)
+
 # Output configuration
 output:
   output_dir: "evaluation_results"
@@ -47,15 +54,15 @@ output:
   # S3 configuration for saving results
   s3:
     enabled: false # Set to true to enable S3 saving
-    bucket: "your-s3-bucket-name" # Replace with your S3 bucket
-    prefix: "evaluation_results" # S3 prefix for organizing results
-    region: "us-east-1" # AWS region
+    bucket: "medwav-dev-data" # Replace with your S3 bucket
+    prefix: "experiments/full_dataset_experiment/xgb_500k_samples_20250917/evaluation_results" # S3 prefix for organizing results
+    region: "eu-central-1" # AWS region
     aws_profile: null # AWS profile name (optional, uses default if null)
 
 # Parallel processing configuration
 parallel_processing:
-  enabled: true # Let users control parallel processing
-  n_workers: 2 # Number of parallel workers (default: min(cpu_count(), 8))
-  batch_size: 10 # Number of files to process in each batch
-  use_multiprocessing: true # Use ProcessPoolExecutor (true) or ThreadPoolExecutor (false)
-  max_workers: 8 # Maximum number of workers (default: n_workers)
+  enabled: true # Re-enable parallel processing for speed
+  n_workers: 4 # Use 4 workers for processing all 365 files
+  batch_size: 8 # Process 10 files per batch for efficiency
+  use_multiprocessing: false # Use ProcessPoolExecutor for true parallelism
+  max_workers: 6 # Maximum number of workers

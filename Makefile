@@ -12,7 +12,7 @@ install-poetry: ## Install Poetry package manager
 	@echo "export PATH=\"/home/ubuntu/.local/bin:\$$PATH\""
 
 setup-path: ## Add Poetry to PATH in current session
-	export PATH="/home/ubuntu/.local/bin:$$PATH"
+	export PATH="/home/ubuntu/.local/bin:$PATH"
 
 verify-poetry: ## Verify Poetry installation
 	poetry --version
