@@ -119,13 +119,13 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     
     # Load data
     logger.info("Loading data...")
-    X, y, regions, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
+    X, y, regions, coords, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
     x_shape = X.shape
     y_shape = y.shape
     
     # Split data
     logger.info("Splitting data...")
-    trainer.split_data(X, y, regions, successful_files)
+    trainer.split_data(X, y, regions, coords, successful_files)
     
     # 🚀 MEMORY OPTIMIZATION: Delete original data after splitting
     del X, y
@@ -294,6 +294,14 @@ def main():
         print(f"\nRegional Test Metrics:")
         for region, metrics in results['evaluation_results']['regional_test_metrics'].items():
             print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
+    # Print sea-bin test metrics
+    if 'sea_bin_test_metrics' in results['evaluation_results'] and results['evaluation_results']['sea_bin_test_metrics']:
+        print(f"\nSea-Bin Test Metrics:")
+        for bin_name, metrics in results['evaluation_results']['sea_bin_test_metrics'].items():
+            count = metrics.get('count', 0)
+            percentage = metrics.get('percentage', 0)
+            print(f"  {bin_name.title()} ({count:,} samples, {percentage:.1f}%) - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     
     print("="*50)
 
