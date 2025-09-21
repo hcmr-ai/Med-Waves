@@ -6,11 +6,10 @@ directly to S3, which is perfect for spot instance workflows where local storage
 is ephemeral.
 """
 
-import os
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 from datetime import datetime
 
 try:
@@ -91,7 +90,7 @@ class S3ResultsSaver:
             logger.error(f"Failed to initialize S3 client: {e}")
             self.enabled = False
     
-    def _get_s3_key(self, filename: str, experiment_name: str = None) -> str:
+    def _get_s3_key(self, filename: str) -> str:
         """
         Generate S3 key for a file.
         
@@ -101,17 +100,12 @@ class S3ResultsSaver:
             
         Returns:
             S3 key (path) for the file
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        if experiment_name:
-            key = f"{self.prefix}/{experiment_name}/{timestamp}/{filename}"
-        else:
-            key = f"{self.prefix}/{timestamp}/{filename}"
+        """        
+        key = f"{self.prefix}/{filename}"
         
         return key
     
-    def upload_file(self, local_path: str, s3_key: str = None, experiment_name: str = None) -> bool:
+    def upload_file(self, local_path: str, s3_key: str = None) -> bool:
         """
         Upload a single file to S3.
         
@@ -133,7 +127,7 @@ class S3ResultsSaver:
             return False
         
         if s3_key is None:
-            s3_key = self._get_s3_key(local_path.name, experiment_name)
+            s3_key = self._get_s3_key(local_path.name)
         
         try:
             file_size = local_path.stat().st_size
@@ -173,14 +167,13 @@ class S3ResultsSaver:
             logger.error(f"Multipart upload failed: {e}")
             raise
     
-    def upload_directory(self, local_dir: str, s3_prefix: str = None, experiment_name: str = None) -> Dict[str, bool]:
+    def upload_directory(self, local_dir: str, s3_prefix: str = None) -> Dict[str, bool]:
         """
         Upload an entire directory to S3.
         
         Args:
             local_dir: Local directory path
             s3_prefix: S3 prefix for the directory. If None, will be generated
-            experiment_name: Name of the experiment for organizing files
             
         Returns:
             Dictionary mapping file paths to upload success status
@@ -203,9 +196,9 @@ class S3ResultsSaver:
                 if s3_prefix:
                     s3_key = f"{s3_prefix}/{relative_path}"
                 else:
-                    s3_key = self._get_s3_key(str(relative_path), experiment_name)
+                    s3_key = self._get_s3_key(str(relative_path))
                 
-                success = self.upload_file(str(file_path), s3_key, experiment_name)
+                success = self.upload_file(str(file_path), s3_key)
                 results[str(file_path)] = success
         
         successful_uploads = sum(1 for success in results.values() if success)
@@ -214,13 +207,12 @@ class S3ResultsSaver:
         logger.info(f"Directory upload completed: {successful_uploads}/{total_files} files uploaded successfully")
         return results
     
-    def save_results_json(self, results: Dict[str, Any], experiment_name: str = None) -> bool:
+    def save_results_json(self, results: Dict[str, Any]) -> bool:
         """
         Save results dictionary as JSON to S3.
         
         Args:
             results: Results dictionary to save
-            experiment_name: Name of the experiment
             
         Returns:
             True if save successful, False otherwise
@@ -236,8 +228,8 @@ class S3ResultsSaver:
                 json.dump(results, f, indent=2, default=str)
             
             # Upload to S3
-            s3_key = self._get_s3_key("results.json", experiment_name)
-            success = self.upload_file(str(temp_file), s3_key, experiment_name)
+            s3_key = self._get_s3_key("results.json")
+            success = self.upload_file(str(temp_file), s3_key)
             
             # Clean up temp file
             temp_file.unlink()
@@ -248,13 +240,12 @@ class S3ResultsSaver:
             logger.error(f"Failed to save results JSON to S3: {e}")
             return False
     
-    def save_model_artifacts(self, model_path: str, experiment_name: str = None) -> Dict[str, bool]:
+    def save_model_artifacts(self, model_path: str) -> Dict[str, bool]:
         """
         Save model artifacts (model, scaler, etc.) to S3.
         
         Args:
             model_path: Local path to the model directory
-            experiment_name: Name of the experiment
             
         Returns:
             Dictionary mapping file paths to upload success status
@@ -271,18 +262,17 @@ class S3ResultsSaver:
         logger.info(f"Saving model artifacts from {model_path} to S3")
         
         # Upload model directory
-        s3_prefix = self._get_s3_key("model", experiment_name)
-        results = self.upload_directory(str(model_path), s3_prefix, experiment_name)
+        s3_prefix = self._get_s3_key("model")
+        results = self.upload_directory(str(model_path), s3_prefix)
         
         return results
     
-    def save_diagnostic_plots(self, plots_dir: str, experiment_name: str = None) -> Dict[str, bool]:
+    def save_diagnostic_plots(self, plots_dir: str) -> Dict[str, bool]:
         """
         Save diagnostic plots to S3.
         
         Args:
             plots_dir: Local path to the plots directory
-            experiment_name: Name of the experiment
             
         Returns:
             Dictionary mapping file paths to upload success status
@@ -299,8 +289,8 @@ class S3ResultsSaver:
         logger.info(f"Saving diagnostic plots from {plots_dir} to S3")
         
         # Upload plots directory
-        s3_prefix = self._get_s3_key("plots", experiment_name)
-        results = self.upload_directory(str(plots_dir), s3_prefix, experiment_name)
+        s3_prefix = self._get_s3_key("plots")
+        results = self.upload_directory(str(plots_dir), s3_prefix)
         
         return results
     
@@ -316,12 +306,11 @@ class S3ResultsSaver:
         """
         return f"s3://{self.bucket}/{s3_key}"
     
-    def list_experiment_files(self, experiment_name: str) -> List[str]:
+    def list_experiment_files(self) -> List[str]:
         """
         List all files for a given experiment.
         
         Args:
-            experiment_name: Name of the experiment
             
         Returns:
             List of S3 keys for the experiment
@@ -330,7 +319,7 @@ class S3ResultsSaver:
             return []
         
         try:
-            prefix = f"{self.prefix}/{experiment_name}/"
+            prefix = f"{self.prefix}/"
             response = self.s3_client.list_objects_v2(
                 Bucket=self.bucket,
                 Prefix=prefix

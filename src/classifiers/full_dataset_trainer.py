@@ -1695,10 +1695,9 @@ class FullDatasetTrainer:
             logger.warning("S3 saving is disabled. Enable it in config to save results to S3.")
             return {}
         
-        experiment_name = self.config.get("output", {}).get("experiment_name", "experiment")
         upload_results = {}
         
-        logger.info(f"Saving results to S3 for experiment: {experiment_name}")
+        logger.info(f"Saving results to S3: {self.s3_results_saver.prefix}")
         
         # Save results JSON
         logger.info("Uploading results JSON to S3...")
