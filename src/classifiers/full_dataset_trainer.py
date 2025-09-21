@@ -160,6 +160,9 @@ class FullDatasetTrainer:
         self.regions_train = None
         self.regions_val = None
         self.regions_test = None
+        self.coords_train = None
+        self.coords_val = None
+        self.coords_test = None
         
         # Training history
         self.training_history = {
@@ -354,7 +357,7 @@ class FullDatasetTrainer:
             elif reduction_type == "svd":
                 self.dimension_reducer = TruncatedSVD(n_components=n_components, random_state=42)
     
-    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
         """
         Load and combine all data files from local or S3 paths.
         
@@ -364,10 +367,11 @@ class FullDatasetTrainer:
             target_column: Name of the target column
             
         Returns:
-            Tuple of (X, y, regions, file_paths) where:
+            Tuple of (X, y, regions, coords, file_paths) where:
                 X: Feature matrix
                 y: Target vector
                 regions: Region information for regional scaling (or None)
+                coords: Coordinate array (lat, lon)
                 file_paths: List of successfully loaded file paths
         """
         self._log_memory_usage("before loading data")
@@ -511,7 +515,7 @@ class FullDatasetTrainer:
             logger.info(f"  - Sampling strategy: {sampling_strategy}")
         
         # Extract features, target, and regions
-        X, y, regions = self._prepare_features(combined_df, target_column)
+        X, y, regions, coords = self._prepare_features(combined_df, target_column)
         
         # 🚀 MEMORY OPTIMIZATION: Delete combined DataFrame immediately
         del combined_df
@@ -524,7 +528,7 @@ class FullDatasetTrainer:
         self.experiment_logger.log_dataset_info(dataset_info)
         
         self._log_memory_usage("after loading data")
-        return X, y, regions, successful_files
+        return X, y, regions, coords, successful_files
     
     def _expand_data_path(self, path: str) -> List[str]:
         """
@@ -705,10 +709,15 @@ class FullDatasetTrainer:
         
         return dataset_info
     
-    def _prepare_features(self, df: pl.DataFrame, target_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _prepare_features(self, df: pl.DataFrame, target_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Prepare features, target, and regions from dataframe."""
         # Get available features
         available_features = df.columns
+        
+        # Remove NaN values at the beginning to avoid issues with lag features
+        logger.info(f"Removing NaN values from {df.shape[0]} rows...")
+        df = df.drop_nulls()
+        logger.info(f"After removing NaN values: {df.shape[0]} rows remaining")
         
         # Start with base features (exclude target and non-feature columns)
         feature_cols = [col for col in available_features
@@ -737,6 +746,48 @@ class FullDatasetTrainer:
             feature_cols.extend(geo_features)
             logger.info(f"Added geographic features: {geo_features}")
         
+        # Add lag features if enabled
+        use_lag_features = self.feature_config.get("lag_features", {}).get("enabled", False)
+        if use_lag_features:
+            logger.info("Adding lag features...")
+            lag_config = self.feature_config.get("lag_features", {}).get("lags", {})
+            
+            # Check if we have temporal data (time column)
+            if "time" in df.columns or "timestamp" in df.columns:
+                time_col = "time" if "time" in df.columns else "timestamp"
+                logger.info(f"Using time column: {time_col}")
+                
+                # Sort by time to ensure proper lag calculation
+                df = df.sort([time_col, "lat", "lon"])
+                
+                # Create lag features for each variable
+                lag_features_added = []
+                for variable, lags in lag_config.items():
+                    if variable in df.columns:
+                        logger.info(f"Creating lag features for {variable} with lags: {lags}")
+                        for lag in lags:
+                            lag_col_name = f"{variable}_lag_{lag}h"
+                            # Create lag feature by shifting values within each location
+                            df = df.with_columns([
+                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
+                            ])
+                            feature_cols.append(lag_col_name)
+                            lag_features_added.append(lag_col_name)
+                    else:
+                        logger.warning(f"Variable {variable} not found in data for lag features")
+                
+                # Note: NaN values in lag features are handled by the initial drop_nulls() call
+                
+                logger.info(f"Added {len(lag_features_added)} lag features: {lag_features_added}")
+                
+                # Remove time column from feature_cols after lag features are created
+                if "time" in feature_cols:
+                    feature_cols.remove("time")
+                    logger.info("Removed 'time' column from features after lag feature creation")
+            else:
+                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
+                logger.warning("Available columns: " + ", ".join(df.columns))
+        
         # Always create region information for monitoring and analysis
         logger.info("Creating regional classification for monitoring...")
         
@@ -755,6 +806,24 @@ class FullDatasetTrainer:
             .otherwise(pl.lit("mediterranean"))
             .alias("region")
         ])
+        
+        # Apply regional training filter if enabled
+        use_regional_training = self.feature_config.get("regional_training", {}).get("enabled", False)
+        if use_regional_training:
+            training_regions = self.feature_config.get("regional_training", {}).get("training_regions", ["atlantic"])
+            logger.info(f"Regional training enabled - filtering to regions: {training_regions}")
+            
+            # Filter data to only include specified regions
+            df = df.filter(pl.col("region").is_in(training_regions))
+            logger.info(f"After regional filtering: {df.shape[0]} rows remaining")
+            
+            # Log regional distribution after filtering
+            region_counts = df["region"].value_counts().sort("region")
+            logger.info("Regional distribution after filtering:")
+            for row in region_counts.iter_rows(named=True):
+                region = row["region"]
+                count = row["count"]
+                logger.info(f"  {region.title()}: {count:,} samples")
         
         # Add basin to feature columns if geographic context is enabled and basin is included
         use_geo_basin = self.feature_config.get("use_geo_context", {}).get("include_basin", True)
@@ -801,23 +870,19 @@ class FullDatasetTrainer:
         self.feature_names = feature_cols
         logger.info(f"Using {len(feature_cols)} features: {feature_cols}")
         
-        # Extract features and target
+        # Extract features and target (NaN values already removed upfront)
         X_raw = df.select(feature_cols).to_numpy()
         y_raw = df[target_column].to_numpy()
         
-        # Remove rows with NaN values
-        valid_mask = ~(np.isnan(X_raw).any(axis=1) | np.isnan(y_raw))
-        X_raw = X_raw[valid_mask]
-        y_raw = y_raw[valid_mask]
-        if regions_raw is not None:
-            regions_raw = regions_raw[valid_mask]
+        # Extract coordinates for spatial plotting
+        coords_raw = df.select(["lat", "lon"]).to_numpy()
         
-        logger.info(f"After removing NaN: X: {X_raw.shape}, y: {y_raw.shape}")
+        logger.info(f"Final dataset - X: {X_raw.shape}, y: {y_raw.shape}, coords: {coords_raw.shape}")
         if regions_raw is not None:
             unique_regions = np.unique(regions_raw)
             logger.info(f"Regional distribution: {unique_regions}")
         
-        return X_raw, y_raw, regions_raw
+        return X_raw, y_raw, regions_raw, coords_raw
     
     def _apply_regional_weights(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray) -> np.ndarray:
         """
@@ -893,14 +958,55 @@ class FullDatasetTrainer:
                           f"MAE: {region_metrics['mae']:.4f}, Pearson: {region_metrics['pearson']:.4f}")
         
         return regional_metrics
-    
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, file_paths: List[str] = None) -> None:
+
+    def _calculate_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Dict[str, float]]:
+        """Calculate metrics for different sea state bins based on wave height."""
+        from src.evaluation.metrics import evaluate_model
+        
+        sea_bin_metrics = {}
+        sea_bin_config = self.feature_config.get("sea_bin_metrics", {})
+        
+        if not sea_bin_config.get("enabled", False):
+            return sea_bin_metrics
+        
+        bins = sea_bin_config.get("bins", [])
+        logger.info("Calculating sea-bin performance metrics...")
+        
+        for bin_config in bins:
+            bin_name = bin_config["name"]
+            bin_min = bin_config["min"]
+            bin_max = bin_config["max"]
+            bin_description = bin_config.get("description", "")
+            
+            # Filter data for this sea state bin
+            mask = (y_true >= bin_min) & (y_true < bin_max)
+            bin_count = np.sum(mask)
+            
+            if bin_count > 0:
+                bin_y_true = y_true[mask]
+                bin_y_pred = y_pred[mask]
+                
+                # Calculate metrics for this sea state bin
+                bin_metrics = evaluate_model(bin_y_true, bin_y_pred)
+                bin_metrics["count"] = bin_count
+                bin_metrics["percentage"] = (bin_count / len(y_true)) * 100
+                sea_bin_metrics[bin_name] = bin_metrics
+                
+                logger.info(f"{bin_name.title()} ({bin_description}) - Count: {bin_count:,} ({bin_metrics['percentage']:.1f}%), RMSE: {bin_metrics['rmse']:.4f}, MAE: {bin_metrics['mae']:.4f}")
+            else:
+                logger.info(f"{bin_name.title()} ({bin_description}) - No samples in this range")
+        
+        return sea_bin_metrics
+
+    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None) -> None:
         """
         Split data into train/validation/test sets based on configuration.
         
         Args:
             X: Feature matrix
             y: Target vector
+            regions: Regional classification array (optional)
+            coords: Coordinate array (lat, lon) (optional)
             file_paths: List of file paths (required for year-based splitting)
         """
         self._log_memory_usage("before splitting data")
@@ -918,7 +1024,7 @@ class FullDatasetTrainer:
             if file_paths is None:
                 raise ValueError("file_paths required for year_based splitting")
             
-            self._split_by_years(X, y, regions, file_paths, split_config)
+            self._split_by_years(X, y, regions, coords, file_paths, split_config)
             
         elif split_type == "random":
             # Random split: train -> val+test, then val -> val/test
@@ -950,6 +1056,19 @@ class FullDatasetTrainer:
             self.regions_train = regions_train
             self.regions_val = regions_val
             self.regions_test = regions_test
+            
+            # Split coordinates if available
+            if coords is not None:
+                coords_temp, coords_test = train_test_split(
+                    coords, test_size=test_size, random_state=random_state
+                )
+                coords_train, coords_val = train_test_split(
+                    coords_temp, test_size=val_size_adjusted, random_state=random_state
+                )
+                
+                self.coords_train = coords_train
+                self.coords_val = coords_val
+                self.coords_test = coords_test
             
             # Apply regional weighting to training data
             self.sample_weights = self._apply_regional_weights(
@@ -1038,7 +1157,7 @@ class FullDatasetTrainer:
         logger.info(f"Data splits - Train: {self.X_train.shape}, Val: {self.X_val.shape}, Test: {self.X_test.shape}")
         self._log_memory_usage("after splitting data")
     
-    def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray, file_paths: List[str], split_config: Dict[str, Any]) -> None:
+    def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray, coords: np.ndarray, file_paths: List[str], split_config: Dict[str, Any]) -> None:
         """
         Split data by years: 2017-2022 for train/val, 2023 for test.
         
@@ -1156,6 +1275,12 @@ class FullDatasetTrainer:
         logger.info(f"Regional distribution - Train: {np.unique(self.regions_train, return_counts=True)}")
         logger.info(f"Regional distribution - Val: {np.unique(self.regions_val, return_counts=True)}")
         logger.info(f"Regional distribution - Test: {np.unique(self.regions_test, return_counts=True)}")
+        
+        # Store coordinate information if available
+        if coords is not None:
+            self.coords_train = coords[train_mask]
+            self.coords_val = coords[val_mask]
+            self.coords_test = coords[test_mask]
         
         # Apply regional weighting to training data
         self.sample_weights = self._apply_regional_weights(
@@ -1369,6 +1494,9 @@ class FullDatasetTrainer:
             self.y_train, train_pred, self.regions_train
         )
         
+        # Calculate sea-bin training metrics
+        sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
+        
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del train_pred
         import gc; gc.collect()
@@ -1383,6 +1511,9 @@ class FullDatasetTrainer:
             regional_val_metrics = self._calculate_regional_metrics(
                 self.y_val, val_pred, self.regions_val
             )
+            
+            # Calculate sea-bin validation metrics
+            sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
             
             # 🚀 MEMORY OPTIMIZATION: Delete val predictions immediately
             del val_pred
@@ -1408,8 +1539,10 @@ class FullDatasetTrainer:
         return {
             'train_metrics': train_metrics,
             'regional_train_metrics': regional_train_metrics,
+            'sea_bin_train_metrics': sea_bin_train_metrics,
             'val_metrics': val_metrics,
             'regional_val_metrics': regional_val_metrics,
+            'sea_bin_val_metrics': sea_bin_val_metrics if len(self.X_val) > 0 else {},
             'training_history': self.training_history
         }
 
@@ -1443,8 +1576,15 @@ class FullDatasetTrainer:
             self.y_test, test_pred, self.regions_test
         )
         
+        # Calculate sea-bin test metrics
+        sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
+        
         # Store current test metrics as class attribute
         self.current_test_metrics = test_metrics
+        
+        # Store regional and sea-bin metrics as attributes for DiagnosticPlotter
+        self.regional_test_metrics = regional_test_metrics
+        self.sea_bin_test_metrics = sea_bin_test_metrics
         
         # Create diagnostic plots
         if self.diagnostics_config.get("enabled", False):
@@ -1467,7 +1607,8 @@ class FullDatasetTrainer:
         self._log_memory_usage("after evaluation")
         return {
             'test_metrics': test_metrics,
-            'regional_test_metrics': regional_test_metrics
+            'regional_test_metrics': regional_test_metrics,
+            'sea_bin_test_metrics': sea_bin_test_metrics
             # Removed 'predictions' and 'actual' to save memory
         } 
     

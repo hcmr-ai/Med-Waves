@@ -49,12 +49,18 @@ data:
     aws_profile: null # AWS profile name (optional)
     region: "eu-central-1" # AWS region (optional)
     max_retries: 10 # Max retries for S3 operations
-  
+
   # Parallel loading configuration
   parallel_loading: true # Enable parallel file loading for faster data loading
 
 # Feature engineering configuration
 feature_block:
+  features_to_exclude:
+    - "corrected_VTM02"
+    - "time"
+    - "lat"
+    - "lon"
+
   # Sampling (optional - can be disabled for full dataset)
   max_samples_per_file: 500000 # Set to null to use all data
   sampling_strategy: "per_location" # Options: none, random, per_location, temporal
@@ -63,7 +69,42 @@ feature_block:
   sampling_seed: 42
 
   # Preprocessing
-  scaler: "standard" # Options: standard, robust, minmax
+  scaler: "null" # Options: standard, robust, minmax, null (no scaling)
+
+  # Regional scaling (applies different scaling to different geographic regions)
+  # NOTE: Requires a valid scaler (standard, robust, minmax) - cannot be used with scaler: "null"
+  regional_scaling:
+    enabled: false # Enable regional scaling for Atlantic vs Mediterranean
+
+  # Geographic context features (adds geographic features to the model)
+  use_geo_context:
+    enabled: false # Enable geographic context features (distances, fetch, bathymetry)
+    include_basin: true # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
+
+  # Lag features (uses previous time steps of input variables)
+  lag_features:
+    enabled: true # Enable lag features for temporal patterns
+    lags:
+      U10: [6, 12, 24] # Previous degraded wave heights (hours ago)
+
+  # Regional weighting (gives different importance to different regions during training)
+  regional_weighting:
+    enabled: false # Enable regional weighting for Atlantic vs Mediterranean
+    weights:
+      atlantic: 2.0 # 50% more weight for Atlantic data
+      mediterranean: 1.0 # Normal weight for Mediterranean data
+      eastern_med: 1.0 # Normal weight for Eastern Mediterranean data
+
+  # Regional training (train only in specific regions)
+  regional_training:
+    enabled: false # Enable regional training (train only in specified regions)
+    training_regions: ["atlantic"] # Options: ["atlantic"], ["mediterranean"], ["eastern_med"], or combinations
+    # Alternative: use coordinate bounds instead of region names
+    # training_bounds:
+    #   lon_min: -10.0
+    #   lon_max: -5.0
+    #   lat_min: 35.0
+    #   lat_max: 45.0
 
   # Feature selection
   feature_selection:
@@ -76,6 +117,43 @@ feature_block:
     enabled: false
     type: "pca" # Options: pca, svd
     n_components: 50
+
+  # Sea-bin performance metrics (analyze performance across different wave height ranges)
+  sea_bin_metrics:
+    enabled: true # Enable sea-bin performance analysis
+    bins:
+      - name: "calm_sea"
+        min: 0.0
+        max: 0.5
+        description: "Calm sea conditions"
+      - name: "slight_sea"
+        min: 0.5
+        max: 1.25
+        description: "Slight sea conditions"
+      - name: "moderate_sea"
+        min: 1.25
+        max: 2.5
+        description: "Moderate sea conditions"
+      - name: "rough_sea"
+        min: 2.5
+        max: 4.0
+        description: "Rough sea conditions"
+      - name: "very_rough_sea"
+        min: 4.0
+        max: 6.0
+        description: "Very rough sea conditions"
+      - name: "high_sea"
+        min: 6.0
+        max: 9.0
+        description: "High sea conditions"
+      - name: "very_high_sea"
+        min: 9.0
+        max: 14.0
+        description: "Very high sea conditions"
+      - name: "phenomenal_sea"
+        min: 14.0
+        max: 999.0
+        description: "Phenomenal sea conditions"
 
 # Evaluation configuration
 evaluation:
@@ -91,6 +169,9 @@ training_diagnostics:
   create_learning_curves: true
   create_residual_plots: true
   create_prediction_plots: true
+  create_regional_analysis: true # Enable regional performance analysis plots
+  create_sea_bin_analysis: true # Enable sea-bin performance analysis plots
+  create_spatial_maps: true # Enable aggregated spatial maps
 
 # Logging configuration
 logging:
@@ -112,12 +193,12 @@ memory_monitoring:
 output:
   model_save_path: "trained_models"
   results_save_path: "training_results"
-  experiment_name: "full_dataset_experiment"
+  experiment_name: "xgb_500k_samples"
 
   # S3 configuration for saving results
   s3:
     enabled: false
     bucket: "medwav-dev-data"
-    prefix: "experiments/full_dataset_experiment/<model_type>_<configuration>_<timestamp>"
+    prefix: "experiments/full_dataset_experiment/" # the code will add experiment_name + timestamp at the end
     region: "eu-central-1"
     aws_profile: null # Use default profile if null
