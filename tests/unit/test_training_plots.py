@@ -11,7 +11,6 @@ import os
 sys.path.append('.')
 
 import numpy as np
-import polars as pl
 from pathlib import Path
 from src.analytics.plots.training_plots import (
     plot_sea_bin_metrics, plot_regional_comparison, 
