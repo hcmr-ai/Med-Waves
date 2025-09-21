@@ -43,6 +43,7 @@ from src.analytics.plots.spatial_plots import plot_spatial_feature_map
 from src.evaluation.metrics import evaluate_model
 from src.commons.aws.s3_model_loader import S3ModelLoader
 from src.commons.aws.s3_results_saver import S3ResultsSaver
+from src.commons.region_mapping import RegionMapper
 
 # Set up logging
 logging.basicConfig(
@@ -554,17 +555,17 @@ class ModelEvaluator:
         logger.info("Creating regional classification...")
         df = df.with_columns([
             pl.when(pl.col("longitude") < -5)
-            .then(pl.lit("atlantic"))
+            .then(pl.lit(0))  # atlantic
             .when(pl.col("longitude") > 30)
-            .then(pl.lit("eastern_med"))
-            .otherwise(pl.lit("mediterranean"))
+            .then(pl.lit(2))  # eastern_med
+            .otherwise(pl.lit(1))  # mediterranean
             .alias("region")
         ])
         
         # Apply regional training filter if enabled (same logic as trainer)
         use_regional_training = self.config.get("feature_block", {}).get("regional_training", {}).get("enabled", False)
         if use_regional_training:
-            training_regions = self.config.get("feature_block", {}).get("regional_training", {}).get("training_regions", ["atlantic"])
+            training_regions = self.config.get("feature_block", {}).get("regional_training", {}).get("training_regions", [0])  # Default to atlantic (0)
             logger.info(f"Regional training enabled - filtering to regions: {training_regions}")
             
             # Filter data to only include specified regions
@@ -575,7 +576,10 @@ class ModelEvaluator:
             region_counts = df["region"].value_counts().sort("region")
             logger.info("Regional distribution after filtering:")
             for row in region_counts.iter_rows(named=True):
-                logger.info(f"  {row['region']}: {row['count']} samples")
+                region_id = row["region"]
+                count = row["count"]
+                region_name = RegionMapper.get_display_name(region_id)
+                logger.info(f"  {region_name}: {count:,} samples")
         
         # Extract features and target (NaN values already removed upfront)
         X_raw = df.select(feature_cols).to_numpy()
@@ -590,7 +594,8 @@ class ModelEvaluator:
         logger.info(f"Final dataset - X: {X_raw.shape}, y: {y_raw.shape}, coords: {coords_raw.shape}")
         if regions_raw is not None:
             unique_regions = np.unique(regions_raw)
-            logger.info(f"Regional distribution: {unique_regions}")
+            region_names = [RegionMapper.get_display_name(rid) for rid in unique_regions]
+            logger.info(f"Regional distribution: {region_names} (IDs: {unique_regions})")
         
         return X_raw, y_raw, regions_raw, coords_raw
     

@@ -94,12 +94,12 @@ def classify_regions(df: pl.DataFrame) -> pl.DataFrame:
     logger.info("Applying regional classification...")
     
     df = df.with_columns([
-        # Regional classification
+        # Regional classification (using integer IDs for performance)
         pl.when(pl.col("longitude") < -5)
-        .then(pl.lit("atlantic"))
+        .then(pl.lit(0))  # atlantic
         .when(pl.col("longitude") > 30)
-        .then(pl.lit("eastern_med"))
-        .otherwise(pl.lit("mediterranean"))
+        .then(pl.lit(2))  # eastern_med
+        .otherwise(pl.lit(1))  # mediterranean
         .alias("region"),
         
         # Additional regional features
@@ -201,13 +201,15 @@ def create_visualizations(df: pl.DataFrame, analysis_results: Dict, output_dir: 
     fig, ax = plt.subplots(figsize=(12, 8))
     
     # Create scatter plot colored by region
-    region_colors = {'atlantic': '#1f77b4', 'mediterranean': '#ff7f0e', 'eastern_med': '#2ca02c'}
+    from src.commons.region_mapping import RegionMapper
+    region_colors = {0: '#1f77b4', 1: '#ff7f0e', 2: '#2ca02c'}  # atlantic, mediterranean, eastern_med
     
-    for region in regions:
-        region_data = df.filter(pl.col("region") == region)
+    for region_id in regions:
+        region_data = df.filter(pl.col("region") == region_id)
         if len(region_data) > 0:
+            region_name = RegionMapper.get_display_name(region_id)
             ax.scatter(region_data["longitude"].to_list(), region_data["latitude"].to_list(),
-                      c=region_colors[region], label=f'{region.title()} ({len(region_data):,} points)',
+                      c=region_colors[region_id], label=f'{region_name} ({len(region_data):,} points)',
                       alpha=0.6, s=1)
     
     # Add regional boundaries
@@ -326,7 +328,7 @@ def print_analysis_summary(analysis_results: Dict):
         logger.warning(f"  ⚠️  One region is underrepresented: {min_percentage:.1f}% of data")
     
     # Check Atlantic specifically
-    atlantic_data = region_counts.filter(pl.col("region") == "atlantic")
+    atlantic_data = region_counts.filter(pl.col("region") == 0)  # atlantic = 0
     if len(atlantic_data) > 0:
         atlantic_pct = atlantic_data["percentage"].item()
         if atlantic_pct < 10:

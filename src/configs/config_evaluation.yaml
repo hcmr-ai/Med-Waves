@@ -37,7 +37,7 @@ feature_block:
   # Regional training (filter to specific regions)
   regional_training:
     enabled: false # Set to true to enable regional training
-    training_regions: ["atlantic"] # Regions to include in training
+    training_regions: [0] # Regions to include in training: [0] (atlantic), [1] (mediterranean), [2] (eastern_med)
 
   # Sea-bin metrics for performance analysis across wave height ranges
   sea_bin_metrics:

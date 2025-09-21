@@ -152,12 +152,12 @@ def classify_regions(df: pl.DataFrame) -> pl.DataFrame:
     logger.info("Applying regional classification...")
     
     df = df.with_columns([
-        # Regional classification
+        # Regional classification (using integer IDs for performance)
         pl.when(pl.col("longitude") < -5)
-        .then(pl.lit("atlantic"))
+        .then(pl.lit(0))  # atlantic
         .when(pl.col("longitude") > 30)
-        .then(pl.lit("eastern_med"))
-        .otherwise(pl.lit("mediterranean"))
+        .then(pl.lit(2))  # eastern_med
+        .otherwise(pl.lit(1))  # mediterranean
         .alias("region"),
     ])
     
@@ -376,7 +376,7 @@ def print_nan_analysis_summary(analysis_results: Dict):
     
     # Check if NaN patterns are consistent across regions
     valid_region_counts = regional_analysis['valid_region_counts']
-    atlantic_valid = valid_region_counts.filter(pl.col("region") == "atlantic")
+    atlantic_valid = valid_region_counts.filter(pl.col("region") == 0)  # atlantic = 0
     
     if len(atlantic_valid) > 0:
         atlantic_pct = atlantic_valid["valid_percentage"].item()
