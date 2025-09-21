@@ -119,13 +119,13 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     
     # Load data
     logger.info("Loading data...")
-    X, y, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
+    X, y, regions, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
     x_shape = X.shape
     y_shape = y.shape
     
     # Split data
     logger.info("Splitting data...")
-    trainer.split_data(X, y, successful_files)
+    trainer.split_data(X, y, regions, successful_files)
     
     # 🚀 MEMORY OPTIMIZATION: Delete original data after splitting
     del X, y
@@ -272,10 +272,29 @@ def main():
     print(f"  Val RMSE: {results['training_results']['val_metrics']['rmse']:.4f}")
     print(f"  Val MAE: {results['training_results']['val_metrics']['mae']:.4f}")
     print(f"  Val Pearson: {results['training_results']['val_metrics']['pearson']:.4f}")
+    
+    # Print regional training metrics
+    if 'regional_train_metrics' in results['training_results'] and results['training_results']['regional_train_metrics']:
+        print(f"\nRegional Training Metrics:")
+        for region, metrics in results['training_results']['regional_train_metrics'].items():
+            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
+    # Print regional validation metrics
+    if 'regional_val_metrics' in results['training_results'] and results['training_results']['regional_val_metrics']:
+        print(f"\nRegional Validation Metrics:")
+        for region, metrics in results['training_results']['regional_val_metrics'].items():
+            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     print(f"\nTest Results:")
     print(f"  Test RMSE: {results['evaluation_results']['test_metrics']['rmse']:.4f}")
     print(f"  Test MAE: {results['evaluation_results']['test_metrics']['mae']:.4f}")
     print(f"  Test Pearson: {results['evaluation_results']['test_metrics']['pearson']:.4f}")
+    
+    # Print regional test metrics
+    if 'regional_test_metrics' in results['evaluation_results'] and results['evaluation_results']['regional_test_metrics']:
+        print(f"\nRegional Test Metrics:")
+        for region, metrics in results['evaluation_results']['regional_test_metrics'].items():
+            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
     print("="*50)
 
 
