@@ -8,6 +8,75 @@ data:
   data_path: "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "*.parquet"
 
+# Feature configuration (synchronized with training pipeline)
+feature_block:
+  # Features to exclude from the feature set
+  features_to_exclude:
+    - "corrected_VTM02"
+    - "time"
+    - "lat"
+    - "lon"
+    - "latitude"
+    - "longitude"
+
+  # Geographic context features
+  use_geo_context:
+    enabled: false # Set to true to enable geographic context features
+    include_basin: true # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
+
+  # Lag features for temporal patterns
+  lag_features:
+    enabled: false # Set to true to enable lag features
+    lags:
+      vhm0_x: [1, 3, 6] # Lag hours for significant wave height
+      wspd: [1, 3, 6] # Lag hours for wind speed
+      vtm02: [1, 3, 6] # Lag hours for wave period
+      wdir: [1, 3, 6] # Lag hours for wind direction
+      vmdr: [1, 3, 6] # Lag hours for wave direction
+
+  # Regional training (filter to specific regions)
+  regional_training:
+    enabled: false # Set to true to enable regional training
+    training_regions: ["atlantic"] # Regions to include in training
+
+  # Sea-bin metrics for performance analysis across wave height ranges
+  sea_bin_metrics:
+    enabled: true # Set to true to enable sea-bin metrics
+    bins:
+      - name: "calm"
+        min: 0.0
+        max: 0.5
+        description: "Calm conditions"
+      - name: "light"
+        min: 0.5
+        max: 1.0
+        description: "Light seas"
+      - name: "moderate"
+        min: 1.0
+        max: 2.0
+        description: "Moderate seas"
+      - name: "rough"
+        min: 2.0
+        max: 4.0
+        description: "Rough seas"
+      - name: "very_rough"
+        min: 4.0
+        max: 6.0
+        description: "Very rough seas"
+      - name: "high"
+        min: 6.0
+        max: 10.0
+        description: "High seas"
+
+# Preprocessing configuration (synchronized with training pipeline)
+preprocessing:
+  scaler: "standard" # Options: "standard", "robust", "minmax", "null"
+
+  # Regional scaling (applies different scalers to different regions)
+  regional_scaling:
+    enabled: false # Set to true to enable regional scaling
+    # NOTE: Cannot be used with scaler: "null"
+
 # Evaluation configuration
 evaluation:
   year: "2023"

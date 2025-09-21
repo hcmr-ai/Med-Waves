@@ -960,43 +960,14 @@ class FullDatasetTrainer:
         return regional_metrics
 
     def _calculate_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Dict[str, float]]:
-        """Calculate metrics for different sea state bins based on wave height."""
-        from src.evaluation.metrics import evaluate_model
+        """Calculate metrics for different sea state bins based on wave height using shared utility."""
+        from src.evaluation.sea_bin_utils import calculate_sea_bin_metrics
         
-        sea_bin_metrics = {}
+        # Get sea-bin configuration
         sea_bin_config = self.feature_config.get("sea_bin_metrics", {})
         
-        if not sea_bin_config.get("enabled", False):
-            return sea_bin_metrics
-        
-        bins = sea_bin_config.get("bins", [])
-        logger.info("Calculating sea-bin performance metrics...")
-        
-        for bin_config in bins:
-            bin_name = bin_config["name"]
-            bin_min = bin_config["min"]
-            bin_max = bin_config["max"]
-            bin_description = bin_config.get("description", "")
-            
-            # Filter data for this sea state bin
-            mask = (y_true >= bin_min) & (y_true < bin_max)
-            bin_count = np.sum(mask)
-            
-            if bin_count > 0:
-                bin_y_true = y_true[mask]
-                bin_y_pred = y_pred[mask]
-                
-                # Calculate metrics for this sea state bin
-                bin_metrics = evaluate_model(bin_y_true, bin_y_pred)
-                bin_metrics["count"] = bin_count
-                bin_metrics["percentage"] = (bin_count / len(y_true)) * 100
-                sea_bin_metrics[bin_name] = bin_metrics
-                
-                logger.info(f"{bin_name.title()} ({bin_description}) - Count: {bin_count:,} ({bin_metrics['percentage']:.1f}%), RMSE: {bin_metrics['rmse']:.4f}, MAE: {bin_metrics['mae']:.4f}")
-            else:
-                logger.info(f"{bin_name.title()} ({bin_description}) - No samples in this range")
-        
-        return sea_bin_metrics
+        # Use the shared utility function with logging enabled for training
+        return calculate_sea_bin_metrics(y_true, y_pred, sea_bin_config, enable_logging=True)
 
     def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None) -> None:
         """
