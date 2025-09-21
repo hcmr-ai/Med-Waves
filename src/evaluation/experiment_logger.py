@@ -5,11 +5,10 @@ This class handles all Comet ML logging functionality that was previously
 embedded in the FullDatasetTrainer class.
 """
 
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import logging
 
 try:
@@ -41,8 +40,7 @@ class ExperimentLogger:
             if self.logging_config.get("use_comet", False) and Experiment is not None:
                 # Get experiment name from config or use default
                 experiment_name = self.config.get("output", {}).get("experiment_name", "full_dataset_training")
-                model_type = self.config.get("model", {}).get("type", "xgb")
-                experiment_name = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{experiment_name}_{model_type}"
+                experiment_name = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{experiment_name}"
                 
                 # Initialize Comet experiment
                 self.experiment = Experiment(

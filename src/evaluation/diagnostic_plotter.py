@@ -58,6 +58,12 @@ class DiagnosticPlotter:
         if self.diagnostics_config.get("create_spatial_maps", True):
             self._create_aggregated_spatial_maps(trainer, test_predictions, plots_dir)
         
+        # Create advanced analysis plots
+        self._create_regional_error_box_plots(trainer, test_predictions, plots_dir)
+        self._create_wave_height_performance_plots(trainer, test_predictions, plots_dir)
+        # self._create_residual_geographic_analysis(trainer, test_predictions, plots_dir)
+        # self._create_condition_performance_plots(trainer, test_predictions, plots_dir)
+        
         logger.info(f"Diagnostic plots saved to {plots_dir}")
         
         # Log SNR values
@@ -605,6 +611,442 @@ class DiagnosticPlotter:
             
         except Exception as e:
             logger.warning(f"Could not create spatial map for {metric}: {e}")
+    
+    def _create_regional_error_box_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
+        """Create regional error box plots for detailed error analysis."""
+        if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
+            logger.warning("No regional information available for regional error box plots")
+            return
+        
+        logger.info("Creating regional error box plots...")
+        
+        # Calculate errors
+        errors = test_predictions - trainer.y_test
+        abs_errors = np.abs(errors)
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Regional Error Analysis - Box Plots', fontsize=16, fontweight='bold')
+        
+        # Get unique regions
+        unique_regions = np.unique(trainer.regions_test)
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+        
+        # Prepare data for box plots
+        error_data = []
+        abs_error_data = []
+        bias_data = []
+        rmse_data = []
+        region_labels = []
+        
+        for region in unique_regions:
+            mask = trainer.regions_test == region
+            region_errors = errors[mask]
+            region_abs_errors = abs_errors[mask]
+            region_bias = region_errors  # Bias is the same as errors
+            region_rmse = np.sqrt(np.mean(region_errors**2))  # Calculate RMSE for this region
+            
+            error_data.append(region_errors)
+            abs_error_data.append(region_abs_errors)
+            bias_data.append(region_bias)
+            rmse_data.append([region_rmse] * len(region_errors))  # Repeat RMSE for box plot
+            region_labels.append(region.title())
+        
+        # Plot 1: Error distribution by region
+        bp1 = axes[0, 0].boxplot(error_data, labels=region_labels, patch_artist=True)
+        for patch, color in zip(bp1['boxes'], colors[:len(unique_regions)]):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        axes[0, 0].set_title('Error Distribution by Region', fontweight='bold')
+        axes[0, 0].set_ylabel('Prediction Error')
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        
+        # Plot 2: Absolute error distribution by region
+        bp2 = axes[0, 1].boxplot(abs_error_data, labels=region_labels, patch_artist=True)
+        for patch, color in zip(bp2['boxes'], colors[:len(unique_regions)]):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        axes[0, 1].set_title('Absolute Error Distribution by Region', fontweight='bold')
+        axes[0, 1].set_ylabel('Absolute Prediction Error')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Plot 3: Error standard deviation by region (as bar chart since it's a single value per region)
+        error_std_values = []
+        for region in unique_regions:
+            mask = trainer.regions_test == region
+            region_errors = errors[mask]
+            # Calculate standard deviation of errors for this region
+            region_std = np.std(region_errors)
+            error_std_values.append(region_std)
+        
+        bars = axes[1, 0].bar(region_labels, error_std_values, color=colors[:len(unique_regions)], alpha=0.7)
+        axes[1, 0].set_title('Error Standard Deviation by Region', fontweight='bold')
+        axes[1, 0].set_ylabel('Standard Deviation of Errors')
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, error_std_values):
+            axes[1, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                           f'{value:.3f}', ha='center', va='bottom', fontsize=10)
+        
+        # Plot 4: RMSE by region (as bar chart since it's a single value per region)
+        rmse_values = []
+        for region in unique_regions:
+            mask = trainer.regions_test == region
+            region_errors = errors[mask]
+            # Calculate RMSE for this region
+            region_rmse = np.sqrt(np.mean(region_errors**2))
+            rmse_values.append(region_rmse)
+        
+        bars = axes[1, 1].bar(region_labels, rmse_values, color=colors[:len(unique_regions)], alpha=0.7)
+        axes[1, 1].set_title('RMSE by Region', fontweight='bold')
+        axes[1, 1].set_ylabel('Root Mean Squared Error')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, rmse_values):
+            axes[1, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                           f'{value:.3f}', ha='center', va='bottom', fontsize=10)
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / 'regional_error_box_plots.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_wave_height_performance_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
+        """Create performance vs wave height by region plots."""
+        if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
+            logger.warning("No regional information available for wave height performance plots")
+            return
+        
+        logger.info("Creating wave height performance plots...")
+        
+        # Get sea-bin configuration
+        sea_bin_config = trainer.config.get('feature_block', {}).get('sea_bin_metrics', {})
+        if not sea_bin_config.get('enabled', False):
+            logger.warning("Sea-bin metrics not enabled, skipping wave height performance plots")
+            return
+        
+        bins = sea_bin_config.get('bins', [])
+        if not bins:
+            logger.warning("No sea-bin configuration found")
+            return
+        
+        # Calculate errors
+        errors = test_predictions - trainer.y_test
+        abs_errors = np.abs(errors)
+        
+        # Get unique regions
+        unique_regions = np.unique(trainer.regions_test)
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+        fig.suptitle('Performance vs Wave Height by Region', fontsize=16, fontweight='bold')
+        
+        # Prepare data for each plot
+        error_data_by_region_bin = {}
+        abs_error_data_by_region_bin = {}
+        bias_data_by_region_bin = {}
+        rmse_data_by_region_bin = {}
+        
+        for region in unique_regions:
+            region_mask = trainer.regions_test == region
+            region_errors = errors[region_mask]
+            region_abs_errors = abs_errors[region_mask]
+            region_y_true = trainer.y_test[region_mask]
+            
+            error_data_by_region_bin[region] = []
+            abs_error_data_by_region_bin[region] = []
+            bias_data_by_region_bin[region] = []
+            rmse_data_by_region_bin[region] = []
+            
+            for bin_config in bins:
+                bin_min = bin_config["min"]
+                bin_max = bin_config["max"]
+                
+                # Filter data for this wave height bin
+                bin_mask = (region_y_true >= bin_min) & (region_y_true < bin_max)
+                bin_errors = region_errors[bin_mask]
+                bin_abs_errors = region_abs_errors[bin_mask]
+                
+                if len(bin_errors) > 0:
+                    error_data_by_region_bin[region].append(bin_errors)
+                    abs_error_data_by_region_bin[region].append(bin_abs_errors)
+                    bias_data_by_region_bin[region].append(bin_errors)  # Bias is same as errors
+                    rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_errors**2)))
+                else:
+                    error_data_by_region_bin[region].append([])
+                    abs_error_data_by_region_bin[region].append([])
+                    bias_data_by_region_bin[region].append([])
+                    rmse_data_by_region_bin[region].append(0)
+        
+        # Create labels for wave height bins
+        bin_labels = [f"{bin_config['min']:.1f}-{bin_config['max']:.1f}m" for bin_config in bins]
+        
+        # Plot 1: Error distribution by region and wave height
+        x_pos = np.arange(len(bin_labels))
+        width = 0.25
+        
+        for i, region in enumerate(unique_regions):
+            region_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in error_data_by_region_bin[region]]
+            axes[0, 0].bar(x_pos + i * width, region_errors, width, label=region.title(), 
+                          color=colors[i], alpha=0.7)
+        
+        axes[0, 0].set_title('Mean Error by Region and Wave Height', fontweight='bold')
+        axes[0, 0].set_ylabel('Mean Prediction Error')
+        axes[0, 0].set_xlabel('Wave Height Range')
+        axes[0, 0].set_xticks(x_pos + width)
+        axes[0, 0].set_xticklabels(bin_labels, rotation=45)
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        
+        # Plot 2: Absolute error distribution by region and wave height
+        for i, region in enumerate(unique_regions):
+            region_abs_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in abs_error_data_by_region_bin[region]]
+            axes[0, 1].bar(x_pos + i * width, region_abs_errors, width, label=region.title(), 
+                          color=colors[i], alpha=0.7)
+        
+        axes[0, 1].set_title('Mean Absolute Error by Region and Wave Height', fontweight='bold')
+        axes[0, 1].set_ylabel('Mean Absolute Error')
+        axes[0, 1].set_xlabel('Wave Height Range')
+        axes[0, 1].set_xticks(x_pos + width)
+        axes[0, 1].set_xticklabels(bin_labels, rotation=45)
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Plot 3: RMSE by region and wave height
+        for i, region in enumerate(unique_regions):
+            region_rmse = rmse_data_by_region_bin[region]
+            axes[1, 0].bar(x_pos + i * width, region_rmse, width, label=region.title(), 
+                          color=colors[i], alpha=0.7)
+        
+        axes[1, 0].set_title('RMSE by Region and Wave Height', fontweight='bold')
+        axes[1, 0].set_ylabel('RMSE')
+        axes[1, 0].set_xlabel('Wave Height Range')
+        axes[1, 0].set_xticks(x_pos + width)
+        axes[1, 0].set_xticklabels(bin_labels, rotation=45)
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Plot 4: Sample count by region and wave height
+        for i, region in enumerate(unique_regions):
+            region_counts = [len(errors) for errors in error_data_by_region_bin[region]]
+            axes[1, 1].bar(x_pos + i * width, region_counts, width, label=region.title(), 
+                          color=colors[i], alpha=0.7)
+        
+        axes[1, 1].set_title('Sample Count by Region and Wave Height', fontweight='bold')
+        axes[1, 1].set_ylabel('Number of Samples')
+        axes[1, 1].set_xlabel('Wave Height Range')
+        axes[1, 1].set_xticks(x_pos + width)
+        axes[1, 1].set_xticklabels(bin_labels, rotation=45)
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / 'wave_height_performance_by_region.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_residual_geographic_analysis(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
+        """Create residuals vs geographic location plots."""
+        if not hasattr(trainer, 'coords_test') or trainer.coords_test is None:
+            logger.warning("No coordinate information available for residual geographic analysis")
+            return
+        
+        logger.info("Creating residual geographic analysis plots...")
+        
+        # Calculate residuals
+        residuals = test_predictions - trainer.y_test
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        fig.suptitle('Residuals vs Geographic Location', fontsize=16, fontweight='bold')
+        
+        # Plot 1: Residuals vs Latitude
+        scatter1 = axes[0, 0].scatter(trainer.coords_test[:, 0], residuals, alpha=0.5, s=1, c=residuals, cmap='RdBu_r')
+        axes[0, 0].set_title('Residuals vs Latitude', fontweight='bold')
+        axes[0, 0].set_xlabel('Latitude')
+        axes[0, 0].set_ylabel('Residuals')
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        plt.colorbar(scatter1, ax=axes[0, 0], label='Residual Value')
+        
+        # Plot 2: Residuals vs Longitude
+        scatter2 = axes[0, 1].scatter(trainer.coords_test[:, 1], residuals, alpha=0.5, s=1, c=residuals, cmap='RdBu_r')
+        axes[0, 1].set_title('Residuals vs Longitude', fontweight='bold')
+        axes[0, 1].set_xlabel('Longitude')
+        axes[0, 1].set_ylabel('Residuals')
+        axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        plt.colorbar(scatter2, ax=axes[0, 1], label='Residual Value')
+        
+        # Plot 3: Residuals vs Distance from Center (approximate)
+        # center_lat, center_lon = 40.0, 15.0  # Approximate center of Mediterranean
+        # distances = np.sqrt((trainer.coords_test[:, 0] - center_lat)**2 + (trainer.coords_test[:, 1] - center_lon)**2)
+        # scatter3 = axes[1, 0].scatter(distances, residuals, alpha=0.5, s=1, c=residuals, cmap='RdBu_r')
+        # axes[1, 0].set_title('Residuals vs Distance from Center', fontweight='bold')
+        # axes[1, 0].set_xlabel('Distance from Center (degrees)')
+        # axes[1, 0].set_ylabel('Residuals')
+        # axes[1, 0].grid(True, alpha=0.3)
+        # axes[1, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        # plt.colorbar(scatter3, ax=axes[1, 0], label='Residual Value')
+        
+        # Plot 4: Residuals vs Longitude (colored by region if available)
+        if hasattr(trainer, 'regions_test') and trainer.regions_test is not None:
+            unique_regions = np.unique(trainer.regions_test)
+            colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+            
+            for i, region in enumerate(unique_regions):
+                mask = trainer.regions_test == region
+                axes[1, 1].scatter(trainer.coords_test[mask, 1], residuals[mask], 
+                                 alpha=0.5, s=1, color=colors[i], label=region.title())
+            
+            axes[1, 1].set_title('Residuals vs Longitude (by Region)', fontweight='bold')
+            axes[1, 1].set_xlabel('Longitude')
+            axes[1, 1].set_ylabel('Residuals')
+            axes[1, 1].legend()
+        else:
+            scatter4 = axes[1, 1].scatter(trainer.coords_test[:, 1], residuals, alpha=0.5, s=1, c=residuals, cmap='RdBu_r')
+            axes[1, 1].set_title('Residuals vs Longitude', fontweight='bold')
+            axes[1, 1].set_xlabel('Longitude')
+            axes[1, 1].set_ylabel('Residuals')
+            plt.colorbar(scatter4, ax=axes[1, 1], label='Residual Value')
+        
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / 'residuals_vs_geographic_location.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_condition_performance_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
+        """Create performance under different conditions by region plots."""
+        if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
+            logger.warning("No regional information available for condition performance plots")
+            return
+        
+        logger.info("Creating condition performance plots...")
+        
+        # Calculate errors
+        errors = test_predictions - trainer.y_test
+        abs_errors = np.abs(errors)
+        
+        # Get unique regions
+        unique_regions = np.unique(trainer.regions_test)
+        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(1, 1, figsize=(15, 10))
+        fig.suptitle('Performance Under Different Conditions by Region', fontsize=16, fontweight='bold')
+        
+        # Plot 1: Performance vs Wave Height (box plots by region)
+        # Create wave height bins
+        wave_height_bins = [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0, 10.0]
+        wave_height_labels = [f"{wave_height_bins[i]:.1f}-{wave_height_bins[i+1]:.1f}m" 
+                             for i in range(len(wave_height_bins)-1)]
+        
+        error_data_by_region_wave = {}
+        for region in unique_regions:
+            region_mask = trainer.regions_test == region
+            region_errors = errors[region_mask]
+            region_wave_heights = trainer.y_test[region_mask]
+            
+            error_data_by_region_wave[region] = []
+            for i in range(len(wave_height_bins)-1):
+                bin_mask = (region_wave_heights >= wave_height_bins[i]) & (region_wave_heights < wave_height_bins[i+1])
+                bin_errors = region_errors[bin_mask]
+                error_data_by_region_wave[region].append(bin_errors)
+        
+        # Create box plots for each region
+        x_pos = np.arange(len(wave_height_labels))
+        width = 0.25
+        
+        for i, region in enumerate(unique_regions):
+            region_means = [np.mean(errors) if len(errors) > 0 else 0 for errors in error_data_by_region_wave[region]]
+            axes[0, 0].bar(x_pos + i * width, region_means, width, label=region.title(), 
+                          color=colors[i], alpha=0.7)
+        
+        axes[0, 0].set_title('Mean Error vs Wave Height by Region', fontweight='bold')
+        axes[0, 0].set_ylabel('Mean Prediction Error')
+        axes[0, 0].set_xlabel('Wave Height Range')
+        axes[0, 0].set_xticks(x_pos + width)
+        axes[0, 0].set_xticklabels(wave_height_labels, rotation=45)
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        
+        # Plot 2: Performance vs Wind Speed (if available in features)
+        # This would require access to input features, which we don't have in the current setup
+        # For now, create a placeholder plot
+        # axes[0, 1].text(0.5, 0.5, 'Wind Speed Analysis\n(Requires input features)', 
+        #                ha='center', va='center', transform=axes[0, 1].transAxes, fontsize=12)
+        # axes[0, 1].set_title('Performance vs Wind Speed by Region', fontweight='bold')
+        
+        # Plot 3: Performance vs Distance from Coast (approximate)
+        # if hasattr(trainer, 'coords_test') and trainer.coords_test is not None:
+        #     # Approximate distance from coast using longitude (rough approximation)
+        #     coast_distance = np.abs(trainer.coords_test[:, 1] - 0)  # Distance from 0 longitude
+        #     distance_bins = [0, 5, 10, 15, 20, 25, 30, 40]
+        #     distance_labels = [f"{distance_bins[i]}-{distance_bins[i+1]}°" 
+        #                       for i in range(len(distance_bins)-1)]
+            
+        #     error_data_by_region_distance = {}
+        #     for region in unique_regions:
+        #         region_mask = trainer.regions_test == region
+        #         region_errors = errors[region_mask]
+        #         region_distances = coast_distance[region_mask]
+                
+        #         error_data_by_region_distance[region] = []
+        #         for i in range(len(distance_bins)-1):
+        #             bin_mask = (region_distances >= distance_bins[i]) & (region_distances < distance_bins[i+1])
+        #             bin_errors = region_errors[bin_mask]
+        #             error_data_by_region_distance[region].append(bin_errors)
+            
+        #     x_pos = np.arange(len(distance_labels))
+        #     for i, region in enumerate(unique_regions):
+        #         region_means = [np.mean(errors) if len(errors) > 0 else 0 for errors in error_data_by_region_distance[region]]
+        #         axes[1, 0].bar(x_pos + i * width, region_means, width, label=region.title(), 
+        #                       color=colors[i], alpha=0.7)
+            
+        #     axes[1, 0].set_title('Mean Error vs Distance from Coast by Region', fontweight='bold')
+        #     axes[1, 0].set_ylabel('Mean Prediction Error')
+        #     axes[1, 0].set_xlabel('Distance from Coast (degrees)')
+        #     axes[1, 0].set_xticks(x_pos + width)
+        #     axes[1, 0].set_xticklabels(distance_labels, rotation=45)
+        #     axes[1, 0].legend()
+        #     axes[1, 0].grid(True, alpha=0.3)
+        #     axes[1, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
+        # else:
+        #     axes[1, 0].text(0.5, 0.5, 'Distance Analysis\n(No coordinates available)', 
+        #                    ha='center', va='center', transform=axes[1, 0].transAxes, fontsize=12)
+        #     axes[1, 0].set_title('Performance vs Distance from Coast by Region', fontweight='bold')
+        
+        # Plot 4: Performance Consistency (coefficient of variation by region)
+        cv_data = []
+        region_labels_cv = []
+        for region in unique_regions:
+            region_mask = trainer.regions_test == region
+            region_errors = errors[region_mask]
+            if len(region_errors) > 0:
+                cv = np.std(region_errors) / np.mean(np.abs(region_errors)) if np.mean(np.abs(region_errors)) > 0 else 0
+                cv_data.append(cv)
+                region_labels_cv.append(region.title())
+        
+        bars = axes[1, 1].bar(region_labels_cv, cv_data, color=colors[:len(cv_data)], alpha=0.7)
+        axes[1, 1].set_title('Performance Consistency by Region', fontweight='bold')
+        axes[1, 1].set_ylabel('Coefficient of Variation')
+        axes[1, 1].set_xlabel('Region')
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, cv_data):
+            axes[1, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                           f'{value:.3f}', ha='center', va='bottom', fontsize=10)
+        
+        plt.tight_layout()
+        plt.savefig(plots_dir / 'condition_performance_by_region.png', dpi=300, bbox_inches='tight')
+        plt.close()
     
     def get_plot_files(self) -> list:
         """Get list of all plot files created."""

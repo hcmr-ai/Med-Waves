@@ -48,8 +48,9 @@ class S3ResultsSaver:
         
         self.enabled = self.s3_config.get("enabled", False)
         self.bucket = self.s3_config.get("bucket")
-        self.prefix = self.s3_config.get("prefix", "experiments")
-        self.region = self.s3_config.get("region", "us-east-1")
+        self.prefix = self.s3_config.get("prefix", "experiments") + "/" + self.output_config.get("experiment_name", "")
+        self.prefix = self.prefix + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.region = self.s3_config.get("region", "eu-central-1")
         self.aws_profile = self.s3_config.get("aws_profile")
         
         self.s3_client = None
