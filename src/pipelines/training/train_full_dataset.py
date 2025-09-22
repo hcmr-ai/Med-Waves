@@ -172,8 +172,7 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
         
         # Log S3 URLs
         if s3_upload_results:
-            experiment_name = config["output"]["experiment_name"]
-            s3_files = trainer.s3_results_saver.list_experiment_files(experiment_name)
+            s3_files = trainer.s3_results_saver.list_experiment_files()
             logger.info(f"S3 experiment files: {len(s3_files)} files uploaded")
             for s3_key in s3_files[:5]:  # Show first 5 files
                 s3_url = trainer.s3_results_saver.get_s3_url(s3_key)
@@ -194,9 +193,26 @@ def save_results(results: Dict[str, Any], save_path: str, comet_experiment: Expe
     
     # Save results as JSON
     import json
+    import numpy as np
+    
+    def convert_numpy_types(obj):
+        """Convert numpy types to native Python types for JSON serialization."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {str(k): convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        else:
+            return obj
+    
     results_file = save_path / f"{results['experiment_name']}_results.json"
     with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
+        json.dump(convert_numpy_types(results), f, indent=2)
     
     # Save summary
     summary_file = save_path / f"{results['experiment_name']}_summary.txt"

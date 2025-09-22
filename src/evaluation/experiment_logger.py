@@ -185,9 +185,16 @@ class ExperimentLogger:
             return
         
         try:
-            # Log all plot files
+            # Log all plot files in the main directory
             for plot_file in plots_dir.glob("*.png"):
                 self.experiment.log_image(str(plot_file), name=plot_file.stem)
+            
+            # Log spatial maps from subdirectory
+            spatial_maps_dir = plots_dir / "spatial_maps"
+            if spatial_maps_dir.exists():
+                for spatial_file in spatial_maps_dir.glob("*.png"):
+                    # Use spatial_maps/ prefix to organize in Comet ML
+                    self.experiment.log_image(str(spatial_file), name=f"spatial_maps/{spatial_file.stem}")
             
             logger.info("Diagnostic plots logged to Comet ML")
             

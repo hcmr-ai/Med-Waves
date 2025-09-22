@@ -12,6 +12,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 import logging
+from src.commons.region_mapping import RegionMapper
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class DiagnosticPlotter:
                                           test_predictions: np.ndarray, 
                                           plots_dir: Path) -> None:
         """Create predictions vs actual plots for both training and test sets."""
-        
+        logger.info("Creating predictions vs actual plots...")
         # Test Predictions vs Actual
         plt.figure(figsize=(10, 8))
         plt.scatter(trainer.y_test, test_predictions, alpha=0.5, s=1)
@@ -110,6 +111,7 @@ class DiagnosticPlotter:
         """Create residuals vs predicted plots for both training and test sets."""
         
         # Test Residuals plot
+        logger.info("Creating test residuals vs predicted plot...")
         test_residuals = trainer.y_test - test_predictions
         plt.figure(figsize=(10, 8))
         plt.scatter(test_predictions, test_residuals, alpha=0.5, s=1)
@@ -135,6 +137,7 @@ class DiagnosticPlotter:
     def _create_learning_curves_plot(self, trainer: Any, plots_dir: Path) -> None:
         """Create learning curves plot if training history is available."""
         if trainer.training_history['train_loss']:
+            logger.info("Creating learning curves plot...")
             plt.figure(figsize=(10, 6))
             plt.plot(trainer.training_history['train_loss'], label='Training Loss')
             plt.plot(trainer.training_history['val_loss'], label='Validation Loss')
@@ -150,6 +153,7 @@ class DiagnosticPlotter:
         
         # Get SNR values from stored metrics
         if trainer.current_train_metrics is not None and trainer.current_test_metrics is not None:
+            logger.info("Creating SNR comparison plot...")
             # Use already calculated and stored metrics
             train_snr = trainer.current_train_metrics.get('snr', 0)
             test_snr = trainer.current_test_metrics.get('snr', 0)
@@ -234,14 +238,15 @@ class DiagnosticPlotter:
         if not hasattr(trainer, 'regional_test_metrics') or not trainer.regional_test_metrics:
             logger.warning("No regional test metrics available")
             return
-        
+        logger.info("Creating regional performance comparison plot...")
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         fig.suptitle('Regional Performance Comparison', fontsize=16, fontweight='bold')
         
-        regions = list(trainer.regional_test_metrics.keys())
-        rmse_values = [trainer.regional_test_metrics[region].get('rmse', 0) for region in regions]
-        mae_values = [trainer.regional_test_metrics[region].get('mae', 0) for region in regions]
-        pearson_values = [trainer.regional_test_metrics[region].get('pearson', 0) for region in regions]
+        region_ids = list(trainer.regional_test_metrics.keys())
+        regions = [RegionMapper.get_display_name(rid) for rid in region_ids]
+        rmse_values = [trainer.regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
+        mae_values = [trainer.regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
+        pearson_values = [trainer.regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
         
         colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
         
@@ -281,7 +286,7 @@ class DiagnosticPlotter:
         """Create regional predictions vs actual plots."""
         if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
             return
-        
+        logger.info("Creating regional predictions vs actual plots...")
         unique_regions = np.unique(trainer.regions_test)
         n_regions = len(unique_regions)
         
@@ -307,7 +312,8 @@ class DiagnosticPlotter:
                         [region_y_true.min(), region_y_true.max()], 'r--', lw=2)
             axes[i].set_xlabel('Actual')
             axes[i].set_ylabel('Predicted')
-            axes[i].set_title(f'{region.title()} Region')
+            region_name = RegionMapper.get_display_name(region)
+            axes[i].set_title(f'{region_name} Region')
             axes[i].grid(True, alpha=0.3)
             
             # Calculate and display R²
@@ -323,7 +329,7 @@ class DiagnosticPlotter:
         """Create regional error analysis plots."""
         if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
             return
-        
+        logger.info("Creating regional error analysis plots...")
         unique_regions = np.unique(trainer.regions_test)
         n_regions = len(unique_regions)
         
@@ -347,7 +353,8 @@ class DiagnosticPlotter:
             
             axes[i].hist(region_errors, bins=30, alpha=0.7, color=colors[i], edgecolor='black')
             axes[i].axvline(0, color='red', linestyle='--', linewidth=2)
-            axes[i].set_title(f'{region.title()} Region Errors')
+            region_name = RegionMapper.get_display_name(region)
+            axes[i].set_title(f'{region_name} Region Errors')
             axes[i].set_xlabel('Prediction Error')
             axes[i].set_ylabel('Frequency')
             axes[i].grid(True, alpha=0.3)
@@ -380,6 +387,7 @@ class DiagnosticPlotter:
     def _create_sea_bin_performance_plot(self, trainer: Any, plots_dir: Path) -> None:
         """Create sea-bin performance metrics plot."""
         sea_bin_metrics = trainer.sea_bin_test_metrics
+        logger.info("Creating sea-bin performance metrics plot...")
         
         # Prepare data for plotting
         bin_names = []
@@ -455,6 +463,7 @@ class DiagnosticPlotter:
         if not hasattr(trainer, 'sea_bin_test_metrics') or not trainer.sea_bin_test_metrics:
             return
         
+        logger.info("Creating sea-bin predictions vs actual plots...")
         # Get sea-bin configuration to determine bin ranges
         sea_bin_config = trainer.config.get('feature_block', {}).get('sea_bin_metrics', {})
         if not sea_bin_config.get('enabled', False):
@@ -493,8 +502,16 @@ class DiagnosticPlotter:
             
             if len(bin_y_true) > 0:
                 axes[i].scatter(bin_y_true, bin_y_pred, alpha=0.5, s=1, color=colors[i % len(colors)])
-                axes[i].plot([bin_y_true.min(), bin_y_true.max()], 
-                           [bin_y_true.min(), bin_y_true.max()], 'r--', lw=2)
+                
+                # Set axes to show full bin range with some padding
+                padding = (bin_max - bin_min) * 0.1  # 10% padding
+                axes[i].set_xlim(bin_min - padding, bin_max + padding)
+                axes[i].set_ylim(bin_min - padding, bin_max + padding)
+                
+                # Plot perfect prediction line across full range
+                axes[i].plot([bin_min - padding, bin_max + padding], 
+                           [bin_min - padding, bin_max + padding], 'r--', lw=2)
+                
                 axes[i].set_xlabel('Actual')
                 axes[i].set_ylabel('Predicted')
                 axes[i].set_title(f'{bin_name.replace("_", " ").title()}\n({bin_min}-{bin_max}m)')
@@ -545,6 +562,7 @@ class DiagnosticPlotter:
     
     def _calculate_spatial_metrics(self, trainer: Any, test_predictions: np.ndarray) -> Optional[pd.DataFrame]:
         """Calculate spatial metrics for plotting."""
+        logger.info("Calculating spatial metrics...")
         try:
             import polars as pl
             
@@ -586,6 +604,7 @@ class DiagnosticPlotter:
     
     def _create_spatial_map(self, spatial_metrics: pd.DataFrame, metric: str, spatial_dir: Path) -> None:
         """Create a spatial map for a specific metric."""
+        logger.info(f"Creating spatial map for {metric}...")
         try:
             from src.analytics.plots.spatial_plots import plot_spatial_feature_map
             
@@ -650,7 +669,8 @@ class DiagnosticPlotter:
             abs_error_data.append(region_abs_errors)
             bias_data.append(region_bias)
             rmse_data.append([region_rmse] * len(region_errors))  # Repeat RMSE for box plot
-            region_labels.append(region.title())
+            region_name = RegionMapper.get_display_name(region)
+            region_labels.append(region_name)
         
         # Plot 1: Error distribution by region
         bp1 = axes[0, 0].boxplot(error_data, labels=region_labels, patch_artist=True)
@@ -790,7 +810,8 @@ class DiagnosticPlotter:
         
         for i, region in enumerate(unique_regions):
             region_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in error_data_by_region_bin[region]]
-            axes[0, 0].bar(x_pos + i * width, region_errors, width, label=region.title(), 
+            region_name = RegionMapper.get_display_name(region)
+            axes[0, 0].bar(x_pos + i * width, region_errors, width, label=region_name, 
                           color=colors[i], alpha=0.7)
         
         axes[0, 0].set_title('Mean Error by Region and Wave Height', fontweight='bold')
@@ -805,7 +826,8 @@ class DiagnosticPlotter:
         # Plot 2: Absolute error distribution by region and wave height
         for i, region in enumerate(unique_regions):
             region_abs_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in abs_error_data_by_region_bin[region]]
-            axes[0, 1].bar(x_pos + i * width, region_abs_errors, width, label=region.title(), 
+            region_name = RegionMapper.get_display_name(region)
+            axes[0, 1].bar(x_pos + i * width, region_abs_errors, width, label=region_name, 
                           color=colors[i], alpha=0.7)
         
         axes[0, 1].set_title('Mean Absolute Error by Region and Wave Height', fontweight='bold')
@@ -819,7 +841,8 @@ class DiagnosticPlotter:
         # Plot 3: RMSE by region and wave height
         for i, region in enumerate(unique_regions):
             region_rmse = rmse_data_by_region_bin[region]
-            axes[1, 0].bar(x_pos + i * width, region_rmse, width, label=region.title(), 
+            region_name = RegionMapper.get_display_name(region)
+            axes[1, 0].bar(x_pos + i * width, region_rmse, width, label=region_name, 
                           color=colors[i], alpha=0.7)
         
         axes[1, 0].set_title('RMSE by Region and Wave Height', fontweight='bold')
@@ -833,7 +856,8 @@ class DiagnosticPlotter:
         # Plot 4: Sample count by region and wave height
         for i, region in enumerate(unique_regions):
             region_counts = [len(errors) for errors in error_data_by_region_bin[region]]
-            axes[1, 1].bar(x_pos + i * width, region_counts, width, label=region.title(), 
+            region_name = RegionMapper.get_display_name(region)
+            axes[1, 1].bar(x_pos + i * width, region_counts, width, label=region_name, 
                           color=colors[i], alpha=0.7)
         
         axes[1, 1].set_title('Sample Count by Region and Wave Height', fontweight='bold')
@@ -899,8 +923,9 @@ class DiagnosticPlotter:
             
             for i, region in enumerate(unique_regions):
                 mask = trainer.regions_test == region
+                region_name = RegionMapper.get_display_name(region)
                 axes[1, 1].scatter(trainer.coords_test[mask, 1], residuals[mask], 
-                                 alpha=0.5, s=1, color=colors[i], label=region.title())
+                                 alpha=0.5, s=1, color=colors[i], label=region_name)
             
             axes[1, 1].set_title('Residuals vs Longitude (by Region)', fontweight='bold')
             axes[1, 1].set_xlabel('Longitude')
@@ -1031,7 +1056,8 @@ class DiagnosticPlotter:
             if len(region_errors) > 0:
                 cv = np.std(region_errors) / np.mean(np.abs(region_errors)) if np.mean(np.abs(region_errors)) > 0 else 0
                 cv_data.append(cv)
-                region_labels_cv.append(region.title())
+                region_name = RegionMapper.get_display_name(region)
+                region_labels_cv.append(region_name)
         
         bars = axes[1, 1].bar(region_labels_cv, cv_data, color=colors[:len(cv_data)], alpha=0.7)
         axes[1, 1].set_title('Performance Consistency by Region', fontweight='bold')
