@@ -22,7 +22,7 @@ model:
   gamma: 0.5
   max_bin: 256
   verbose: false
-  
+
   # EQM-specific configuration (only used when type: "eqm")
   eqm:
     quantile_resolution: 1000
@@ -30,7 +30,7 @@ model:
     extrapolation_method: "constant" # Options: constant, linear, nearest
     kde_bandwidth: null # Auto if null
     variables: ["VHM0"] # Variables to correct
-  
+
   # Delta-specific configuration (only used when type: "delta")
   delta:
     variables: ["VHM0"] # Variables to correct
@@ -78,8 +78,10 @@ feature_block:
     - "WDIR"
 
   # Sampling (optional - can be disabled for full dataset)
-  max_samples_per_file: 1500000 # Set to null to use all data
-  sampling_strategy: "per_location" # Options: none, random, per_location, temporal
+  max_samples_per_file: 500000 # Set to null to use all data
+  sampling_strategy: "robust_stratified" # Options: none, random, per_location, temporal, robust_stratified
+  # NOTE: robust_stratified is designed for multi-region balance and will be automatically
+  # switched to single_region_robust when regional_training is enabled
   samples_per_location: 6
   samples_per_hour: 100
   sampling_seed: 42
@@ -99,7 +101,7 @@ feature_block:
 
   # Lag features (uses previous time steps of input variables)
   lag_features:
-    enabled: true # Enable lag features for temporal patterns
+    enabled: false # Enable lag features for temporal patterns
     lags:
       U10: [6, 12, 24] # Previous degraded wave heights (hours ago)
       V10: [6, 12, 24]
@@ -112,6 +114,8 @@ feature_block:
       2: 1.0 # eastern_med - Normal weight for Eastern Mediterranean data
 
   # Regional training (train only in specific regions)
+  # NOTE: When enabled, robust_stratified sampling will be automatically switched to single_region_robust
+  # which maintains wave height stratification and temporal coverage within the selected region(s)
   regional_training:
     enabled: true # Enable regional training (train only in specified regions)
     training_regions: [0] # Options: [0] (atlantic), [1] (mediterranean), [2] (eastern_med), or combinations
@@ -154,12 +158,12 @@ feature_block:
         min: 2.5
         max: 4.0
         description: "Rough sea conditions"
-      - name: "very_rough_sea"
-        min: 4.0
-        max: 6.0
-        description: "Very rough sea conditions"
+      # - name: "very_rough_sea"
+      #   min: 4.0
+      #   max: 6.0
+      #   description: "Very rough sea conditions"
       - name: "high_sea"
-        min: 6.0
+        min: 4.0
         max: 9.0
         description: "High sea conditions"
       - name: "very_high_sea"
@@ -209,7 +213,7 @@ memory_monitoring:
 output:
   model_save_path: "trained_models"
   results_save_path: "training_results" # not used
-  experiment_name: "xgb_1500K_samples_atlantic_only"
+  experiment_name: "xgb_500K_samples_robust_stratified"
 
   # S3 configuration for saving results
   s3:
