@@ -82,7 +82,34 @@ def _load_single_file_worker(args):
         # Load the file
         df = extract_features_from_parquet(file_path, use_dask=False)
         
-        # Apply sampling if configured
+        # Create lag features BEFORE sampling to preserve temporal sequences
+        use_lag_features = feature_config.get("lag_features", {}).get("enabled", False)
+        if use_lag_features:
+            logger.debug(f"Creating lag features for {file_path} before sampling...")
+            lag_config = feature_config.get("lag_features", {}).get("lags", {})
+            
+            # Check if we have temporal data (time column)
+            if "time" in df.columns or "timestamp" in df.columns:
+                time_col = "time" if "time" in df.columns else "timestamp"
+                
+                # Sort by time to ensure proper lag calculation
+                df = df.sort([time_col, "lat", "lon"])
+                
+                # Create lag features for each variable
+                for variable, lags in lag_config.items():
+                    if variable in df.columns:
+                        for lag in lags:
+                            lag_col_name = f"{variable}_lag_{lag}h"
+                            # Create lag feature by shifting values within each location
+                            df = df.with_columns([
+                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
+                            ])
+                    else:
+                        logger.warning(f"Variable {variable} not found in data for lag features")
+            else:
+                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
+        
+        # Apply sampling AFTER lag features are created
         max_samples = feature_config.get("max_samples_per_file", None)
         sampling_strategy = feature_config.get("sampling_strategy", "none")
         
@@ -767,47 +794,28 @@ class FullDatasetTrainer:
             feature_cols.extend(geo_features)
             logger.info(f"Added geographic features: {geo_features}")
         
-        # Add lag features if enabled
+        # Lag features are created during data loading to preserve temporal sequences
+        # Just add any existing lag features to the feature columns
         use_lag_features = self.feature_config.get("lag_features", {}).get("enabled", False)
         if use_lag_features:
-            logger.info("Adding lag features...")
+            logger.info("Lag features were created during data loading to preserve temporal sequences")
             lag_config = self.feature_config.get("lag_features", {}).get("lags", {})
             
-            # Check if we have temporal data (time column)
-            if "time" in df.columns or "timestamp" in df.columns:
-                time_col = "time" if "time" in df.columns else "timestamp"
-                logger.info(f"Using time column: {time_col}")
-                
-                # Sort by time to ensure proper lag calculation
-                df = df.sort([time_col, "lat", "lon"])
-                
-                # Create lag features for each variable
-                lag_features_added = []
-                for variable, lags in lag_config.items():
-                    if variable in df.columns:
-                        logger.info(f"Creating lag features for {variable} with lags: {lags}")
-                        for lag in lags:
-                            lag_col_name = f"{variable}_lag_{lag}h"
-                            # Create lag feature by shifting values within each location
-                            df = df.with_columns([
-                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
-                            ])
-                            feature_cols.append(lag_col_name)
-                            lag_features_added.append(lag_col_name)
-                    else:
-                        logger.warning(f"Variable {variable} not found in data for lag features")
-                
-                # Note: NaN values in lag features are handled by the initial drop_nulls() call
-                
-                logger.info(f"Added {len(lag_features_added)} lag features: {lag_features_added}")
-                
-                # Remove time column from feature_cols after lag features are created
-                if "time" in feature_cols:
-                    feature_cols.remove("time")
-                    logger.info("Removed 'time' column from features after lag feature creation")
-            else:
-                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
-                logger.warning("Available columns: " + ", ".join(df.columns))
+            # Add existing lag features to feature columns
+            lag_features_found = []
+            for variable, lags in lag_config.items():
+                for lag in lags:
+                    lag_col_name = f"{variable}_lag_{lag}h"
+                    if lag_col_name in df.columns:
+                        feature_cols.append(lag_col_name)
+                        lag_features_found.append(lag_col_name)
+            
+            logger.info(f"Found {len(lag_features_found)} lag features: {lag_features_found}")
+            
+            # Remove time column from feature_cols if it exists
+            if "time" in feature_cols:
+                feature_cols.remove("time")
+                logger.info("Removed 'time' column from features")
         
         # Always create region information for monitoring and analysis
         logger.info("Creating regional classification for monitoring...")

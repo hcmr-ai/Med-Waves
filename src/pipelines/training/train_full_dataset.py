@@ -13,6 +13,7 @@ from typing import List, Dict, Any
 import glob
 from datetime import datetime
 import sys
+import numpy as np
 from comet_ml import Experiment
 
 project_root = Path(__file__).parent.parent.parent.parent
@@ -293,13 +294,25 @@ def main():
     if 'regional_train_metrics' in results['training_results'] and results['training_results']['regional_train_metrics']:
         print(f"\nRegional Training Metrics:")
         for region, metrics in results['training_results']['regional_train_metrics'].items():
-            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+            # Handle both integer region IDs and string region names
+            if isinstance(region, (int, np.integer)):
+                from src.commons.region_mapping import RegionMapper
+                region_name = RegionMapper.get_display_name(region)
+            else:
+                region_name = region.title()
+            print(f"  {region_name} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     
     # Print regional validation metrics
     if 'regional_val_metrics' in results['training_results'] and results['training_results']['regional_val_metrics']:
         print(f"\nRegional Validation Metrics:")
         for region, metrics in results['training_results']['regional_val_metrics'].items():
-            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+            # Handle both integer region IDs and string region names
+            if isinstance(region, (int, np.integer)):
+                from src.commons.region_mapping import RegionMapper
+                region_name = RegionMapper.get_display_name(region)
+            else:
+                region_name = region.title()
+            print(f"  {region_name} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     print(f"\nTest Results:")
     print(f"  Test RMSE: {results['evaluation_results']['test_metrics']['rmse']:.4f}")
     print(f"  Test MAE: {results['evaluation_results']['test_metrics']['mae']:.4f}")
