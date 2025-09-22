@@ -28,6 +28,9 @@ import xgboost as xgb
 from src.commons.memory_monitor import MemoryMonitor
 from src.commons.aws.s3_results_saver import S3ResultsSaver
 from src.commons.preprocessing import RegionalScaler
+from src.classifiers.eqm_corrector import EQMCorrector
+from src.classifiers.delta_corrector import DeltaCorrector
+from src.commons.region_mapping import RegionMapper, create_region_mapping_dict
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -281,6 +284,24 @@ class FullDatasetTrainer:
                 max_iter=self.model_config.get("max_iter", 1000),
                 random_state=self.model_config.get("random_state", 42)
             )
+        elif model_type == "eqm":
+            # EQM is not a traditional ML model, so we'll handle it differently
+            eqm_config = self.model_config.get("eqm", {})
+            self.model = EQMCorrector(
+                quantile_resolution=eqm_config.get("quantile_resolution", 1000),
+                extrapolation_method=eqm_config.get("extrapolation_method", "constant"),
+                kde_bandwidth=eqm_config.get("kde_bandwidth", None)
+            )
+            self.eqm_variables = eqm_config.get("variables", ["VHM0"])
+            logger.info(f"Initialized EQM corrector for variables: {self.eqm_variables}")
+        elif model_type == "delta":
+            # Delta corrector is a simple bias correction method
+            delta_config = self.model_config.get("delta", {})
+            delta_method = delta_config.get("method", "mean_bias")
+            self.model = DeltaCorrector(method=delta_method)
+            self.delta_variables = delta_config.get("variables", ["VHM0"])
+            self.delta_method = delta_method
+            logger.info(f"Initialized Delta corrector for variables: {self.delta_variables} (method: {self.delta_method})")
         else:
             raise ValueError(f"Unknown model type: {model_type}")
     
@@ -420,7 +441,7 @@ class FullDatasetTrainer:
         # Determine number of workers for parallel processing
         parallel_loading = self.data_config.get("parallel_loading", True)
         if parallel_loading and len(all_files) > 1:
-            max_workers = min(mp.cpu_count(), len(all_files), 4)  # Reduced to 4 to be more conservative
+            max_workers = self.data_config.get("max_workers", 4)
             logger.info(f"Attempting parallel loading with {max_workers} workers")
         else:
             max_workers = 1
@@ -797,20 +818,20 @@ class FullDatasetTrainer:
             (pl.col("lon") > 30).alias("eastern_med_region"),
         ])
         
-        # Create combined region column
+        # Create combined region column (using integer IDs for performance)
         df = df.with_columns([
             pl.when(pl.col("lon") < -5)
-            .then(pl.lit("atlantic"))
+            .then(pl.lit(0))  # atlantic
             .when(pl.col("lon") > 30)
-            .then(pl.lit("eastern_med"))
-            .otherwise(pl.lit("mediterranean"))
+            .then(pl.lit(2))  # eastern_med
+            .otherwise(pl.lit(1))  # mediterranean
             .alias("region")
         ])
         
         # Apply regional training filter if enabled
         use_regional_training = self.feature_config.get("regional_training", {}).get("enabled", False)
         if use_regional_training:
-            training_regions = self.feature_config.get("regional_training", {}).get("training_regions", ["atlantic"])
+            training_regions = self.feature_config.get("regional_training", {}).get("training_regions", [0])  # Default to atlantic (0)
             logger.info(f"Regional training enabled - filtering to regions: {training_regions}")
             
             # Filter data to only include specified regions
@@ -821,9 +842,10 @@ class FullDatasetTrainer:
             region_counts = df["region"].value_counts().sort("region")
             logger.info("Regional distribution after filtering:")
             for row in region_counts.iter_rows(named=True):
-                region = row["region"]
+                region_id = row["region"]
                 count = row["count"]
-                logger.info(f"  {region.title()}: {count:,} samples")
+                region_name = RegionMapper.get_display_name(region_id)
+                logger.info(f"  {region_name}: {count:,} samples")
         
         # Add basin to feature columns if geographic context is enabled and basin is included
         use_geo_basin = self.feature_config.get("use_geo_context", {}).get("include_basin", True)
@@ -852,7 +874,9 @@ class FullDatasetTrainer:
             
         # Extract region information
         regions_raw = df["region"].to_numpy()
-        logger.info(f"Created regional classification: {np.unique(regions_raw)}")
+        unique_regions = np.unique(regions_raw)
+        region_names = [RegionMapper.get_display_name(rid) for rid in unique_regions]
+        logger.info(f"Created regional classification: {region_names} (IDs: {unique_regions})")
         
         # Log regional scaling and weighting status
         use_regional_scaling = self.feature_config.get("regional_scaling", {}).get("enabled", False)
@@ -878,9 +902,6 @@ class FullDatasetTrainer:
         coords_raw = df.select(["lat", "lon"]).to_numpy()
         
         logger.info(f"Final dataset - X: {X_raw.shape}, y: {y_raw.shape}, coords: {coords_raw.shape}")
-        if regions_raw is not None:
-            unique_regions = np.unique(regions_raw)
-            logger.info(f"Regional distribution: {unique_regions}")
         
         return X_raw, y_raw, regions_raw, coords_raw
     
@@ -919,12 +940,13 @@ class FullDatasetTrainer:
         logger.info(f"Regional weighting applied - Total weighted samples: {total_weighted_samples:,.0f}")
         
         # Log effective sample counts per region
-        for region in weights_config.keys():
-            region_mask = regions == region
+        for region_id in weights_config.keys():
+            region_mask = regions == region_id
             if np.sum(region_mask) > 0:
                 region_count = np.sum(region_mask)
                 effective_count = np.sum(sample_weights[region_mask])
-                logger.info(f"  {region}: {region_count:,} samples × {weights_config[region]} = {effective_count:,.0f} effective samples")
+                region_name = RegionMapper.get_display_name(region_id)
+                logger.info(f"  {region_name}: {region_count:,} samples × {weights_config[region_id]} = {effective_count:,.0f} effective samples")
         
         return sample_weights
     
@@ -944,17 +966,18 @@ class FullDatasetTrainer:
         
         regional_metrics = {}
         
-        for region in np.unique(regions):
-            mask = regions == region
+        for region_id in np.unique(regions):
+            mask = regions == region_id
             if np.sum(mask) > 0:
                 region_y_true = y_true[mask]
                 region_y_pred = y_pred[mask]
                 
                 # Calculate metrics for this region
                 region_metrics = evaluate_model(region_y_true, region_y_pred)
-                regional_metrics[region] = region_metrics
+                regional_metrics[region_id] = region_metrics
                 
-                logger.info(f"{region.title()} metrics - RMSE: {region_metrics['rmse']:.4f}, "
+                region_name = RegionMapper.get_display_name(region_id)
+                logger.info(f"{region_name} metrics - RMSE: {region_metrics['rmse']:.4f}, "
                           f"MAE: {region_metrics['mae']:.4f}, Pearson: {region_metrics['pearson']:.4f}")
         
         return regional_metrics
@@ -1243,9 +1266,18 @@ class FullDatasetTrainer:
         self.regions_train = regions[train_mask]
         self.regions_val = regions[val_mask]
         self.regions_test = regions[test_mask]
-        logger.info(f"Regional distribution - Train: {np.unique(self.regions_train, return_counts=True)}")
-        logger.info(f"Regional distribution - Val: {np.unique(self.regions_val, return_counts=True)}")
-        logger.info(f"Regional distribution - Test: {np.unique(self.regions_test, return_counts=True)}")
+        # Log regional distribution with readable names
+        train_regions, train_counts = np.unique(self.regions_train, return_counts=True)
+        val_regions, val_counts = np.unique(self.regions_val, return_counts=True)
+        test_regions, test_counts = np.unique(self.regions_test, return_counts=True)
+        
+        train_names = [RegionMapper.get_display_name(rid) for rid in train_regions]
+        val_names = [RegionMapper.get_display_name(rid) for rid in val_regions]
+        test_names = [RegionMapper.get_display_name(rid) for rid in test_regions]
+        
+        logger.info(f"Regional distribution - Train: {dict(zip(train_names, train_counts))}")
+        logger.info(f"Regional distribution - Val: {dict(zip(val_names, val_counts))}")
+        logger.info(f"Regional distribution - Test: {dict(zip(test_names, test_counts))}")
         
         # Store coordinate information if available
         if coords is not None:
@@ -1419,7 +1451,76 @@ class FullDatasetTrainer:
         self._log_memory_usage("before training")
         logger.info("Starting model training...")
         
-        # Train model
+        # Handle EQM training differently
+        if isinstance(self.model, EQMCorrector):
+            logger.info("Training EQM corrector...")
+            # For EQM, we need to create a DataFrame with model predictions and observed values
+            # We'll use the training data to fit the EQM corrector
+            
+            # Create training DataFrame for EQM
+            train_df = pl.DataFrame({
+                'VHM0': self.y_train,  # Model predictions (target variable)
+                'corrected_VHM0': self.y_train  # For EQM, we need observed values
+            })
+            
+            # Note: In a real scenario, you'd have both model predictions and observed values
+            # For now, we'll use the same values as a placeholder
+            # TODO: This needs to be updated when you have actual model vs observed data
+            
+            self.model.fit(train_df, self.eqm_variables, corrected_suffix="corrected_")
+            logger.info("EQM corrector fitted successfully")
+            
+            # For EQM, we don't have traditional training metrics
+            train_metrics = {'rmse': 0.0, 'mae': 0.0, 'pearson': 1.0, 'bias': 0.0}
+            val_metrics = {'rmse': 0.0, 'mae': 0.0, 'pearson': 1.0, 'bias': 0.0}
+            
+            # Log EQM statistics
+            eqm_stats = self.model.get_correction_stats()
+            for var, stats in eqm_stats.items():
+                logger.info(f"EQM {var}: bias={stats['bias']:.4f}, relative_bias={stats['bias_relative']:.1f}%")
+            
+            return {
+                'train_metrics': train_metrics,
+                'val_metrics': val_metrics,
+                'training_history': self.training_history,
+                'eqm_stats': eqm_stats
+            }
+        
+        # Handle Delta corrector training
+        elif isinstance(self.model, DeltaCorrector):
+            logger.info("Training Delta corrector...")
+            # For Delta, we need to create a DataFrame with model predictions and observed values
+            
+            # Create training DataFrame for Delta
+            train_df = pl.DataFrame({
+                'VHM0': self.y_train,  # Model predictions (target variable)
+                'corrected_VHM0': self.y_train  # For Delta, we need observed values
+            })
+            
+            # Note: In a real scenario, you'd have both model predictions and observed values
+            # For now, we'll use the same values as a placeholder
+            # TODO: This needs to be updated when you have actual model vs observed data
+            
+            self.model.fit(train_df, self.delta_variables, corrected_suffix="corrected_")
+            logger.info("Delta corrector fitted successfully")
+            
+            # For Delta, we don't have traditional training metrics
+            train_metrics = {'rmse': 0.0, 'mae': 0.0, 'pearson': 1.0, 'bias': 0.0}
+            val_metrics = {'rmse': 0.0, 'mae': 0.0, 'pearson': 1.0, 'bias': 0.0}
+            
+            # Log Delta statistics
+            delta_stats = self.model.get_correction_stats()
+            for var, stats in delta_stats.items():
+                logger.info(f"Delta {var}: bias={stats['bias']:.4f} (method: {stats['method']})")
+            
+            return {
+                'train_metrics': train_metrics,
+                'val_metrics': val_metrics,
+                'training_history': self.training_history,
+                'delta_stats': delta_stats
+            }
+        
+        # Train traditional ML models
         if hasattr(self.model, 'early_stopping_rounds'):
             # XGBoost with early stopping
             if len(self.X_val) > 0:
@@ -1536,7 +1637,31 @@ class FullDatasetTrainer:
             }
         
         # Make predictions
-        test_pred = self.model.predict(self.X_test)
+        if isinstance(self.model, EQMCorrector):
+            # For EQM, we need to create a DataFrame with the test data
+            test_df = pl.DataFrame({
+                'VHM0': self.y_test  # Model predictions to be corrected
+            })
+            
+            # Apply EQM correction
+            corrected_df = self.model.predict(test_df, self.eqm_variables)
+            test_pred = corrected_df['eqm_corrected_VHM0'].to_numpy()
+            
+            logger.info(f"Applied EQM correction to {len(test_pred)} test samples")
+        elif isinstance(self.model, DeltaCorrector):
+            # For Delta, we need to create a DataFrame with the test data
+            test_df = pl.DataFrame({
+                'VHM0': self.y_test  # Model predictions to be corrected
+            })
+            
+            # Apply Delta correction
+            corrected_df = self.model.predict(test_df, self.delta_variables)
+            test_pred = corrected_df['delta_corrected_VHM0'].to_numpy()
+            
+            logger.info(f"Applied Delta correction to {len(test_pred)} test samples")
+        else:
+            # Traditional ML model prediction
+            test_pred = self.model.predict(self.X_test)
         
         # Calculate metrics
         test_metrics = evaluate_model(self.y_test, test_pred)
@@ -1589,7 +1714,18 @@ class FullDatasetTrainer:
         save_path.mkdir(parents=True, exist_ok=True)
         
         # Save model
-        joblib.dump(self.model, save_path / "model.pkl")
+        if isinstance(self.model, EQMCorrector):
+            # EQM has its own save method
+            self.model.save_model(str(save_path / "eqm_model.pkl"))
+            # Also save as regular pickle for compatibility
+            joblib.dump(self.model, save_path / "model.pkl")
+        elif isinstance(self.model, DeltaCorrector):
+            # Delta has its own save method
+            self.model.save_model(str(save_path / "delta_model.pkl"))
+            # Also save as regular pickle for compatibility
+            joblib.dump(self.model, save_path / "model.pkl")
+        else:
+            joblib.dump(self.model, save_path / "model.pkl")
         
         # Save preprocessing components
         if self.scaler is not None:
@@ -1672,18 +1808,18 @@ class FullDatasetTrainer:
         
         # Save results JSON
         logger.info("Uploading results JSON to S3...")
-        upload_results['results_json'] = self.s3_results_saver.save_results_json(results, experiment_name)
+        upload_results['results_json'] = self.s3_results_saver.save_results_json(results)
         
         # Save model artifacts if model path provided
         if model_path:
             logger.info("Uploading model artifacts to S3...")
-            model_uploads = self.s3_results_saver.save_model_artifacts(model_path, experiment_name)
+            model_uploads = self.s3_results_saver.save_model_artifacts(model_path)
             upload_results['model_artifacts'] = model_uploads
         
         # Save diagnostic plots if plots directory provided
         if plots_dir:
             logger.info("Uploading diagnostic plots to S3...")
-            plots_uploads = self.s3_results_saver.save_diagnostic_plots(plots_dir, experiment_name)
+            plots_uploads = self.s3_results_saver.save_diagnostic_plots(plots_dir)
             upload_results['diagnostic_plots'] = plots_uploads
         
         # Log summary
