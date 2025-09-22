@@ -1,48 +1,221 @@
+"""
+DataLoader for Wave Height Bias Correction Research
+
+This module provides the DataLoader class for handling data loading, file processing,
+and basic sampling operations in a modular and reusable way.
+"""
+
+import glob
+import os
+import re
+import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+from typing import List, Tuple, Dict, Any, Union
 import polars as pl
-
-# Path to your converted .parquet file
-file_path = "/data/tsolis/AI_project/parquet/augmented_with_labels/hourly/WAVEAN20231231.parquet"
-
-# Load the file
-df = pl.read_parquet(file_path)
-
-print(df.shape)
-print(df.schema)
-print(df.head)
-
-# Select only relevant columns
-df_selected = df.select(["VHM0", "VTM02", "corrected_VHM0", "corrected_VTM02"])
-
-# Print shape and schema
-print(df_selected.shape)
-print(df_selected.schema)
-
-# Show first few rows
-print(df_selected.head(n=20))
-
-# print((df_selected["VHM0"] - df_selected["corrected_VHM0"]).abs().max())
-# print((df_selected["VHM0"] - df_selected["corrected_VHM0"]).abs().mean())
+from tqdm import tqdm
 
 
-# file_path_wo = "/data/tsolis/AI_project/parquet/without_reduced/hourly/WAVEAN20210101*"
-# file_path_with = "/data/tsolis/AI_project/parquet/without_reduced/hourly/WAVEAN20210101*"
+# DataLoader worker function (needs to be at module level for multiprocessing)
+def _load_single_file_worker_for_dataloader(args):
+    """Worker function for parallel file loading in DataLoader."""
+    file_path, feature_config, sampling_manager = args
+    
+    try:
+        # Import everything at the top to avoid import issues
+        import sys
+        import os
+        import logging
+        
+        # Add the project root to the path to ensure imports work
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        # Now import our modules
+        from src.features.helpers import extract_features_from_parquet
+        # Sampling functions removed - now handled by SamplingManager
+        
+        logger = logging.getLogger(__name__)
+        
+        # Load the file
+        df = extract_features_from_parquet(file_path, use_dask=False)
+        
+        # Create lag features BEFORE sampling to preserve temporal sequences
+        use_lag_features = feature_config.get("lag_features", {}).get("enabled", False)
+        if use_lag_features:
+            logger.debug(f"Creating lag features for {file_path} before sampling...")
+            lag_config = feature_config.get("lag_features", {}).get("lags", {})
+            
+            # Check if we have temporal data (time column)
+            if "time" in df.columns or "timestamp" in df.columns:
+                time_col = "time" if "time" in df.columns else "timestamp"
+                
+                # Sort by time to ensure proper lag calculation
+                df = df.sort([time_col, "lat", "lon"])
+                
+                # Create lag features for each variable
+                for variable, lags in lag_config.items():
+                    if variable in df.columns:
+                        for lag in lags:
+                            lag_col_name = f"{variable}_lag_{lag}h"
+                            # Create lag feature by shifting values within each location
+                            df = df.with_columns([
+                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
+                            ])
+                    else:
+                        logger.warning(f"Variable {variable} not found in data for lag features")
+            else:
+                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
+        
+        # Apply per-file sampling using SamplingManager
+        if sampling_manager is not None:
+            df = sampling_manager.apply_sampling(df)
+        
+        return (file_path, df, True)
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Error loading file {file_path}: {e}")
+        import traceback
+        logging.getLogger(__name__).warning(f"Traceback: {traceback.format_exc()}")
+        return (file_path, None, False)
 
-# df_wo = pl.read_parquet(file_path_wo)
-# df_with = pl.read_parquet(file_path_with)
-# # Select only relevant columns
-# df_wo = df_wo.select(["VHM0", "VTM02"])
-# df_with = df_with.select(["VHM0", "VTM02"])
 
-# # Print shape and schema
-# print(df_selected.shape)
-# print(df_selected.schema)
-
-# # Show first few rows
-# print(df_with.head(n=20))
-# print(df_wo.head(n=20))
-
-
-# ds = xr.open_dataset("/data/tsolis/AI_project/with_reduced/WAVEAN20210101.nc")
-# df = ds.to_dataframe().reset_index()
-# pl_df = pl.DataFrame(df)
-# print(pl_df.head(n=20))
+class DataLoader:
+    """Handles data loading, file processing, and basic sampling."""
+    
+    def __init__(self, config: Dict[str, Any], sampling_manager=None):
+        """Initialize DataLoader with configuration and optional SamplingManager."""
+        self.data_config = config.get("data", {})
+        self.feature_config = config.get("feature_block", {})
+        self.sampling_manager = sampling_manager
+        self.logger = logging.getLogger(__name__)
+    
+    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[pl.DataFrame, List[str]]:
+        """
+        Load and combine all data files from local or S3 paths.
+        
+        Args:
+            data_paths: Single path or list of paths to data files/directories
+            target_column: Name of the target column
+            
+        Returns:
+            Tuple of (combined_dataframe, successful_files)
+        """
+        # Handle single path vs list of paths
+        if isinstance(data_paths, str):
+            data_paths = [data_paths]
+        
+        # Expand paths to get all files
+        all_files = []
+        individual_files_count = 0
+        directory_paths_count = 0
+        
+        for path in data_paths:
+            # If path ends with .parquet, it's already an individual file
+            if path.endswith('.parquet'):
+                all_files.append(path)
+                individual_files_count += 1
+            else:
+                # It's a directory path, need to expand it
+                files = self._expand_data_path(path)
+                all_files.extend(files)
+                directory_paths_count += 1
+        
+        if individual_files_count > 0:
+            self.logger.info(f"Using {individual_files_count} individual file(s) directly (no S3 listing needed)")
+        if directory_paths_count > 0:
+            self.logger.info(f"Expanding {directory_paths_count} directory path(s) to find files")
+        
+        self.logger.info(f"Loading data from {len(all_files)} files...")
+        
+        # Load files (parallel or sequential)
+        successful_files = []
+        all_dataframes = []
+        
+        parallel_loading = self.data_config.get("parallel_loading", True)
+        if parallel_loading and len(all_files) > 1:
+            max_workers = self.data_config.get("max_workers", 4)
+            self.logger.info(f"Loading files in parallel with {max_workers} workers")
+            
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_file = {
+                    executor.submit(_load_single_file_worker_for_dataloader, (file_path, self.feature_config, self.sampling_manager)): file_path 
+                    for file_path in all_files
+                }
+                
+                # Process completed tasks
+                for future in tqdm(as_completed(future_to_file), total=len(all_files), desc="Loading files"):
+                    file_path, df, success = future.result()
+                    
+                    if success and df is not None:
+                        successful_files.append(file_path)
+                        all_dataframes.append(df)
+                    else:
+                        self.logger.warning(f"Failed to load file: {file_path}")
+        else:
+            # Sequential loading
+            self.logger.info("Loading files sequentially")
+            for file_path in tqdm(all_files, desc="Loading files"):
+                file_path, df, success = _load_single_file_worker_for_dataloader((file_path, self.feature_config, self.sampling_manager))
+                
+                if success and df is not None:
+                    successful_files.append(file_path)
+                    all_dataframes.append(df)
+                else:
+                    self.logger.warning(f"Failed to load file: {file_path}")
+        
+        if not all_dataframes:
+            raise ValueError("No data files were successfully loaded!")
+        
+        self.logger.info(f"Successfully loaded {len(successful_files)} out of {len(all_files)} files")
+        
+        # Combine all dataframes
+        self.logger.info("Combining all dataframes...")
+        combined_df = pl.concat(all_dataframes)
+        self.logger.info(f"Combined dataframe shape: {combined_df.shape}")
+        
+        # Apply dataset-level sampling if configured (placeholder for now)
+        # This will be expanded in Phase 2 with SamplingManager
+        
+        return combined_df, successful_files
+    
+    def _expand_data_path(self, path: str) -> List[str]:
+        """Expand data paths (S3, local, glob patterns)."""
+        if path.startswith('s3://'):
+            return self._expand_s3_path(path)
+        else:
+            return self._expand_local_path(path)
+    
+    def _expand_s3_path(self, s3_uri: str) -> List[str]:
+        """Expand S3 path to list of parquet files."""
+        self.logger.info(f"Listing S3 files from: {s3_uri}")
+        
+        try:
+            from src.commons.aws.utils import list_s3_parquet_files
+            files = list_s3_parquet_files(
+                s3_uri, 
+                aws_profile=self.data_config.get("s3", {}).get("aws_profile"),
+                region=self.data_config.get("s3", {}).get("region", "eu-central-1"),
+                max_retries=self.data_config.get("s3", {}).get("max_retries", 10)
+            )
+            self.logger.info(f"Found {len(files)} parquet files in S3")
+            return files
+        except Exception as e:
+            self.logger.error(f"Error listing S3 files from {s3_uri}: {e}")
+            return []
+    
+    def _expand_local_path(self, local_path: str) -> List[str]:
+        """Expand local path to list of parquet files."""
+        if Path(local_path).is_file():
+            return [local_path]
+        elif Path(local_path).is_dir():
+            files = list(Path(local_path).glob("*.parquet"))
+            return [str(f) for f in sorted(files)]
+        else:
+            # Try glob pattern
+            files = glob.glob(local_path)
+            parquet_files = [f for f in files if f.endswith('.parquet')]
+            return sorted(parquet_files)

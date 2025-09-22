@@ -77,13 +77,17 @@ class ExperimentLogger:
             self.experiment.log_parameters(self.config.get("data", {}), prefix="data")
             
             # Log feature configuration
-            self.experiment.log_parameters(self.config.get("features", {}), prefix="features")
-            
+            self.experiment.log_parameters(self.config.get("feature_block", {}), prefix="feature_block")
+            self.experiment.log_parameters(self.config.get("preprocessing", {}), prefix="preprocessing")
+            self.experiment.log_parameters(self.config.get("memory_monitoring", {}), prefix="parallel_processing")
+            self.experiment.log_parameters(self.config.get("logging", {}), prefix="output")
+            self.experiment.log_parameters(self.config.get("output", {}), prefix="output")
+            self.experiment.log_parameters(self.config.get("s3", {}), prefix="s3")
             # Log evaluation configuration
             self.experiment.log_parameters(self.config.get("evaluation", {}), prefix="evaluation")
             
             # Log diagnostics configuration
-            self.experiment.log_parameters(self.config.get("diagnostics", {}), prefix="diagnostics")
+            self.experiment.log_parameters(self.config.get("training_diagnostics", {}), prefix="training_diagnostics")
             
             # Log system info
             self.experiment.log_parameter("python_version", sys.version)

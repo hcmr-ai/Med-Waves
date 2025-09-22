@@ -321,8 +321,11 @@ def main():
     # Print regional test metrics
     if 'regional_test_metrics' in results['evaluation_results'] and results['evaluation_results']['regional_test_metrics']:
         print(f"\nRegional Test Metrics:")
-        for region, metrics in results['evaluation_results']['regional_test_metrics'].items():
-            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+        for region_id, metrics in results['evaluation_results']['regional_test_metrics'].items():
+            # Convert region ID to region name
+            from src.data_engineering.feature_engineer import RegionMapper
+            region_name = RegionMapper.get_display_name(region_id)
+            print(f"  {region_name} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     
     # Print sea-bin test metrics
     if 'sea_bin_test_metrics' in results['evaluation_results'] and results['evaluation_results']['sea_bin_test_metrics']:
