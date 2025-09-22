@@ -43,6 +43,7 @@ from src.analytics.plots.spatial_plots import plot_spatial_feature_map
 from src.evaluation.metrics import evaluate_model
 from src.commons.aws.s3_model_loader import S3ModelLoader
 from src.commons.aws.s3_results_saver import S3ResultsSaver
+from src.commons.region_mapping import RegionMapper
 
 # Set up logging
 logging.basicConfig(
@@ -93,6 +94,7 @@ class ModelEvaluator:
         # Initialize model components
         self.model = None
         self.scaler = None
+        self.regional_scaler = None
         self.feature_selector = None
         self.dimension_reducer = None
         self.feature_columns = None
@@ -186,6 +188,7 @@ class ModelEvaluator:
             # Assign components
             self.model = components.get('model')
             self.scaler = components.get('scaler')
+            self.regional_scaler = components.get('regional_scaler')
             self.feature_selector = components.get('feature_selector')
             self.dimension_reducer = components.get('dimension_reducer')
             self.feature_columns = components.get('feature_columns')
@@ -218,6 +221,12 @@ class ModelEvaluator:
         if scaler_file.exists():
             self.scaler = joblib.load(scaler_file)
             logger.info(f"Loaded scaler from {scaler_file}")
+        
+        # Load regional scaler if available
+        regional_scaler_file = self.model_path / "regional_scaler.pkl"
+        if regional_scaler_file.exists():
+            self.regional_scaler = joblib.load(regional_scaler_file)
+            logger.info(f"Loaded regional scaler from {regional_scaler_file}")
         
         # Load feature selector
         selector_file = self.model_path / "feature_selector.pkl"
@@ -376,7 +385,7 @@ class ModelEvaluator:
         logger.info(f"Found {len(files)} data files")
         return files
     
-    def load_and_preprocess_file(self, file_path: str) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    def load_and_preprocess_file(self, file_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
         """
         Load and preprocess a single file for evaluation using the same logic as trainer.
         
@@ -384,7 +393,7 @@ class ModelEvaluator:
             file_path: Path to the data file
             
         Returns:
-            Tuple of (X, y, metadata_df) or (None, None, None) if failed
+            Tuple of (X, y, regions, coords, metadata_df) or (None, None, None, None, None) if failed
         """
         logger.info(f"Loading file: {Path(file_path).name}")
         
@@ -402,11 +411,11 @@ class ModelEvaluator:
             logger.info(f"Loaded DataFrame shape: {df.shape}, columns: {df.columns}")
             
             # Prepare features using the same logic as trainer
-            X_raw, y_raw = self._prepare_features_from_dataframe(df)
+            X_raw, y_raw, regions_raw, coords_raw = self._prepare_features_from_dataframe(df)
             
             if X_raw.size == 0:
                 logger.warning(f"No valid samples after preprocessing in {file_path}")
-                return None, None, None
+                return None, None, None, None
             
             # Extract metadata for spatial analysis (lat, lon)
             metadata_cols = []
@@ -431,61 +440,204 @@ class ModelEvaluator:
                 })
             
             # Apply preprocessing (same as trainer)
-            X = self._apply_preprocessing(X_raw)
+            X = self._apply_preprocessing(X_raw, regions_raw)
             
             logger.info(f"Processed {len(X)} samples from {Path(file_path).name}")
-            return X, y_raw, metadata_df
+            return X, y_raw, regions_raw, coords_raw, metadata_df
             
         except Exception as e:
             logger.error(f"Error processing {file_path}: {e}")
-            return None, None, None
+            return None, None, None, None, None
     
-    def _prepare_features_from_dataframe(self, df: pl.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    def _prepare_features_from_dataframe(self, df: pl.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Prepare features and target from dataframe using the same logic as trainer.
+        Prepare features, target, regions, and coordinates from dataframe using the same logic as trainer.
         
         Args:
             df: Polars DataFrame with features and target
             
         Returns:
-            Tuple of (X, y) arrays
+            Tuple of (X, y, regions, coords) arrays
         """
         # Get available features (same logic as trainer)
         available_features = df.columns
         
-        # Filter out target and non-feature columns (same as trainer)
+        # Remove NaN values at the beginning to avoid issues with lag features
+        logger.info(f"Removing NaN values from {df.shape[0]} rows...")
+        df = df.drop_nulls()
+        logger.info(f"After removing NaN values: {df.shape[0]} rows remaining")
+        
+        # Start with base features (exclude target and non-feature columns)
         feature_cols = [col for col in available_features
-                       if col not in ["vhm0_y", "corrected_VTM02", "time", "lat", "lon", "latitude", "longitude"] 
+                       if col not in ["vhm0_y"] + self.config.get("feature_block", {}).get("features_to_exclude", [])
                        and not col.startswith("_")]
         
-        logger.info(f"Using {len(feature_cols)} features: {feature_cols}")
+        # Add geographic context features if enabled (same logic as trainer)
+        use_geo_context = self.config.get("feature_block", {}).get("use_geo_context", {}).get("enabled", False)
+        if use_geo_context:
+            logger.info("Adding geographic context features...")
+            # Add geographic features to the dataframe
+            df = df.with_columns([
+                # Distance from key geographic points
+                ((pl.col("longitude") - (-5.5)) ** 2 + (pl.col("latitude") - 36.0) ** 2).sqrt().alias("dist_from_gibraltar"),
+                ((pl.col("longitude") - 0) ** 2 + (pl.col("latitude") - 40) ** 2).sqrt().alias("dist_from_center"),
+                
+                # Fetch proxy (longitude-based)
+                (pl.col("longitude") + 10).alias("fetch_proxy"),
+                
+                # Bathymetry proxy (longitude-based)
+                (pl.col("longitude") < -5).alias("deep_water_proxy"),
+            ])
+            
+            # Add these to feature columns
+            geo_features = ["dist_from_gibraltar", "dist_from_center", "fetch_proxy", "deep_water_proxy"]
+            feature_cols.extend(geo_features)
+            logger.info(f"Added geographic features: {geo_features}")
+            
+            # Add basin categorical feature if enabled
+            include_basin = self.config.get("feature_block", {}).get("use_geo_context", {}).get("include_basin", False)
+            if include_basin:
+                logger.info("Adding basin categorical feature...")
+                df = df.with_columns([
+                    pl.when(pl.col("longitude") < -5)
+                    .then(pl.lit(0))  # Atlantic
+                    .when(pl.col("longitude") > 30)
+                    .then(pl.lit(2))  # Eastern Med
+                    .otherwise(pl.lit(1))  # Mediterranean
+                    .alias("basin")
+                ])
+                feature_cols.append("basin")
+                logger.info("Added basin categorical feature")
         
-        # Extract features and target
+        # Add lag features if enabled (same logic as trainer)
+        use_lag_features = self.config.get("feature_block", {}).get("lag_features", {}).get("enabled", False)
+        if use_lag_features:
+            logger.info("Adding lag features...")
+            lag_config = self.config.get("feature_block", {}).get("lag_features", {}).get("lags", {})
+            
+            # Check if we have temporal data (time column)
+            if "time" in df.columns or "timestamp" in df.columns:
+                time_col = "time" if "time" in df.columns else "timestamp"
+                logger.info(f"Using time column: {time_col}")
+                
+                # Sort by time to ensure proper lag calculation
+                df = df.sort([time_col, "lat", "lon"])
+                
+                # Create lag features for each variable
+                lag_features_added = []
+                for variable, lags in lag_config.items():
+                    if variable in df.columns:
+                        logger.info(f"Creating lag features for {variable} with lags: {lags}")
+                        for lag in lags:
+                            lag_col_name = f"{variable}_lag_{lag}h"
+                            # Create lag feature by shifting values within each location
+                            df = df.with_columns([
+                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
+                            ])
+                            feature_cols.append(lag_col_name)
+                            lag_features_added.append(lag_col_name)
+                    else:
+                        logger.warning(f"Variable {variable} not found in data for lag features")
+                
+                # Note: NaN values in lag features are handled by the initial drop_nulls() call
+                
+                logger.info(f"Added {len(lag_features_added)} lag features: {lag_features_added}")
+                
+                # Remove time column from feature_cols after lag features are created
+                if "time" in feature_cols:
+                    feature_cols.remove("time")
+                    logger.info("Removed 'time' column from features after lag feature creation")
+            else:
+                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
+                logger.warning("Available columns: " + ", ".join(df.columns))
+        
+        # Always create region information for monitoring and analysis
+        logger.info("Creating regional classification...")
+        df = df.with_columns([
+            pl.when(pl.col("longitude") < -5)
+            .then(pl.lit(0))  # atlantic
+            .when(pl.col("longitude") > 30)
+            .then(pl.lit(2))  # eastern_med
+            .otherwise(pl.lit(1))  # mediterranean
+            .alias("region")
+        ])
+        
+        # Apply regional training filter if enabled (same logic as trainer)
+        use_regional_training = self.config.get("feature_block", {}).get("regional_training", {}).get("enabled", False)
+        if use_regional_training:
+            training_regions = self.config.get("feature_block", {}).get("regional_training", {}).get("training_regions", [0])  # Default to atlantic (0)
+            logger.info(f"Regional training enabled - filtering to regions: {training_regions}")
+            
+            # Filter data to only include specified regions
+            df = df.filter(pl.col("region").is_in(training_regions))
+            logger.info(f"After regional filtering: {df.shape[0]} rows remaining")
+            
+            # Log regional distribution after filtering
+            region_counts = df["region"].value_counts().sort("region")
+            logger.info("Regional distribution after filtering:")
+            for row in region_counts.iter_rows(named=True):
+                region_id = row["region"]
+                count = row["count"]
+                region_name = RegionMapper.get_display_name(region_id)
+                logger.info(f"  {region_name}: {count:,} samples")
+        
+        # Extract features and target (NaN values already removed upfront)
         X_raw = df.select(feature_cols).to_numpy()
         y_raw = df["vhm0_y"].to_numpy()
         
-        # Remove rows with NaN values (same as trainer)
-        valid_mask = ~(np.isnan(X_raw).any(axis=1) | np.isnan(y_raw))
-        X_raw = X_raw[valid_mask]
-        y_raw = y_raw[valid_mask]
+        # Extract coordinates for spatial plotting
+        coords_raw = df.select(["lat", "lon"]).to_numpy()
         
-        logger.info(f"After removing NaN: X: {X_raw.shape}, y: {y_raw.shape}")
+        # Extract regions for regional analysis
+        regions_raw = df["region"].to_numpy()
         
-        return X_raw, y_raw
+        logger.info(f"Final dataset - X: {X_raw.shape}, y: {y_raw.shape}, coords: {coords_raw.shape}")
+        if regions_raw is not None:
+            unique_regions = np.unique(regions_raw)
+            region_names = [RegionMapper.get_display_name(rid) for rid in unique_regions]
+            logger.info(f"Regional distribution: {region_names} (IDs: {unique_regions})")
+        
+        return X_raw, y_raw, regions_raw, coords_raw
     
-    def _apply_preprocessing(self, X: np.ndarray) -> np.ndarray:
+    def _calculate_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+        """
+        Calculate sea-bin metrics for different wave height ranges using shared utility.
+        
+        Args:
+            y_true: Actual wave heights
+            y_pred: Predicted wave heights
+            
+        Returns:
+            Dictionary with sea-bin metrics
+        """
+        from src.evaluation.sea_bin_utils import calculate_sea_bin_metrics
+        
+        # Get sea-bin configuration
+        sea_bin_config = self.config.get("feature_block", {}).get("sea_bin_metrics", {})
+        
+        # Use the shared utility function with logging disabled for evaluation
+        return calculate_sea_bin_metrics(y_true, y_pred, sea_bin_config, enable_logging=False)
+    
+    def _apply_preprocessing(self, X: np.ndarray, regions: np.ndarray = None) -> np.ndarray:
         """
         Apply preprocessing transformations (same as trainer).
         
         Args:
             X: Feature matrix
+            regions: Region information for regional scaling (optional)
             
         Returns:
             Transformed feature matrix
         """
         # Apply preprocessing in the same order as trainer
-        if self.scaler:
+        if self.regional_scaler is not None and regions is not None:
+            # Use regional scaling if available
+            X = self.regional_scaler.transform_with_regions(X, regions)
+            logger.debug("Applied regional scaling")
+        elif self.scaler:
+            # Fall back to standard scaling
             X = self.scaler.transform(X)
+            logger.debug("Applied standard scaling")
         
         if self.feature_selector:
             X = self.feature_selector.transform(X)
@@ -508,7 +660,7 @@ class ModelEvaluator:
         logger.info(f"Evaluating file: {Path(file_path).name}")
         
         # Load and preprocess data
-        X, y, metadata_df = self.load_and_preprocess_file(file_path)
+        X, y, regions, coords, metadata_df = self.load_and_preprocess_file(file_path)
         
         if X is None:
             return None
@@ -518,6 +670,9 @@ class ModelEvaluator:
         
         # Compute overall metrics (includes all metrics: rmse, mae, bias, diff, pearson, var_true, var_pred, snr, snr_db)
         metrics = evaluate_model(y_pred, y)
+        
+        # Compute sea-bin metrics if enabled
+        sea_bin_metrics = self._calculate_sea_bin_metrics(y, y_pred)
         
         # Compute comprehensive spatial metrics
         spatial_df = metadata_df.copy()
@@ -540,6 +695,7 @@ class ModelEvaluator:
             "n_samples": len(X),
             "date_info": date_info,
             "metrics": metrics,
+            "sea_bin_metrics": sea_bin_metrics,
             "spatial_metrics": spatial_metrics_df.to_pandas(),
             "predictions": {
                 "y_true": y,
@@ -959,6 +1115,38 @@ class ModelEvaluator:
         metrics_df = pd.DataFrame(all_metrics)
         mean_metrics = metrics_df.mean().to_dict()
         
+        # Aggregate sea-bin metrics across files
+        all_sea_bin_metrics = []
+        for results in self.file_results.values():
+            if results and "sea_bin_metrics" in results and results["sea_bin_metrics"]:
+                all_sea_bin_metrics.append(results["sea_bin_metrics"])
+        
+        aggregated_sea_bin_metrics = {}
+        if all_sea_bin_metrics:
+            # Get all unique bin names
+            all_bin_names = set()
+            for sea_bin_dict in all_sea_bin_metrics:
+                all_bin_names.update(sea_bin_dict.keys())
+            
+            # Aggregate metrics for each bin
+            for bin_name in all_bin_names:
+                bin_metrics = []
+                for sea_bin_dict in all_sea_bin_metrics:
+                    if bin_name in sea_bin_dict:
+                        bin_metrics.append(sea_bin_dict[bin_name])
+                
+                if bin_metrics:
+                    # Compute mean metrics for this bin across all files
+                    bin_df = pd.DataFrame(bin_metrics)
+                    aggregated_sea_bin_metrics[bin_name] = {
+                        "rmse": bin_df["rmse"].mean(),
+                        "mae": bin_df["mae"].mean(),
+                        "pearson": bin_df["pearson"].mean(),
+                        "total_count": bin_df["count"].sum(),
+                        "total_percentage": bin_df["percentage"].mean(),
+                        "description": bin_metrics[0].get("description", "")
+                    }
+        
         # Store aggregated results
         self.aggregated_results = {
             "evaluation_timestamp": datetime.now().isoformat(),
@@ -966,6 +1154,7 @@ class ModelEvaluator:
             "total_samples": total_samples,
             "mean_metrics": mean_metrics,
             "metrics_std": metrics_df.std().to_dict(),
+            "aggregated_sea_bin_metrics": aggregated_sea_bin_metrics,
             "file_summary": {
                 file_name: {
                     "n_samples": results["n_samples"],

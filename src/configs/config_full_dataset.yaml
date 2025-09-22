@@ -4,7 +4,7 @@
 
 # Model configuration
 model:
-  type: "xgb" # Options: xgb, rf, elasticnet, lasso, ridge
+  type: "xgb" # Options: xgb, rf, elasticnet, lasso, ridge, eqm, delta
   n_estimators: 2000
   max_depth: 6
   learning_rate: 0.08
@@ -22,6 +22,19 @@ model:
   gamma: 0.5
   max_bin: 256
   verbose: false
+  
+  # EQM-specific configuration (only used when type: "eqm")
+  eqm:
+    quantile_resolution: 1000
+    use_kde: true
+    extrapolation_method: "constant" # Options: constant, linear, nearest
+    kde_bandwidth: null # Auto if null
+    variables: ["VHM0"] # Variables to correct
+  
+  # Delta-specific configuration (only used when type: "delta")
+  delta:
+    variables: ["VHM0"] # Variables to correct
+    method: "mean_bias" # Options: mean_bias, median_bias
 
 # Data configuration
 data:
@@ -49,21 +62,65 @@ data:
     aws_profile: null # AWS profile name (optional)
     region: "eu-central-1" # AWS region (optional)
     max_retries: 10 # Max retries for S3 operations
-  
+
   # Parallel loading configuration
   parallel_loading: true # Enable parallel file loading for faster data loading
+  max_workers: 8
 
 # Feature engineering configuration
 feature_block:
+  features_to_exclude:
+    - "corrected_VTM02"
+    - "time"
+    - "lat"
+    - "lon"
+    - "VMDR"
+    - "WDIR"
+
   # Sampling (optional - can be disabled for full dataset)
-  max_samples_per_file: 500000 # Set to null to use all data
+  max_samples_per_file: 1500000 # Set to null to use all data
   sampling_strategy: "per_location" # Options: none, random, per_location, temporal
-  samples_per_location: 2
+  samples_per_location: 6
   samples_per_hour: 100
   sampling_seed: 42
 
   # Preprocessing
-  scaler: "standard" # Options: standard, robust, minmax
+  scaler: "standard" # Options: standard, robust, minmax, null (no scaling)
+
+  # Regional scaling (applies different scaling to different geographic regions)
+  # NOTE: Requires a valid scaler (standard, robust, minmax) - cannot be used with scaler: "null"
+  regional_scaling:
+    enabled: false # Enable regional scaling for Atlantic vs Mediterranean
+
+  # Geographic context features (adds geographic features to the model)
+  use_geo_context:
+    enabled: false # Enable geographic context features (distances, fetch, bathymetry)
+    include_basin: false # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
+
+  # Lag features (uses previous time steps of input variables)
+  lag_features:
+    enabled: true # Enable lag features for temporal patterns
+    lags:
+      U10: [6, 12, 24] # Previous degraded wave heights (hours ago)
+      V10: [6, 12, 24]
+  # Regional weighting (gives different importance to different regions during training)
+  regional_weighting:
+    enabled: false # Enable regional weighting for Atlantic vs Mediterranean
+    weights:
+      0: 3.0 # atlantic - 50% more weight for Atlantic data
+      1: 1.0 # mediterranean - Normal weight for Mediterranean data
+      2: 1.0 # eastern_med - Normal weight for Eastern Mediterranean data
+
+  # Regional training (train only in specific regions)
+  regional_training:
+    enabled: true # Enable regional training (train only in specified regions)
+    training_regions: [0] # Options: [0] (atlantic), [1] (mediterranean), [2] (eastern_med), or combinations
+    # Alternative: use coordinate bounds instead of region names
+    # training_bounds:
+    #   lon_min: -10.0
+    #   lon_max: -5.0
+    #   lat_min: 35.0
+    #   lat_max: 45.0
 
   # Feature selection
   feature_selection:
@@ -77,11 +134,48 @@ feature_block:
     type: "pca" # Options: pca, svd
     n_components: 50
 
+  # Sea-bin performance metrics (analyze performance across different wave height ranges)
+  sea_bin_metrics:
+    enabled: true # Enable sea-bin performance analysis
+    bins:
+      - name: "calm_sea"
+        min: 0.0
+        max: 0.5
+        description: "Calm sea conditions"
+      - name: "slight_sea"
+        min: 0.5
+        max: 1.25
+        description: "Slight sea conditions"
+      - name: "moderate_sea"
+        min: 1.25
+        max: 2.5
+        description: "Moderate sea conditions"
+      - name: "rough_sea"
+        min: 2.5
+        max: 4.0
+        description: "Rough sea conditions"
+      - name: "very_rough_sea"
+        min: 4.0
+        max: 6.0
+        description: "Very rough sea conditions"
+      - name: "high_sea"
+        min: 6.0
+        max: 9.0
+        description: "High sea conditions"
+      - name: "very_high_sea"
+        min: 9.0
+        max: 14.0
+        description: "Very high sea conditions"
+      - name: "phenomenal_sea"
+        min: 14.0
+        max: 999.0
+        description: "Phenomenal sea conditions"
+
 # Evaluation configuration
 evaluation:
   metrics: ["rmse", "mae", "bias", "pearson"]
   save_predictions: true
-  predictions_save_path: "evaluation_results"
+  predictions_save_path: "evaluation_results" # not used
 
 # Training diagnostics
 training_diagnostics:
@@ -91,6 +185,9 @@ training_diagnostics:
   create_learning_curves: true
   create_residual_plots: true
   create_prediction_plots: true
+  create_regional_analysis: true # Enable regional performance analysis plots
+  create_sea_bin_analysis: true # Enable sea-bin performance analysis plots
+  create_spatial_maps: true # Enable aggregated spatial maps
 
 # Logging configuration
 logging:
@@ -111,13 +208,13 @@ memory_monitoring:
 # Output configuration
 output:
   model_save_path: "trained_models"
-  results_save_path: "training_results"
-  experiment_name: "full_dataset_experiment"
+  results_save_path: "training_results" # not used
+  experiment_name: "xgb_1500K_samples_atlantic_only"
 
   # S3 configuration for saving results
   s3:
-    enabled: false
+    enabled: true
     bucket: "medwav-dev-data"
-    prefix: "experiments/full_dataset_experiment/<model_type>_<configuration>_<timestamp>"
+    prefix: "experiments/full_dataset_experiment/" # the code will add experiment_name + timestamp at the end
     region: "eu-central-1"
     aws_profile: null # Use default profile if null

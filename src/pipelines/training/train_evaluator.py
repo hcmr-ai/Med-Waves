@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from src.classifiers.delta_corrector import DeltaCorrector
 from src.classifiers.edcdf_corrector import EDCDFCorrector
+from src.classifiers.eqm_corrector import EQMCorrector
 
 
 def save_corrector_model(corrector, output_dir: Path, corrector_name: str, run_id: str):
@@ -199,15 +200,130 @@ def incremental_fit_edcdf_corrector(
 
     return corrector
 
+def incremental_fit_eqm_corrector(
+    train_files: List[Path],
+    variables: list[str],
+    corrected_suffix: str = "corrected_",
+    batch_size: int = 5,
+    quantile_resolution: int = 1000,
+    use_kde: bool = True,
+    max_samples_per_batch: int = 100000
+) -> EQMCorrector:
+    """
+    Incrementally fit EQM corrector using quantile-based approach for large datasets.
+    
+    Args:
+        train_files: List of training file paths
+        variables: Variables to correct
+        corrected_suffix: Suffix for observed columns
+        batch_size: Number of files to process in each batch
+        quantile_resolution: Number of quantiles for CDF approximation
+        use_kde: Whether to use kernel density estimation
+        max_samples_per_batch: Maximum samples to use per batch (for memory efficiency)
+        
+    Returns:
+        Fitted EQM corrector
+    """
+    print("🔄 Incrementally fitting EQM corrector...")
+    
+    # Initialize EQM corrector
+    corrector = EQMCorrector(
+        quantile_resolution=quantile_resolution,
+        extrapolation_method="constant",
+        kde_bandwidth=None  # Auto bandwidth
+    )
+    
+    # Store aggregated data for each variable
+    aggregated_data = {var: {"model": [], "obs": []} for var in variables}
+    total_samples = {var: 0 for var in variables}
+    
+    # Process training files in batches
+    for i in tqdm(range(0, len(train_files), batch_size), desc="Training batches", unit="batch"):
+        batch_files = train_files[i:i + batch_size]
+        
+        # Load and concatenate batch files
+        batch_dfs = []
+        for file_path in batch_files:
+            try:
+                df = pl.read_parquet(file_path)
+                batch_dfs.append(df)
+            except Exception as e:
+                print(f"⚠️ Error loading {file_path}: {e}")
+                continue
+        
+        if batch_dfs:
+            batch_df = pl.concat(batch_dfs)
+            
+            # Process each variable
+            for var in variables:
+                model_col = var
+                obs_col = corrected_suffix + var
+                
+                if model_col in batch_df.columns and obs_col in batch_df.columns:
+                    # Drop nulls for this variable
+                    valid_data = batch_df.drop_nulls(subset=[model_col, obs_col])
+                    
+                    if len(valid_data) > 0:
+                        model_values = valid_data[model_col].to_numpy()
+                        obs_values = valid_data[obs_col].to_numpy()
+                        
+                        # Sample if too many values (for memory efficiency)
+                        if len(model_values) > max_samples_per_batch:
+                            indices = np.random.choice(
+                                len(model_values), 
+                                max_samples_per_batch, 
+                                replace=False
+                            )
+                            model_values = model_values[indices]
+                            obs_values = obs_values[indices]
+                        
+                        # Store data for later fitting
+                        aggregated_data[var]["model"].append(model_values)
+                        aggregated_data[var]["obs"].append(obs_values)
+                        total_samples[var] += len(model_values)
+    
+    # Create training DataFrame from aggregated data
+    training_data = {}
+    for var in variables:
+        if total_samples[var] > 0:
+            # Concatenate all batches for this variable
+            model_all = np.concatenate(aggregated_data[var]["model"])
+            obs_all = np.concatenate(aggregated_data[var]["obs"])
+            
+            training_data[var] = model_all
+            training_data[corrected_suffix + var] = obs_all
+            
+            print(f"   {var}: {total_samples[var]:,} total samples")
+    
+    # Create DataFrame for fitting
+    if training_data:
+        training_df = pl.DataFrame(training_data)
+        
+        # Fit EQM corrector
+        corrector.fit(
+            training_df, 
+            variables, 
+            corrected_suffix=corrected_suffix,
+            use_kde=use_kde
+        )
+        
+        # Print correction statistics
+        stats = corrector.get_correction_stats()
+        for var, var_stats in stats.items():
+            print(f"   {var}: bias={var_stats['bias']:.4f}, relative_bias={var_stats['bias_relative']:.1f}%")
+    
+    return corrector
+
 def train_and_evaluate_corrector(
-    corrector_class: Type,               # DeltaCorrector or EDCDFCorrector
+    corrector_class: Type,               # DeltaCorrector, EDCDFCorrector, or EQMCorrector
     train_files: List[Path],             # List of training file paths
     test_files: List[Path],              # List of test file paths
     comet_experiment: Experiment,
     variables: list[str],
     run_id: str,
     corrected_suffix: str = "corrected_",
-    batch_size: int = 5                  # Number of files to process in each batch
+    batch_size: int = 5,                 # Number of files to process in each batch
+    **corrector_kwargs                   # Additional arguments for corrector-specific fitting
 ):
     print(f"📈 Training corrector: {corrector_class.__name__}")
     print(f"   Training files: {len(train_files)}")
@@ -222,6 +338,10 @@ def train_and_evaluate_corrector(
     elif corrector_class == EDCDFCorrector:
         corrector = incremental_fit_edcdf_corrector(
             train_files, variables, corrected_suffix, batch_size, quantile_resolution=10000
+        )
+    elif corrector_class == EQMCorrector:
+        corrector = incremental_fit_eqm_corrector(
+            train_files, variables, corrected_suffix, batch_size, **corrector_kwargs
         )
     else:
         raise ValueError(f"Unsupported corrector class: {corrector_class}")

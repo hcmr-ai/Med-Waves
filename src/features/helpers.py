@@ -156,6 +156,9 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
     if "wave_dir_cos" in df.columns:
         feature_columns.append(pl.col("wave_dir_cos"))
 
+    if 'time' in df.columns:
+        feature_columns.append(pl.col("time"))
+
     # Create the feature matrix by selecting columns
     logger.info(f"Building feature matrix with {len(feature_columns)} columns")
     if feature_columns:

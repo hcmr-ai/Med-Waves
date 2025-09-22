@@ -9,7 +9,7 @@ def evaluate_model(y_pred, y):
     """
     rmse = np.sqrt(mean_squared_error(y, y_pred))
     mae = mean_absolute_error(y, y_pred)
-    bias = np.mean(y_pred - y)
+    bias = np.mean(np.mean(y_pred) - y)
     diff = np.mean(y_pred - y)
     pearson = pearsonr(y, y_pred)
     

@@ -13,6 +13,7 @@ from typing import List, Dict, Any
 import glob
 from datetime import datetime
 import sys
+import numpy as np
 from comet_ml import Experiment
 
 project_root = Path(__file__).parent.parent.parent.parent
@@ -119,13 +120,13 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     
     # Load data
     logger.info("Loading data...")
-    X, y, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
+    X, y, regions, coords, successful_files = trainer.load_data(data_files, config["data"]["target_column"])
     x_shape = X.shape
     y_shape = y.shape
     
     # Split data
     logger.info("Splitting data...")
-    trainer.split_data(X, y, successful_files)
+    trainer.split_data(X, y, regions, coords, successful_files)
     
     # 🚀 MEMORY OPTIMIZATION: Delete original data after splitting
     del X, y
@@ -172,8 +173,7 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
         
         # Log S3 URLs
         if s3_upload_results:
-            experiment_name = config["output"]["experiment_name"]
-            s3_files = trainer.s3_results_saver.list_experiment_files(experiment_name)
+            s3_files = trainer.s3_results_saver.list_experiment_files()
             logger.info(f"S3 experiment files: {len(s3_files)} files uploaded")
             for s3_key in s3_files[:5]:  # Show first 5 files
                 s3_url = trainer.s3_results_saver.get_s3_url(s3_key)
@@ -194,9 +194,26 @@ def save_results(results: Dict[str, Any], save_path: str, comet_experiment: Expe
     
     # Save results as JSON
     import json
+    import numpy as np
+    
+    def convert_numpy_types(obj):
+        """Convert numpy types to native Python types for JSON serialization."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {str(k): convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        else:
+            return obj
+    
     results_file = save_path / f"{results['experiment_name']}_results.json"
     with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2, default=str)
+        json.dump(convert_numpy_types(results), f, indent=2)
     
     # Save summary
     summary_file = save_path / f"{results['experiment_name']}_summary.txt"
@@ -272,10 +289,49 @@ def main():
     print(f"  Val RMSE: {results['training_results']['val_metrics']['rmse']:.4f}")
     print(f"  Val MAE: {results['training_results']['val_metrics']['mae']:.4f}")
     print(f"  Val Pearson: {results['training_results']['val_metrics']['pearson']:.4f}")
+    
+    # Print regional training metrics
+    if 'regional_train_metrics' in results['training_results'] and results['training_results']['regional_train_metrics']:
+        print(f"\nRegional Training Metrics:")
+        for region, metrics in results['training_results']['regional_train_metrics'].items():
+            # Handle both integer region IDs and string region names
+            if isinstance(region, (int, np.integer)):
+                from src.commons.region_mapping import RegionMapper
+                region_name = RegionMapper.get_display_name(region)
+            else:
+                region_name = region.title()
+            print(f"  {region_name} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
+    # Print regional validation metrics
+    if 'regional_val_metrics' in results['training_results'] and results['training_results']['regional_val_metrics']:
+        print(f"\nRegional Validation Metrics:")
+        for region, metrics in results['training_results']['regional_val_metrics'].items():
+            # Handle both integer region IDs and string region names
+            if isinstance(region, (int, np.integer)):
+                from src.commons.region_mapping import RegionMapper
+                region_name = RegionMapper.get_display_name(region)
+            else:
+                region_name = region.title()
+            print(f"  {region_name} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
     print(f"\nTest Results:")
     print(f"  Test RMSE: {results['evaluation_results']['test_metrics']['rmse']:.4f}")
     print(f"  Test MAE: {results['evaluation_results']['test_metrics']['mae']:.4f}")
     print(f"  Test Pearson: {results['evaluation_results']['test_metrics']['pearson']:.4f}")
+    
+    # Print regional test metrics
+    if 'regional_test_metrics' in results['evaluation_results'] and results['evaluation_results']['regional_test_metrics']:
+        print(f"\nRegional Test Metrics:")
+        for region, metrics in results['evaluation_results']['regional_test_metrics'].items():
+            print(f"  {region.title()} - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
+    # Print sea-bin test metrics
+    if 'sea_bin_test_metrics' in results['evaluation_results'] and results['evaluation_results']['sea_bin_test_metrics']:
+        print(f"\nSea-Bin Test Metrics:")
+        for bin_name, metrics in results['evaluation_results']['sea_bin_test_metrics'].items():
+            count = metrics.get('count', 0)
+            percentage = metrics.get('percentage', 0)
+            print(f"  {bin_name.title()} ({count:,} samples, {percentage:.1f}%) - RMSE: {metrics['rmse']:.4f}, MAE: {metrics['mae']:.4f}, Pearson: {metrics['pearson']:.4f}")
+    
     print("="*50)
 
 
