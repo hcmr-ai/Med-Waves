@@ -2,9 +2,8 @@ import glob
 import os
 import re
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import polars as pl
-import numpy as np
 
 
 def pair_input_target_files(

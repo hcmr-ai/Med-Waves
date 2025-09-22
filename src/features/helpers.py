@@ -52,29 +52,47 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
     logger.info(f"Loading parquet file: {parquet_path}")
     
     # Load parquet file - handle S3 URLs
-    if parquet_path.startswith('s3://'):
-        logger.info("Loading from S3...")
-        # Handle S3 URLs
-        import boto3
-        from io import BytesIO
-        
-        # Parse S3 URL
-        s3_url = parquet_path[5:]  # Remove 's3://'
-        bucket, key = s3_url.split('/', 1)
-        logger.info(f"S3 bucket: {bucket}, key: {key}")
-        
-        # Download from S3
-        s3_client = boto3.client('s3')
-        response = s3_client.get_object(Bucket=bucket, Key=key)
-        parquet_data = response['Body'].read()
-        logger.info(f"Downloaded {len(parquet_data)} bytes from S3")
-        
-        # Read with polars
-        df = pl.read_parquet(BytesIO(parquet_data))
-    else:
-        logger.info("Loading local file...")
-        # Handle local files
-        df = pl.read_parquet(parquet_path)
+    try:
+        if parquet_path.startswith('s3://'):
+            logger.info("Loading from S3...")
+            # Handle S3 URLs
+            import boto3
+            from io import BytesIO
+            
+            # Parse S3 URL
+            s3_url = parquet_path[5:]  # Remove 's3://'
+            bucket, key = s3_url.split('/', 1)
+            logger.info(f"S3 bucket: {bucket}, key: {key}")
+            
+            # Download from S3
+            s3_client = boto3.client('s3')
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            parquet_data = response['Body'].read()
+            logger.info(f"Downloaded {len(parquet_data)} bytes from S3")
+            
+            # Read with polars - try with different options for problematic files
+            try:
+                df = pl.read_parquet(BytesIO(parquet_data))
+            except Exception as e:
+                if "Nested object types" in str(e):
+                    logger.warning(f"File {parquet_path} contains nested object types. Trying with pyarrow backend...")
+                    df = pl.read_parquet(BytesIO(parquet_data), use_pyarrow=True)
+                else:
+                    raise e
+        else:
+            logger.info("Loading local file...")
+            # Handle local files
+            try:
+                df = pl.read_parquet(parquet_path)
+            except Exception as e:
+                if "Nested object types" in str(e):
+                    logger.warning(f"File {parquet_path} contains nested object types. Trying with pyarrow backend...")
+                    df = pl.read_parquet(parquet_path, use_pyarrow=True)
+                else:
+                    raise e
+    except Exception as e:
+        logger.error(f"Error loading parquet file {parquet_path}: {e}")
+        raise e
     
     logger.info(f"Loaded DataFrame shape: {df.shape}")
     logger.info(f"Available columns: {df.columns}")
