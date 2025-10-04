@@ -82,6 +82,11 @@ class RobustModelEvaluator:
         
         logger.info(f"Initialized RobustModelEvaluator with output directory: {self.output_dir}")
     
+    def cleanup(self):
+        """Clean up resources, especially S3 temporary files."""
+        if self.s3_model_loader:
+            self.s3_model_loader.cleanup()
+    
     def load_model(self, model_path: str) -> None:
         """Load model and scaler from the specified path (local or S3)."""
         logger.info(f"Loading model from: {model_path}")
@@ -266,58 +271,6 @@ class RobustModelEvaluator:
             logger.error(f"Error processing {file_path}: {e}")
             return None, None, None, None, None, None, None
     
-    def evaluate_file(self, file_path: str) -> Dict[str, Any]:
-        """Evaluate a single file using training infrastructure."""
-        logger.info(f"Evaluating file: {Path(file_path).name}")
-        
-        # Load and preprocess data
-        X, y, regions, coords, metadata_df, vhm0_x_index, X_raw = self.load_and_preprocess_file(file_path)
-        
-        if X is None:
-            return None
-        
-        # Make predictions
-        y_pred = self.model.predict(X)
-        
-        # Compute overall metrics
-        metrics = evaluate_model(y_pred, y)
-        
-        # Compute baseline metrics (vhm0_x vs vhm0_y)
-        baseline_metrics = None
-        if vhm0_x_index is not None:
-            # Get the raw vhm0_x values before scaling
-            vhm0_x = X_raw[:, vhm0_x_index]
-            baseline_metrics = evaluate_model(vhm0_x, y)
-            logger.info(f"Baseline metrics (vhm0_x vs vhm0_y): RMSE={baseline_metrics['rmse']:.4f}, MAE={baseline_metrics['mae']:.4f}, Bias={baseline_metrics['bias']:.4f}")
-        else:
-            logger.warning("vhm0_x column not found in features - skipping baseline metrics")
-        
-        # Extract date information
-        file_name = Path(file_path).stem
-        date_info = self._extract_date_from_filename(file_name)
-        
-        # Store results
-        results = {
-            "file_name": file_name,
-            "file_path": file_path,
-            "n_samples": len(X),
-            "date_info": date_info,
-            "metrics": metrics,
-            "baseline_metrics": baseline_metrics,
-            "predictions": {
-                "y_true": y,
-                "y_pred": y_pred,
-                "residuals": y_pred - y
-            },
-            "metadata": metadata_df,
-            "regions": regions,
-            "coords": coords,
-            "vhm0_x": vhm0_x if vhm0_x is not None else X_raw  # Include raw features for spatial maps
-        }
-        
-        logger.info(f"✅ Evaluated {file_name}: RMSE={metrics['rmse']:.4f}, MAE={metrics['mae']:.4f}, Bias={metrics['bias']:.4f}")
-        return results
-    
     def _extract_date_from_filename(self, filename: str) -> Dict[str, Any]:
         """Extract date information from filename."""
         # Extract date from filename like WAVEAN20231201
@@ -496,16 +449,19 @@ class RobustModelEvaluator:
         
         logger.info(f"Calculated spatial metrics for {len(model_spatial_metrics)} locations")
         
-        # Create seasonal maps
-        self._create_seasonal_maps_from_metrics(combined_df, model_spatial_metrics, baseline_spatial_metrics)
+        # Create seasonal maps and get seasonal metrics
+        seasonal_metrics = self._create_seasonal_maps_from_metrics(combined_df, model_spatial_metrics, baseline_spatial_metrics)
         
         # Create aggregated maps
         self._create_aggregated_maps_from_metrics(model_spatial_metrics, baseline_spatial_metrics)
         
-        logger.info("✅ Created all spatial maps")
+        # Save spatial metrics to files (reuse already calculated seasonal metrics)
+        self._save_spatial_metrics(model_spatial_metrics, baseline_spatial_metrics, seasonal_metrics)
+        
+        logger.info("✅ Created all spatial maps and saved spatial metrics")
     
-    def _create_seasonal_maps_from_metrics(self, combined_df: pd.DataFrame, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> None:
-        """Create seasonal maps from pre-calculated spatial metrics."""
+    def _create_seasonal_maps_from_metrics(self, combined_df: pd.DataFrame, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """Create seasonal maps from pre-calculated spatial metrics and return seasonal metrics for saving."""
         logger.info("Creating seasonal spatial maps...")
         
         # Create seasonal maps
@@ -514,6 +470,9 @@ class RobustModelEvaluator:
         
         seasons = combined_df["season"].unique()
         logger.info(f"Found seasons: {seasons}")
+        
+        # Store seasonal metrics for later saving
+        seasonal_metrics = {}
         
         for season in seasons:
             if season == "unknown":
@@ -526,6 +485,12 @@ class RobustModelEvaluator:
             season_coords = season_data[["lat", "lon"]].drop_duplicates()
             model_season_metrics = model_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
             baseline_season_metrics = baseline_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
+            
+            # Store for saving later
+            seasonal_metrics[season] = {
+                "model": model_season_metrics,
+                "baseline": baseline_season_metrics
+            }
             
             # Create maps for each metric
             metrics_to_plot = self.config.get("plots", {}).get("metrics_to_plot", ["bias", "mae", "rmse", "diff"])
@@ -562,6 +527,8 @@ class RobustModelEvaluator:
                             vmin=vmin,
                             vmax=vmax
                         )
+        
+        return seasonal_metrics
     
     def _create_aggregated_maps_from_metrics(self, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> None:
         """Create aggregated maps from pre-calculated spatial metrics."""
@@ -606,49 +573,6 @@ class RobustModelEvaluator:
                         vmin=vmin,
                         vmax=vmax
                     )
-    
-    def save_results_to_s3(self) -> None:
-        """Save all evaluation results to S3 using the existing S3ResultsSaver."""
-        if not self.s3_results_saver.enabled:
-            logger.info("S3 saving is disabled in config")
-            return
-        
-        logger.info("Starting S3 upload of evaluation results...")
-        
-        # Prepare results dictionary for S3ResultsSaver
-        results = {
-            "aggregated_results": self.aggregated_results,
-            "file_results": self.file_results,
-            "evaluation_summary": {
-                "total_files_processed": len(self.file_results),
-                "total_samples": sum(result.get("n_samples", 0) for result in self.file_results.values()),
-                "evaluation_timestamp": datetime.now().isoformat()
-            }
-        }
-        
-        # Save results JSON
-        logger.info("Uploading results JSON to S3...")
-        self.s3_results_saver.save_results_json(results)
-        
-        # Save diagnostic plots
-        plots_dir = str(self.output_dir / "diagnostic_plots")
-        if Path(plots_dir).exists():
-            logger.info("Uploading diagnostic plots to S3...")
-            self.s3_results_saver.save_diagnostic_plots(plots_dir)
-        
-        # Save metrics files
-        metrics_dir = str(self.output_dir / "metrics")
-        if Path(metrics_dir).exists():
-            logger.info("Uploading metrics files to S3...")
-            # Use the same method as diagnostic plots for metrics
-            self.s3_results_saver.save_diagnostic_plots(metrics_dir)
-        
-        logger.info(f"✅ All evaluation results uploaded to S3: {self.s3_results_saver.prefix}")
-    
-    def cleanup(self):
-        """Clean up resources, especially S3 temporary files."""
-        if self.s3_model_loader:
-            self.s3_model_loader.cleanup()
       
     def create_seasonal_diagnostic_plots(self) -> None:
         """Create diagnostic plots aggregated by season."""
@@ -915,6 +839,58 @@ class RobustModelEvaluator:
         except Exception as e:
             logger.error(f"Error creating {metric} map {filename}: {e}")
     
+    def evaluate_file(self, file_path: str) -> Dict[str, Any]:
+        """Evaluate a single file using training infrastructure."""
+        logger.info(f"Evaluating file: {Path(file_path).name}")
+        
+        # Load and preprocess data
+        X, y, regions, coords, metadata_df, vhm0_x_index, X_raw = self.load_and_preprocess_file(file_path)
+        
+        if X is None:
+            return None
+        
+        # Make predictions
+        y_pred = self.model.predict(X)
+        
+        # Compute overall metrics
+        metrics = evaluate_model(y_pred, y)
+        
+        # Compute baseline metrics (vhm0_x vs vhm0_y)
+        baseline_metrics = None
+        if vhm0_x_index is not None:
+            # Get the raw vhm0_x values before scaling
+            vhm0_x = X_raw[:, vhm0_x_index]
+            baseline_metrics = evaluate_model(vhm0_x, y)
+            logger.info(f"Baseline metrics (vhm0_x vs vhm0_y): RMSE={baseline_metrics['rmse']:.4f}, MAE={baseline_metrics['mae']:.4f}, Bias={baseline_metrics['bias']:.4f}")
+        else:
+            logger.warning("vhm0_x column not found in features - skipping baseline metrics")
+        
+        # Extract date information
+        file_name = Path(file_path).stem
+        date_info = self._extract_date_from_filename(file_name)
+        
+        # Store results
+        results = {
+            "file_name": file_name,
+            "file_path": file_path,
+            "n_samples": len(X),
+            "date_info": date_info,
+            "metrics": metrics,
+            "baseline_metrics": baseline_metrics,
+            "predictions": {
+                "y_true": y,
+                "y_pred": y_pred,
+                "residuals": y_pred - y
+            },
+            "metadata": metadata_df,
+            "regions": regions,
+            "coords": coords,
+            "vhm0_x": vhm0_x if vhm0_x is not None else X_raw  # Include raw features for spatial maps
+        }
+        
+        logger.info(f"✅ Evaluated {file_name}: RMSE={metrics['rmse']:.4f}, MAE={metrics['mae']:.4f}, Bias={metrics['bias']:.4f}")
+        return results
+
     def run_evaluation(self, data_path: str, model_path: str) -> None:
         """Run the complete evaluation pipeline."""
         logger.info("Starting refactored model evaluation...")
@@ -1013,6 +989,98 @@ class RobustModelEvaluator:
         }
         
         logger.info("Aggregated results computed")
+    
+    def _save_spatial_metrics(self, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame, seasonal_metrics: Dict[str, Dict[str, pd.DataFrame]]) -> None:
+        """Save spatial metrics (model, baseline, and seasonal) to CSV files."""
+        logger.info("Saving spatial metrics to files...")
+        
+        # Create spatial metrics directory
+        spatial_metrics_dir = self.output_dir / "metrics"
+        spatial_metrics_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save overall model spatial metrics
+        model_file = spatial_metrics_dir / "model_spatial_metrics.csv"
+        model_spatial_metrics.to_csv(model_file, index=False)
+        logger.info(f"Saved model spatial metrics: {model_file}")
+        
+        # Save overall baseline spatial metrics
+        baseline_file = spatial_metrics_dir / "baseline_spatial_metrics.csv"
+        baseline_spatial_metrics.to_csv(baseline_file, index=False)
+        logger.info(f"Saved baseline spatial metrics: {baseline_file}")
+        
+        # Save seasonal spatial metrics (reuse already calculated metrics)
+        self._save_seasonal_spatial_metrics(seasonal_metrics, spatial_metrics_dir)
+        
+        logger.info("✅ All spatial metrics saved to files")
+    
+    def _save_seasonal_spatial_metrics(self, seasonal_metrics: Dict[str, Dict[str, pd.DataFrame]], output_dir: Path) -> None:
+        """Save seasonal spatial metrics to separate CSV files using pre-calculated metrics."""
+        logger.info("Saving seasonal spatial metrics...")
+        
+        # Create seasonal subdirectory
+        seasonal_dir = output_dir / "seasonal"
+        seasonal_dir.mkdir(parents=True, exist_ok=True)
+        
+        seasons = list(seasonal_metrics.keys())
+        logger.info(f"Found seasons: {seasons}")
+        
+        for season in seasons:
+            if season == "unknown":
+                continue
+                
+            logger.info(f"Saving spatial metrics for {season} season...")
+            
+            # Get pre-calculated seasonal metrics
+            model_season_metrics = seasonal_metrics[season]["model"]
+            baseline_season_metrics = seasonal_metrics[season]["baseline"]
+            
+            # Save model seasonal metrics
+            model_season_file = seasonal_dir / f"{season}_model_spatial_metrics.csv"
+            model_season_metrics.to_csv(model_season_file, index=False)
+            logger.info(f"Saved {season} model spatial metrics: {model_season_file}")
+            
+            # Save baseline seasonal metrics
+            baseline_season_file = seasonal_dir / f"{season}_baseline_spatial_metrics.csv"
+            baseline_season_metrics.to_csv(baseline_season_file, index=False)
+            logger.info(f"Saved {season} baseline spatial metrics: {baseline_season_file}")
+    
+    def save_results_to_s3(self) -> None:
+        """Save all evaluation results to S3 using the existing S3ResultsSaver."""
+        if not self.s3_results_saver.enabled:
+            logger.info("S3 saving is disabled in config")
+            return
+        
+        logger.info("Starting S3 upload of evaluation results...")
+        
+        # Prepare results dictionary for S3ResultsSaver
+        results = {
+            "aggregated_results": self.aggregated_results,
+            "file_results": self.file_results,
+            "evaluation_summary": {
+                "total_files_processed": len(self.file_results),
+                "total_samples": sum(result.get("n_samples", 0) for result in self.file_results.values()),
+                "evaluation_timestamp": datetime.now().isoformat()
+            }
+        }
+        
+        # Save results JSON
+        logger.info("Uploading results JSON to S3...")
+        self.s3_results_saver.save_results_json(results)
+        
+        # Save diagnostic plots
+        plots_dir = str(self.output_dir / "diagnostic_plots")
+        if Path(plots_dir).exists():
+            logger.info("Uploading diagnostic plots to S3...")
+            self.s3_results_saver.save_diagnostic_plots(plots_dir)
+        
+        # Save metrics files
+        metrics_dir = str(self.output_dir / "metrics")
+        if Path(metrics_dir).exists():
+            logger.info("Uploading metrics files to S3...")
+            # Use the same method as diagnostic plots for metrics
+            self.s3_results_saver.save_diagnostic_plots(metrics_dir)
+        
+        logger.info(f"✅ All evaluation results uploaded to S3: {self.s3_results_saver.prefix}")
     
     def save_results(self) -> None:
         """Save evaluation results to files."""
