@@ -12,6 +12,8 @@ def plot_spatial_feature_map(
     s: int = 8,
     alpha: float = 0.85,
     cmap: str = "viridis",
+    vmin: float = None,
+    vmax: float = None,
 ):
     """
     Plot a spatial map of feature values across grid positions.
@@ -54,6 +56,8 @@ def plot_spatial_feature_map(
         s=s,
         alpha=alpha,
         transform=ccrs.PlateCarree(),
+        vmin=vmin,
+        vmax=vmax,
     )
     plt.colorbar(sc, ax=ax, orientation="vertical", label=colorbar_label)
     ax.set_extent([

@@ -176,7 +176,7 @@ class RobustModelEvaluator:
         
         # Filter by year if specified
         if year:
-            year_files = [f for f in files if f"WAVEAN{year}0201" in f]
+            year_files = [f for f in files if f"WAVEAN{year}" in f]
             logger.info(f"Found {len(year_files)} parquet files for year {year}")
             files = year_files
         else:
@@ -440,7 +440,6 @@ class RobustModelEvaluator:
         
         return sea_bin_metrics
     
-    
     def create_all_spatial_maps(self) -> None:
         """Create all spatial maps (seasonal and aggregated) by calculating spatial metrics once."""
         logger.info("Creating all spatial maps (seasonal and aggregated)...")
@@ -533,23 +532,36 @@ class RobustModelEvaluator:
             
             for metric in metrics_to_plot:
                 if metric in model_season_metrics.columns:
-                    # Model seasonal map
-                    self._create_single_spatial_map(
-                        model_season_metrics, 
-                        metric, 
-                        f"{season}_model_{metric}_map.png",
-                        f"{metric.upper()} - {season.title()} (Model)",
-                        output_dir
-                    )
+                    # Calculate consistent color scale for this metric across model and baseline
+                    model_values = model_season_metrics[metric].dropna()
+                    baseline_values = baseline_season_metrics[metric].dropna()
                     
-                    # Baseline seasonal map
-                    self._create_single_spatial_map(
-                        baseline_season_metrics, 
-                        metric, 
-                        f"{season}_baseline_{metric}_map.png",
-                        f"{metric.upper()} - {season.title()} (Baseline)",
-                        output_dir
-                    )
+                    if len(model_values) > 0 and len(baseline_values) > 0:
+                        # Use the same color scale for both model and baseline
+                        vmin = min(model_values.min(), baseline_values.min())
+                        vmax = max(model_values.max(), baseline_values.max())
+                        
+                        # Model seasonal map
+                        self._create_single_spatial_map(
+                            model_season_metrics, 
+                            metric, 
+                            f"{season}_model_{metric}_map.png",
+                            f"{metric.upper()} - {season.title()} (Model)",
+                            output_dir,
+                            vmin=vmin,
+                            vmax=vmax
+                        )
+                        
+                        # Baseline seasonal map
+                        self._create_single_spatial_map(
+                            baseline_season_metrics, 
+                            metric, 
+                            f"{season}_baseline_{metric}_map.png",
+                            f"{metric.upper()} - {season.title()} (Baseline)",
+                            output_dir,
+                            vmin=vmin,
+                            vmax=vmax
+                        )
     
     def _create_aggregated_maps_from_metrics(self, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> None:
         """Create aggregated maps from pre-calculated spatial metrics."""
@@ -564,23 +576,36 @@ class RobustModelEvaluator:
         
         for metric in metrics_to_plot:
             if metric in model_spatial_metrics.columns:
-                # Model aggregated map
-                self._create_single_spatial_map(
-                    model_spatial_metrics, 
-                    metric, 
-                    f"overall_model_{metric}_map.png",
-                    f"{metric.upper()} - Overall Model Performance",
-                    output_dir
-                )
+                # Calculate consistent color scale for this metric across model and baseline
+                model_values = model_spatial_metrics[metric].dropna()
+                baseline_values = baseline_spatial_metrics[metric].dropna()
                 
-                # Baseline aggregated map
-                self._create_single_spatial_map(
-                    baseline_spatial_metrics, 
-                    metric, 
-                    f"overall_baseline_{metric}_map.png",
-                    f"{metric.upper()} - Overall Baseline Performance",
-                    output_dir
-                )
+                if len(model_values) > 0 and len(baseline_values) > 0:
+                    # Use the same color scale for both model and baseline
+                    vmin = min(model_values.min(), baseline_values.min())
+                    vmax = max(model_values.max(), baseline_values.max())
+                    
+                    # Model aggregated map
+                    self._create_single_spatial_map(
+                        model_spatial_metrics, 
+                        metric, 
+                        f"overall_model_{metric}_map.png",
+                        f"{metric.upper()} - Overall Model Performance",
+                        output_dir,
+                        vmin=vmin,
+                        vmax=vmax
+                    )
+                    
+                    # Baseline aggregated map
+                    self._create_single_spatial_map(
+                        baseline_spatial_metrics, 
+                        metric, 
+                        f"overall_baseline_{metric}_map.png",
+                        f"{metric.upper()} - Overall Baseline Performance",
+                        output_dir,
+                        vmin=vmin,
+                        vmax=vmax
+                    )
     
     def save_results_to_s3(self) -> None:
         """Save all evaluation results to S3 using the existing S3ResultsSaver."""
@@ -847,7 +872,7 @@ class RobustModelEvaluator:
         else:  # 9, 10, 11
             return "autumn"
     
-    def _create_single_spatial_map(self, spatial_metrics: pd.DataFrame, metric: str, filename: str, title: str, output_dir: Path) -> None:
+    def _create_single_spatial_map(self, spatial_metrics: pd.DataFrame, metric: str, filename: str, title: str, output_dir: Path, vmin: float = None, vmax: float = None) -> None:
         """Create a single spatial map."""
         try:
             from src.analytics.plots.spatial_plots import plot_spatial_feature_map
@@ -882,6 +907,8 @@ class RobustModelEvaluator:
                 s=self.config.get("plots", {}).get("marker_size", 8),
                 alpha=self.config.get("plots", {}).get("alpha", 0.85),
                 cmap=self.config.get("plots", {}).get("colormap", "viridis"),
+                vmin=vmin,
+                vmax=vmax,
             )
             logger.info(f"Saved {metric} map: {save_path}")
             
