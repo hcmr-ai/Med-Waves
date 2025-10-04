@@ -190,7 +190,8 @@ class S3ModelLoader:
             'scaler': 'scaler.pkl',
             'feature_selector': 'feature_selector.pkl',
             'dimension_reducer': 'dimension_reducer.pkl',
-            'feature_columns': 'feature_columns.pkl',
+            'feature_names': 'feature_names.pkl',
+            'selected_features': 'selected_features.pkl',
             'training_history': 'training_history.pkl'
         }
         

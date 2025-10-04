@@ -6,8 +6,6 @@ and basic sampling operations in a modular and reusable way.
 """
 
 import glob
-import os
-import re
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -195,12 +193,33 @@ class DataLoader:
         
         try:
             from src.commons.aws.utils import list_s3_parquet_files
-            files = list_s3_parquet_files(
-                s3_uri, 
-                aws_profile=self.data_config.get("s3", {}).get("aws_profile"),
-                region=self.data_config.get("s3", {}).get("region", "eu-central-1"),
-                max_retries=self.data_config.get("s3", {}).get("max_retries", 10)
-            )
+            
+            # Parse S3 URI
+            s3_path = s3_uri[5:]  # Remove 's3://'
+            if '/' in s3_path:
+                bucket, prefix = s3_path.split('/', 1)
+            else:
+                bucket = s3_path
+                prefix = ""
+            
+            # Get S3 configuration
+            s3_config = self.data_config.get("s3", {})
+            aws_profile = s3_config.get("aws_profile", None)
+            
+            # Get year-based filtering configuration
+            split_config = self.data_config.get("split", {})
+            eval_months = split_config.get("eval_months", None)
+            train_end_year = split_config.get("train_end_year", None)
+            test_start_year = split_config.get("test_start_year", None)
+            
+            self.logger.info(f"Listing S3 files in bucket: {bucket}, prefix: {prefix}")
+            self.logger.info(f"Year-based filtering: train_end_year={train_end_year}, test_start_year={test_start_year}")
+            if eval_months:
+                self.logger.info(f"Month filtering for test years: {eval_months}")
+            
+            # List parquet files with year-aware filtering
+            files = list_s3_parquet_files(bucket, prefix, aws_profile, eval_months, train_end_year, test_start_year)
+            
             self.logger.info(f"Found {len(files)} parquet files in S3")
             return files
         except Exception as e:

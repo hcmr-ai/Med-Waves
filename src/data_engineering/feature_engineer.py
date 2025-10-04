@@ -63,7 +63,7 @@ class FeatureEngineer:
         df = self._apply_regional_filtering(df)
         
         # Add basin feature if enabled
-        feature_cols = self._add_basin_feature(df, feature_cols)
+        df, feature_cols = self._add_basin_feature(df, feature_cols)
         
         # Log regional scaling and weighting status
         self._log_regional_config()
@@ -186,7 +186,7 @@ class FeatureEngineer:
         
         return df
     
-    def _add_basin_feature(self, df: pl.DataFrame, feature_cols: List[str]) -> List[str]:
+    def _add_basin_feature(self, df: pl.DataFrame, feature_cols: List[str]) -> Tuple[pl.DataFrame, List[str]]:
         """Add basin feature if geographic context is enabled."""
         use_geo_basin = self.feature_config.get("use_geo_context", {}).get("include_basin", True)
         if use_geo_basin:
@@ -213,7 +213,7 @@ class FeatureEngineer:
                 basin_name = basin_names.get(basin_id, f"Unknown({basin_id})")
                 self.logger.info(f"  {basin_name} (ID: {basin_id}): {count:,} samples")
         
-        return feature_cols
+        return df, feature_cols
     
     def _log_regional_config(self):
         """Log regional scaling and weighting configuration."""

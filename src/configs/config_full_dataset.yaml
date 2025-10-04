@@ -192,6 +192,8 @@ training_diagnostics:
   create_regional_analysis: true # Enable regional performance analysis plots
   create_sea_bin_analysis: true # Enable sea-bin performance analysis plots
   create_spatial_maps: true # Enable aggregated spatial maps
+  create_regional_error_box_plots: true
+  create_wave_height_performance_plots: true
 
 # Logging configuration
 logging:

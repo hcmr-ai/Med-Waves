@@ -85,7 +85,7 @@ class RegionMapper:
         Returns:
             Display name ("Atlantic", "Mediterranean", "Eastern Mediterranean")
         """
-        return REGION_DISPLAY_NAMES.get(region_id, f"Region {region_id}")
+        return REGION_DISPLAY_NAMES.get(region_id, f"{region_id}")
     
     @staticmethod
     def get_region_color(region_id: int) -> str:

@@ -7,10 +7,9 @@ embedded in the FullDatasetTrainer class.
 
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
 from pathlib import Path
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any
 import logging
 from src.commons.region_mapping import RegionMapper
 
@@ -44,10 +43,14 @@ class DiagnosticPlotter:
         plots_dir.mkdir(exist_ok=True)
         
         # Create individual plot types
-        self._create_predictions_vs_actual_plots(trainer, test_predictions, plots_dir)
-        self._create_residuals_plots(trainer, test_predictions, plots_dir)
-        self._create_learning_curves_plot(trainer, plots_dir)
-        self._create_snr_comparison_plot(trainer, plots_dir)
+        if self.diagnostics_config.get("create_prediction_plots", True):
+            self._create_predictions_vs_actual_plots(trainer, test_predictions, plots_dir)
+        if self.diagnostics_config.get("create_residual_plots", True):
+            self._create_residuals_plots(trainer, test_predictions, plots_dir)
+        if self.diagnostics_config.get("create_learning_curves", True):
+            self._create_learning_curves_plot(trainer, plots_dir)
+        if self.diagnostics_config.get("create_snr_comparison_plot", True):
+            self._create_snr_comparison_plot(trainer, plots_dir)
         
         # Create new analysis plots (if enabled in config)
         if self.diagnostics_config.get("create_regional_analysis", True):
@@ -60,8 +63,10 @@ class DiagnosticPlotter:
             self._create_aggregated_spatial_maps(trainer, test_predictions, plots_dir)
         
         # Create advanced analysis plots
-        self._create_regional_error_box_plots(trainer, test_predictions, plots_dir)
-        self._create_wave_height_performance_plots(trainer, test_predictions, plots_dir)
+        if self.diagnostics_config.get("create_regional_error_box_plots", True):
+            self._create_regional_error_box_plots(trainer, test_predictions, plots_dir)
+        if self.diagnostics_config.get("create_wave_height_performance_plots", True):
+            self._create_wave_height_performance_plots(trainer, test_predictions, plots_dir)
         # self._create_residual_geographic_analysis(trainer, test_predictions, plots_dir)
         # self._create_condition_performance_plots(trainer, test_predictions, plots_dir)
         
@@ -123,16 +128,17 @@ class DiagnosticPlotter:
         plt.close()
         
         # Training Residuals plot (for comparison)
-        train_predictions = trainer.model.predict(trainer.X_train)
-        train_residuals = trainer.y_train - train_predictions
-        plt.figure(figsize=(10, 8))
-        plt.scatter(train_predictions, train_residuals, alpha=0.5, s=1)
-        plt.axhline(y=0, color='r', linestyle='--')
-        plt.xlabel('Predicted (Train)')
-        plt.ylabel('Residuals (Train)')
-        plt.title('Training Set: Residuals vs Predicted')
-        plt.savefig(plots_dir / 'train_residuals_vs_predicted.png', dpi=300, bbox_inches='tight')
-        plt.close()
+        if trainer.X_train is not None and trainer.y_train is not None:
+            train_predictions = trainer.model.predict(trainer.X_train)
+            train_residuals = trainer.y_train - train_predictions
+            plt.figure(figsize=(10, 8))
+            plt.scatter(train_predictions, train_residuals, alpha=0.5, s=1)
+            plt.axhline(y=0, color='r', linestyle='--')
+            plt.xlabel('Predicted (Train)')
+            plt.ylabel('Residuals (Train)')
+            plt.title('Training Set: Residuals vs Predicted')
+            plt.savefig(plots_dir / 'train_residuals_vs_predicted.png', dpi=300, bbox_inches='tight')
+            plt.close()
     
     def _create_learning_curves_plot(self, trainer: Any, plots_dir: Path) -> None:
         """Create learning curves plot if training history is available."""
@@ -234,49 +240,100 @@ class DiagnosticPlotter:
         self._create_regional_error_analysis(trainer, test_predictions, plots_dir)
     
     def _create_regional_comparison_plot(self, trainer: Any, plots_dir: Path) -> None:
-        """Create regional performance comparison plot."""
+        """Create regional performance comparison plot with baseline comparison."""
         if not hasattr(trainer, 'regional_test_metrics') or not trainer.regional_test_metrics:
             logger.warning("No regional test metrics available")
             return
         logger.info("Creating regional performance comparison plot...")
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle('Regional Performance Comparison', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle('Regional Performance Comparison (Model vs Baseline)', fontsize=16, fontweight='bold')
         
         region_ids = list(trainer.regional_test_metrics.keys())
         regions = [RegionMapper.get_display_name(rid) for rid in region_ids]
-        rmse_values = [trainer.regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
-        mae_values = [trainer.regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
-        pearson_values = [trainer.regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
         
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+        # Model metrics
+        model_rmse_values = [trainer.regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
+        model_mae_values = [trainer.regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
+        model_pearson_values = [trainer.regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
+        
+        # Baseline metrics (if available)
+        baseline_rmse_values = []
+        baseline_mae_values = []
+        baseline_pearson_values = []
+        
+        if hasattr(trainer, 'baseline_regional_test_metrics') and trainer.baseline_regional_test_metrics:
+            baseline_rmse_values = [trainer.baseline_regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
+            baseline_mae_values = [trainer.baseline_regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
+            baseline_pearson_values = [trainer.baseline_regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
+        
+        # Set up bar positions
+        x = np.arange(len(regions))
+        width = 0.35
+        
+        # Colors
+        model_color = '#2E86AB'  # Blue for model
+        baseline_color = '#A23B72'  # Purple for baseline
         
         # RMSE by region
-        bars1 = axes[0].bar(regions, rmse_values, color=colors, alpha=0.7)
+        bars1_model = axes[0].bar(x - width/2, model_rmse_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_rmse_values:
+            bars1_baseline = axes[0].bar(x + width/2, baseline_rmse_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[0].set_title('RMSE by Region', fontweight='bold')
         axes[0].set_ylabel('RMSE')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(regions)
         axes[0].grid(True, alpha=0.3)
-        for bar, v in zip(bars1, rmse_values):
+        axes[0].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars1_model, model_rmse_values):
             axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_rmse_values:
+            for bar, v in zip(bars1_baseline, baseline_rmse_values):
+                axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         # MAE by region
-        bars2 = axes[1].bar(regions, mae_values, color=colors, alpha=0.7)
+        bars2_model = axes[1].bar(x - width/2, model_mae_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_mae_values:
+            bars2_baseline = axes[1].bar(x + width/2, baseline_mae_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[1].set_title('MAE by Region', fontweight='bold')
         axes[1].set_ylabel('MAE')
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(regions)
         axes[1].grid(True, alpha=0.3)
-        for bar, v in zip(bars2, mae_values):
+        axes[1].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars2_model, model_mae_values):
             axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_mae_values:
+            for bar, v in zip(bars2_baseline, baseline_mae_values):
+                axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         # Pearson correlation by region
-        bars3 = axes[2].bar(regions, pearson_values, color=colors, alpha=0.7)
+        bars3_model = axes[2].bar(x - width/2, model_pearson_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_pearson_values:
+            bars3_baseline = axes[2].bar(x + width/2, baseline_pearson_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[2].set_title('Pearson Correlation by Region', fontweight='bold')
         axes[2].set_ylabel('Pearson Correlation')
+        axes[2].set_xticks(x)
+        axes[2].set_xticklabels(regions)
         axes[2].grid(True, alpha=0.3)
         axes[2].set_ylim(0, 1)
-        for bar, v in zip(bars3, pearson_values):
+        axes[2].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars3_model, model_pearson_values):
             axes[2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_pearson_values:
+            for bar, v in zip(bars3_baseline, baseline_pearson_values):
+                axes[2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         plt.tight_layout()
         plt.savefig(plots_dir / 'regional_comparison.png', dpi=300, bbox_inches='tight')
@@ -385,8 +442,9 @@ class DiagnosticPlotter:
         self._create_sea_bin_predictions_plots(trainer, test_predictions, plots_dir)
     
     def _create_sea_bin_performance_plot(self, trainer: Any, plots_dir: Path) -> None:
-        """Create sea-bin performance metrics plot."""
+        """Create sea-bin performance metrics plot with baseline comparison."""
         sea_bin_metrics = trainer.sea_bin_test_metrics
+        baseline_sea_bin_metrics = getattr(trainer, 'baseline_sea_bin_test_metrics', {})
         logger.info("Creating sea-bin performance metrics plot...")
         
         # Prepare data for plotting
@@ -397,6 +455,11 @@ class DiagnosticPlotter:
         counts = []
         percentages = []
         
+        # Baseline data
+        baseline_rmse_values = []
+        baseline_mae_values = []
+        baseline_pearson_values = []
+        
         for bin_name, metrics in sea_bin_metrics.items():
             bin_names.append(bin_name.replace('_', ' ').title())
             rmse_values.append(metrics.get('rmse', 0))
@@ -404,44 +467,66 @@ class DiagnosticPlotter:
             pearson_values.append(metrics.get('pearson', 0))
             counts.append(metrics.get('count', 0))
             percentages.append(metrics.get('percentage', 0))
+            
+            # Get baseline metrics for the same bin
+            baseline_metrics = baseline_sea_bin_metrics.get(bin_name, {})
+            baseline_rmse_values.append(baseline_metrics.get('rmse', 0))
+            baseline_mae_values.append(baseline_metrics.get('mae', 0))
+            baseline_pearson_values.append(baseline_metrics.get('pearson', 0))
         
         # Create subplots
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Sea-Bin Performance Analysis', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+        fig.suptitle('Sea-Bin Performance Analysis (Model vs Baseline)', fontsize=16, fontweight='bold')
+        
+        # Set up bar positions for side-by-side comparison
+        x = np.arange(len(bin_names))
+        width = 0.35
         
         # Plot 1: RMSE by sea state
-        axes[0, 0].bar(bin_names, rmse_values, color='skyblue', alpha=0.7)
+        bars1 = axes[0, 0].bar(x - width/2, rmse_values, width, label='Model', color='skyblue', alpha=0.8)
+        bars2 = axes[0, 0].bar(x + width/2, baseline_rmse_values, width, label='Baseline', color='darkblue', alpha=0.6)
         axes[0, 0].set_title('RMSE by Sea State', fontweight='bold')
         axes[0, 0].set_ylabel('RMSE')
-        axes[0, 0].tick_params(axis='x', rotation=45)
+        axes[0, 0].set_xticks(x)
+        axes[0, 0].set_xticklabels(bin_names, rotation=45)
+        axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         
         # Add value labels on bars
-        for i, v in enumerate(rmse_values):
-            axes[0, 0].text(i, v + 0.001, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        for i, (v1, v2) in enumerate(zip(rmse_values, baseline_rmse_values)):
+            axes[0, 0].text(i - width/2, v1 + 0.001, f'{v1:.3f}', ha='center', va='bottom', fontsize=8)
+            axes[0, 0].text(i + width/2, v2 + 0.001, f'{v2:.3f}', ha='center', va='bottom', fontsize=8)
         
         # Plot 2: MAE by sea state
-        axes[0, 1].bar(bin_names, mae_values, color='lightcoral', alpha=0.7)
+        bars1 = axes[0, 1].bar(x - width/2, mae_values, width, label='Model', color='lightcoral', alpha=0.8)
+        bars2 = axes[0, 1].bar(x + width/2, baseline_mae_values, width, label='Baseline', color='darkred', alpha=0.6)
         axes[0, 1].set_title('MAE by Sea State', fontweight='bold')
         axes[0, 1].set_ylabel('MAE')
-        axes[0, 1].tick_params(axis='x', rotation=45)
+        axes[0, 1].set_xticks(x)
+        axes[0, 1].set_xticklabels(bin_names, rotation=45)
+        axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
         # Add value labels on bars
-        for i, v in enumerate(mae_values):
-            axes[0, 1].text(i, v + 0.001, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        for i, (v1, v2) in enumerate(zip(mae_values, baseline_mae_values)):
+            axes[0, 1].text(i - width/2, v1 + 0.001, f'{v1:.3f}', ha='center', va='bottom', fontsize=8)
+            axes[0, 1].text(i + width/2, v2 + 0.001, f'{v2:.3f}', ha='center', va='bottom', fontsize=8)
         
         # Plot 3: Pearson correlation by sea state
-        axes[1, 0].bar(bin_names, pearson_values, color='lightgreen', alpha=0.7)
+        bars1 = axes[1, 0].bar(x - width/2, pearson_values, width, label='Model', color='lightgreen', alpha=0.8)
+        bars2 = axes[1, 0].bar(x + width/2, baseline_pearson_values, width, label='Baseline', color='darkgreen', alpha=0.6)
         axes[1, 0].set_title('Pearson Correlation by Sea State', fontweight='bold')
         axes[1, 0].set_ylabel('Pearson Correlation')
-        axes[1, 0].tick_params(axis='x', rotation=45)
+        axes[1, 0].set_xticks(x)
+        axes[1, 0].set_xticklabels(bin_names, rotation=45)
+        axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].set_ylim(0, 1)
         
         # Add value labels on bars
-        for i, v in enumerate(pearson_values):
-            axes[1, 0].text(i, v + 0.01, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        for i, (v1, v2) in enumerate(zip(pearson_values, baseline_pearson_values)):
+            axes[1, 0].text(i - width/2, v1 + 0.01, f'{v1:.3f}', ha='center', va='bottom', fontsize=8)
+            axes[1, 0].text(i + width/2, v2 + 0.01, f'{v2:.3f}', ha='center', va='bottom', fontsize=8)
         
         # Plot 4: Sample distribution by sea state
         axes[1, 1].bar(bin_names, percentages, color='gold', alpha=0.7)
@@ -734,12 +819,12 @@ class DiagnosticPlotter:
         plt.close()
     
     def _create_wave_height_performance_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
-        """Create performance vs wave height by region plots."""
+        """Create performance vs wave height by region plots with baseline comparison."""
         if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
             logger.warning("No regional information available for wave height performance plots")
             return
         
-        logger.info("Creating wave height performance plots...")
+        logger.info("Creating wave height performance plots with baseline comparison...")
         
         # Get sea-bin configuration
         sea_bin_config = trainer.config.get('feature_block', {}).get('sea_bin_metrics', {})
@@ -752,113 +837,213 @@ class DiagnosticPlotter:
             logger.warning("No sea-bin configuration found")
             return
         
-        # Calculate errors
-        errors = test_predictions - trainer.y_test
-        abs_errors = np.abs(errors)
+        # Calculate model errors
+        model_errors = test_predictions - trainer.y_test
+        model_abs_errors = np.abs(model_errors)
+        
+        # Calculate baseline errors (if baseline data available)
+        baseline_errors = None
+        baseline_abs_errors = None
+        if hasattr(trainer, 'baseline_sea_bin_test_metrics') and trainer.baseline_sea_bin_test_metrics:
+            # We need to get baseline predictions from somewhere - let's check if we have vhm0_x
+            if hasattr(trainer, 'vhm0_x_test'):
+                baseline_errors = trainer.vhm0_x_test - trainer.y_test
+                baseline_abs_errors = np.abs(baseline_errors)
+            else:
+                logger.warning("Baseline data not available for wave height performance plots")
         
         # Get unique regions
         unique_regions = np.unique(trainer.regions_test)
         colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
         
         # Create figure with subplots
-        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
-        fig.suptitle('Performance vs Wave Height by Region', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(2, 2, figsize=(24, 14))
+        fig.suptitle('Performance vs Wave Height by Region (Model vs Baseline)', fontsize=16, fontweight='bold')
         
         # Prepare data for each plot
-        error_data_by_region_bin = {}
-        abs_error_data_by_region_bin = {}
-        bias_data_by_region_bin = {}
-        rmse_data_by_region_bin = {}
+        model_error_data_by_region_bin = {}
+        model_abs_error_data_by_region_bin = {}
+        model_rmse_data_by_region_bin = {}
+        model_count_data_by_region_bin = {}
+        
+        baseline_error_data_by_region_bin = {}
+        baseline_abs_error_data_by_region_bin = {}
+        baseline_rmse_data_by_region_bin = {}
+        baseline_count_data_by_region_bin = {}
+        
+        # Track which bins have data across all regions
+        bins_with_data = set()
         
         for region in unique_regions:
             region_mask = trainer.regions_test == region
-            region_errors = errors[region_mask]
-            region_abs_errors = abs_errors[region_mask]
+            region_model_errors = model_errors[region_mask]
+            region_model_abs_errors = model_abs_errors[region_mask]
             region_y_true = trainer.y_test[region_mask]
             
-            error_data_by_region_bin[region] = []
-            abs_error_data_by_region_bin[region] = []
-            bias_data_by_region_bin[region] = []
-            rmse_data_by_region_bin[region] = []
+            if baseline_errors is not None:
+                region_baseline_errors = baseline_errors[region_mask]
+                region_baseline_abs_errors = baseline_abs_errors[region_mask]
             
-            for bin_config in bins:
+            model_error_data_by_region_bin[region] = []
+            model_abs_error_data_by_region_bin[region] = []
+            model_rmse_data_by_region_bin[region] = []
+            model_count_data_by_region_bin[region] = []
+            
+            if baseline_errors is not None:
+                baseline_error_data_by_region_bin[region] = []
+                baseline_abs_error_data_by_region_bin[region] = []
+                baseline_rmse_data_by_region_bin[region] = []
+                baseline_count_data_by_region_bin[region] = []
+            
+            for bin_idx, bin_config in enumerate(bins):
                 bin_min = bin_config["min"]
                 bin_max = bin_config["max"]
                 
                 # Filter data for this wave height bin
                 bin_mask = (region_y_true >= bin_min) & (region_y_true < bin_max)
-                bin_errors = region_errors[bin_mask]
-                bin_abs_errors = region_abs_errors[bin_mask]
+                bin_model_errors = region_model_errors[bin_mask]
+                bin_model_abs_errors = region_model_abs_errors[bin_mask]
                 
-                if len(bin_errors) > 0:
-                    error_data_by_region_bin[region].append(bin_errors)
-                    abs_error_data_by_region_bin[region].append(bin_abs_errors)
-                    bias_data_by_region_bin[region].append(bin_errors)  # Bias is same as errors
-                    rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_errors**2)))
+                if len(bin_model_errors) > 0:
+                    bins_with_data.add(bin_idx)
+                    model_error_data_by_region_bin[region].append(bin_model_errors)
+                    model_abs_error_data_by_region_bin[region].append(bin_model_abs_errors)
+                    model_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_model_errors**2)))
+                    model_count_data_by_region_bin[region].append(len(bin_model_errors))
                 else:
-                    error_data_by_region_bin[region].append([])
-                    abs_error_data_by_region_bin[region].append([])
-                    bias_data_by_region_bin[region].append([])
-                    rmse_data_by_region_bin[region].append(0)
+                    model_error_data_by_region_bin[region].append([])
+                    model_abs_error_data_by_region_bin[region].append([])
+                    model_rmse_data_by_region_bin[region].append(0)
+                    model_count_data_by_region_bin[region].append(0)
+                
+                if baseline_errors is not None:
+                    bin_baseline_errors = region_baseline_errors[bin_mask]
+                    bin_baseline_abs_errors = region_baseline_abs_errors[bin_mask]
+                    
+                    if len(bin_baseline_errors) > 0:
+                        baseline_error_data_by_region_bin[region].append(bin_baseline_errors)
+                        baseline_abs_error_data_by_region_bin[region].append(bin_baseline_abs_errors)
+                        baseline_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_baseline_errors**2)))
+                        baseline_count_data_by_region_bin[region].append(len(bin_baseline_errors))
+                    else:
+                        baseline_error_data_by_region_bin[region].append([])
+                        baseline_abs_error_data_by_region_bin[region].append([])
+                        baseline_rmse_data_by_region_bin[region].append(0)
+                        baseline_count_data_by_region_bin[region].append(0)
         
-        # Create labels for wave height bins
-        bin_labels = [f"{bin_config['min']:.1f}-{bin_config['max']:.1f}m" for bin_config in bins]
+        # Filter bins to only include those with data
+        bins_with_data = sorted(bins_with_data)
+        filtered_bins = [bins[i] for i in bins_with_data]
+        bin_labels = [f"{bin_config['min']:.1f}-{bin_config['max']:.1f}m" for bin_config in filtered_bins]
         
-        # Plot 1: Error distribution by region and wave height
+        # Plot 1: Mean Error by region and wave height (Model vs Baseline)
         x_pos = np.arange(len(bin_labels))
-        width = 0.25
+        if baseline_errors is not None:
+            width = 0.12  # Narrower bars for side-by-side comparison
+        else:
+            width = 0.25
         
         for i, region in enumerate(unique_regions):
-            region_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in error_data_by_region_bin[region]]
+            # Filter data to only include bins with data
+            region_model_errors = [model_error_data_by_region_bin[region][j] for j in bins_with_data]
+            region_model_mean_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in region_model_errors]
             region_name = RegionMapper.get_display_name(region)
-            axes[0, 0].bar(x_pos + i * width, region_errors, width, label=region_name, 
-                          color=colors[i], alpha=0.7)
+            
+            if baseline_errors is not None:
+                # Model bars
+                axes[0, 0].bar(x_pos + i * width * 2, region_model_mean_errors, width, 
+                              label=f'{region_name} (Model)', color=colors[i], alpha=0.8)
+                
+                # Baseline bars
+                region_baseline_errors = [baseline_error_data_by_region_bin[region][j] for j in bins_with_data]
+                region_baseline_mean_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in region_baseline_errors]
+                axes[0, 0].bar(x_pos + i * width * 2 + width, region_baseline_mean_errors, width, 
+                              label=f'{region_name} (Baseline)', color=colors[i], alpha=0.4, hatch='///')
+            else:
+                # Only model bars
+                axes[0, 0].bar(x_pos + i * width, region_model_mean_errors, width, 
+                              label=region_name, color=colors[i], alpha=0.7)
         
         axes[0, 0].set_title('Mean Error by Region and Wave Height', fontweight='bold')
         axes[0, 0].set_ylabel('Mean Prediction Error')
         axes[0, 0].set_xlabel('Wave Height Range')
-        axes[0, 0].set_xticks(x_pos + width)
+        if baseline_errors is not None:
+            axes[0, 0].set_xticks(x_pos + width * (len(unique_regions) - 1))
+        else:
+            axes[0, 0].set_xticks(x_pos + width)
         axes[0, 0].set_xticklabels(bin_labels, rotation=45)
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         axes[0, 0].axhline(y=0, color='red', linestyle='--', alpha=0.5)
         
-        # Plot 2: Absolute error distribution by region and wave height
+        # Plot 2: Mean Absolute Error by region and wave height (Model vs Baseline)
         for i, region in enumerate(unique_regions):
-            region_abs_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in abs_error_data_by_region_bin[region]]
+            region_model_abs_errors = [model_abs_error_data_by_region_bin[region][j] for j in bins_with_data]
+            region_model_mean_abs_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in region_model_abs_errors]
             region_name = RegionMapper.get_display_name(region)
-            axes[0, 1].bar(x_pos + i * width, region_abs_errors, width, label=region_name, 
-                          color=colors[i], alpha=0.7)
+            
+            if baseline_errors is not None:
+                # Model bars
+                axes[0, 1].bar(x_pos + i * width * 2, region_model_mean_abs_errors, width, 
+                              label=f'{region_name} (Model)', color=colors[i], alpha=0.8)
+                
+                # Baseline bars
+                region_baseline_abs_errors = [baseline_abs_error_data_by_region_bin[region][j] for j in bins_with_data]
+                region_baseline_mean_abs_errors = [np.mean(errors) if len(errors) > 0 else 0 for errors in region_baseline_abs_errors]
+                axes[0, 1].bar(x_pos + i * width * 2 + width, region_baseline_mean_abs_errors, width, 
+                              label=f'{region_name} (Baseline)', color=colors[i], alpha=0.4, hatch='///')
+            else:
+                # Only model bars
+                axes[0, 1].bar(x_pos + i * width, region_model_mean_abs_errors, width, 
+                              label=region_name, color=colors[i], alpha=0.7)
         
         axes[0, 1].set_title('Mean Absolute Error by Region and Wave Height', fontweight='bold')
         axes[0, 1].set_ylabel('Mean Absolute Error')
         axes[0, 1].set_xlabel('Wave Height Range')
-        axes[0, 1].set_xticks(x_pos + width)
+        if baseline_errors is not None:
+            axes[0, 1].set_xticks(x_pos + width * (len(unique_regions) - 1))
+        else:
+            axes[0, 1].set_xticks(x_pos + width)
         axes[0, 1].set_xticklabels(bin_labels, rotation=45)
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
-        # Plot 3: RMSE by region and wave height
+        # Plot 3: RMSE by region and wave height (Model vs Baseline)
         for i, region in enumerate(unique_regions):
-            region_rmse = rmse_data_by_region_bin[region]
+            region_model_rmse = [model_rmse_data_by_region_bin[region][j] for j in bins_with_data]
             region_name = RegionMapper.get_display_name(region)
-            axes[1, 0].bar(x_pos + i * width, region_rmse, width, label=region_name, 
-                          color=colors[i], alpha=0.7)
+            
+            if baseline_errors is not None:
+                # Model bars
+                axes[1, 0].bar(x_pos + i * width * 2, region_model_rmse, width, 
+                              label=f'{region_name} (Model)', color=colors[i], alpha=0.8)
+                
+                # Baseline bars
+                region_baseline_rmse = [baseline_rmse_data_by_region_bin[region][j] for j in bins_with_data]
+                axes[1, 0].bar(x_pos + i * width * 2 + width, region_baseline_rmse, width, 
+                              label=f'{region_name} (Baseline)', color=colors[i], alpha=0.4, hatch='///')
+            else:
+                # Only model bars
+                axes[1, 0].bar(x_pos + i * width, region_model_rmse, width, 
+                              label=region_name, color=colors[i], alpha=0.7)
         
         axes[1, 0].set_title('RMSE by Region and Wave Height', fontweight='bold')
         axes[1, 0].set_ylabel('RMSE')
         axes[1, 0].set_xlabel('Wave Height Range')
-        axes[1, 0].set_xticks(x_pos + width)
+        if baseline_errors is not None:
+            axes[1, 0].set_xticks(x_pos + width * (len(unique_regions) - 1))
+        else:
+            axes[1, 0].set_xticks(x_pos + width)
         axes[1, 0].set_xticklabels(bin_labels, rotation=45)
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         
-        # Plot 4: Sample count by region and wave height
+        # Plot 4: Sample count by region and wave height (Model only - same for baseline)
         for i, region in enumerate(unique_regions):
-            region_counts = [len(errors) for errors in error_data_by_region_bin[region]]
+            region_counts = [model_count_data_by_region_bin[region][j] for j in bins_with_data]
             region_name = RegionMapper.get_display_name(region)
-            axes[1, 1].bar(x_pos + i * width, region_counts, width, label=region_name, 
-                          color=colors[i], alpha=0.7)
+            axes[1, 1].bar(x_pos + i * width, region_counts, width, 
+                          label=region_name, color=colors[i], alpha=0.7)
         
         axes[1, 1].set_title('Sample Count by Region and Wave Height', fontweight='bold')
         axes[1, 1].set_ylabel('Number of Samples')
