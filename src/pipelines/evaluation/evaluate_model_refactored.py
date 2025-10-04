@@ -372,47 +372,6 @@ class RobustModelEvaluator:
         """Extract date information from filename."""
         return _extract_date_from_filename(filename)
     
-    def _create_mock_trainer(self, results: Dict[str, Any], regions: np.ndarray, regional_metrics: Dict[str, Any], sea_bin_metrics: Dict[str, Any]) -> Any:
-        """Create a mock trainer object for DiagnosticPlotter."""
-        class MockTrainer:
-            def __init__(self, results, model, config, regions, regional_metrics, sea_bin_metrics):
-                self.model = model
-                self.config = config
-                
-                # Test data
-                self.X_test = None  # Not needed for plotting
-                self.y_test = results["predictions"]["y_true"]
-                self.regions_test = results["regions"]
-                self.coords_test = results["coords"]
-                self.metadata_test = results["metadata"]
-                
-                # Training data (empty for evaluation)
-                self.X_train = None
-                self.y_train = None
-                self.regions_train = np.array([])
-                self.coords_train = np.array([])
-                self.metadata_train = pd.DataFrame()
-                
-                # Mock attributes for DiagnosticPlotter
-                self.feature_names = None
-                self.training_history = None
-                self.regional_metrics = None
-                self.sea_bin_metrics = None
-                self.spatial_metrics = None
-                
-                # Mock training metrics (empty for evaluation)
-                self.train_metrics = {}
-                self.val_metrics = {}
-                self.test_metrics = results["metrics"]
-                self.current_train_metrics = {}
-                self.current_val_metrics = {}
-                
-                # Set regional and sea-bin metrics
-                self.regional_test_metrics = regional_metrics
-                self.sea_bin_test_metrics = sea_bin_metrics
-        
-        return MockTrainer(results, self.model, self.config, regions, regional_metrics, sea_bin_metrics)
-    
     def _calculate_regional_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, regions: np.ndarray) -> Dict[str, Any]:
         """Calculate regional metrics for the mock trainer."""
         regional_metrics = {}
@@ -782,6 +741,7 @@ class RobustModelEvaluator:
         
         # Calculate regional metrics
         regional_metrics = self._calculate_regional_metrics(y_true, y_pred, regions)
+        baseline_regional_metrics = self._calculate_regional_metrics(y_true, season_data["vhm0_x"].values, regions)
         
         # Calculate sea-bin metrics
         sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, y_pred)
@@ -791,7 +751,7 @@ class RobustModelEvaluator:
         
         # Create mock trainer
         class SeasonalMockTrainer:
-            def __init__(self, season_data, metrics, regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, season):
+            def __init__(self, season_data, metrics, regional_metrics, baseline_regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, season):
                 self.X_train = None
                 self.y_train = None
                 self.regions_train = None
@@ -800,6 +760,7 @@ class RobustModelEvaluator:
                 self.feature_names = None
                 self.training_history = None
                 self.regional_metrics = regional_metrics
+                self.baseline_regional_metrics = baseline_regional_metrics
                 self.sea_bin_metrics = sea_bin_metrics
                 self.train_metrics = metrics
                 self.val_metrics = None
@@ -807,6 +768,7 @@ class RobustModelEvaluator:
                 self.current_val_metrics = None
                 self.current_test_metrics = metrics
                 self.regional_test_metrics = regional_metrics
+                self.baseline_regional_test_metrics = baseline_regional_metrics
                 self.sea_bin_test_metrics = sea_bin_metrics
                 self.baseline_sea_bin_test_metrics = baseline_sea_bin_metrics
                 self.y_test = season_data["y_true"].values
@@ -817,7 +779,7 @@ class RobustModelEvaluator:
                 self.season = season
                 self.config = config  # Add config attribute
         
-        return SeasonalMockTrainer(season_data, metrics, regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, season)
+        return SeasonalMockTrainer(season_data, metrics, regional_metrics, baseline_regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, season)
     
     def _create_aggregated_mock_trainer(self, combined_df: pd.DataFrame, config: dict):
         """Create a mock trainer object for aggregated diagnostic plots."""
@@ -831,6 +793,7 @@ class RobustModelEvaluator:
         
         # Calculate regional metrics
         regional_metrics = self._calculate_regional_metrics(y_true, y_pred, regions)
+        baseline_regional_metrics = self._calculate_regional_metrics(y_true, combined_df["vhm0_x"].values, regions)
         
         # Calculate sea-bin metrics
         sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, y_pred)
@@ -840,7 +803,7 @@ class RobustModelEvaluator:
         
         # Create mock trainer
         class AggregatedMockTrainer:
-            def __init__(self, combined_df, metrics, regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, config):
+            def __init__(self, combined_df, metrics, regional_metrics, baseline_regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, config):
                 self.X_train = None
                 self.y_train = None
                 self.regions_train = None
@@ -849,6 +812,7 @@ class RobustModelEvaluator:
                 self.feature_names = None
                 self.training_history = None
                 self.regional_metrics = regional_metrics
+                self.baseline_regional_metrics = baseline_regional_metrics
                 self.sea_bin_metrics = sea_bin_metrics
                 self.train_metrics = metrics
                 self.val_metrics = None
@@ -856,6 +820,7 @@ class RobustModelEvaluator:
                 self.current_val_metrics = None
                 self.current_test_metrics = metrics
                 self.regional_test_metrics = regional_metrics
+                self.baseline_regional_test_metrics = baseline_regional_metrics
                 self.sea_bin_test_metrics = sea_bin_metrics
                 self.baseline_sea_bin_test_metrics = baseline_sea_bin_metrics
                 self.y_test = combined_df["y_true"].values
@@ -865,7 +830,7 @@ class RobustModelEvaluator:
                 self.vhm0_x_test = combined_df["vhm0_x"].values  # Add baseline data
                 self.config = config
         
-        return AggregatedMockTrainer(combined_df, metrics, regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, config)
+        return AggregatedMockTrainer(combined_df, metrics, regional_metrics, baseline_regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, config)
     
     def _get_season_from_month(self, month: int) -> str:
         """Get season name from month number."""
@@ -1068,8 +1033,7 @@ class RobustModelEvaluator:
                 logger.error(f"Error evaluating {file_path}: {e}")
         
         logger.info(f"✅ Sequential evaluation completed: {len(self.file_results)} files processed")
-    
-    
+  
     def compute_aggregated_results(self) -> None:
         """Compute aggregated results across all files."""
         logger.info("Computing aggregated results...")

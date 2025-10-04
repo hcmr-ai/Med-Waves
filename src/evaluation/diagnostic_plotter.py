@@ -240,49 +240,100 @@ class DiagnosticPlotter:
         self._create_regional_error_analysis(trainer, test_predictions, plots_dir)
     
     def _create_regional_comparison_plot(self, trainer: Any, plots_dir: Path) -> None:
-        """Create regional performance comparison plot."""
+        """Create regional performance comparison plot with baseline comparison."""
         if not hasattr(trainer, 'regional_test_metrics') or not trainer.regional_test_metrics:
             logger.warning("No regional test metrics available")
             return
         logger.info("Creating regional performance comparison plot...")
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        fig.suptitle('Regional Performance Comparison', fontsize=16, fontweight='bold')
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig.suptitle('Regional Performance Comparison (Model vs Baseline)', fontsize=16, fontweight='bold')
         
         region_ids = list(trainer.regional_test_metrics.keys())
         regions = [RegionMapper.get_display_name(rid) for rid in region_ids]
-        rmse_values = [trainer.regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
-        mae_values = [trainer.regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
-        pearson_values = [trainer.regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
         
-        colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+        # Model metrics
+        model_rmse_values = [trainer.regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
+        model_mae_values = [trainer.regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
+        model_pearson_values = [trainer.regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
+        
+        # Baseline metrics (if available)
+        baseline_rmse_values = []
+        baseline_mae_values = []
+        baseline_pearson_values = []
+        
+        if hasattr(trainer, 'baseline_regional_test_metrics') and trainer.baseline_regional_test_metrics:
+            baseline_rmse_values = [trainer.baseline_regional_test_metrics[rid].get('rmse', 0) for rid in region_ids]
+            baseline_mae_values = [trainer.baseline_regional_test_metrics[rid].get('mae', 0) for rid in region_ids]
+            baseline_pearson_values = [trainer.baseline_regional_test_metrics[rid].get('pearson', 0) for rid in region_ids]
+        
+        # Set up bar positions
+        x = np.arange(len(regions))
+        width = 0.35
+        
+        # Colors
+        model_color = '#2E86AB'  # Blue for model
+        baseline_color = '#A23B72'  # Purple for baseline
         
         # RMSE by region
-        bars1 = axes[0].bar(regions, rmse_values, color=colors, alpha=0.7)
+        bars1_model = axes[0].bar(x - width/2, model_rmse_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_rmse_values:
+            bars1_baseline = axes[0].bar(x + width/2, baseline_rmse_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[0].set_title('RMSE by Region', fontweight='bold')
         axes[0].set_ylabel('RMSE')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(regions)
         axes[0].grid(True, alpha=0.3)
-        for bar, v in zip(bars1, rmse_values):
+        axes[0].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars1_model, model_rmse_values):
             axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_rmse_values:
+            for bar, v in zip(bars1_baseline, baseline_rmse_values):
+                axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         # MAE by region
-        bars2 = axes[1].bar(regions, mae_values, color=colors, alpha=0.7)
+        bars2_model = axes[1].bar(x - width/2, model_mae_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_mae_values:
+            bars2_baseline = axes[1].bar(x + width/2, baseline_mae_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[1].set_title('MAE by Region', fontweight='bold')
         axes[1].set_ylabel('MAE')
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(regions)
         axes[1].grid(True, alpha=0.3)
-        for bar, v in zip(bars2, mae_values):
+        axes[1].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars2_model, model_mae_values):
             axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_mae_values:
+            for bar, v in zip(bars2_baseline, baseline_mae_values):
+                axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         # Pearson correlation by region
-        bars3 = axes[2].bar(regions, pearson_values, color=colors, alpha=0.7)
+        bars3_model = axes[2].bar(x - width/2, model_pearson_values, width, label='Model', color=model_color, alpha=0.8)
+        if baseline_pearson_values:
+            bars3_baseline = axes[2].bar(x + width/2, baseline_pearson_values, width, label='Baseline', color=baseline_color, alpha=0.8)
         axes[2].set_title('Pearson Correlation by Region', fontweight='bold')
         axes[2].set_ylabel('Pearson Correlation')
+        axes[2].set_xticks(x)
+        axes[2].set_xticklabels(regions)
         axes[2].grid(True, alpha=0.3)
         axes[2].set_ylim(0, 1)
-        for bar, v in zip(bars3, pearson_values):
+        axes[2].legend()
+        
+        # Add value labels on bars
+        for bar, v in zip(bars3_model, model_pearson_values):
             axes[2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=10)
+                        f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        if baseline_pearson_values:
+            for bar, v in zip(bars3_baseline, baseline_pearson_values):
+                axes[2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                            f'{v:.3f}', ha='center', va='bottom', fontsize=9)
         
         plt.tight_layout()
         plt.savefig(plots_dir / 'regional_comparison.png', dpi=300, bbox_inches='tight')
