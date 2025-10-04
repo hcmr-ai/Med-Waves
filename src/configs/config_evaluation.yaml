@@ -4,8 +4,9 @@
 data:
   # Data path will be specified via command line
   target_column: "vhm0_y" # Target column name (currently hardcoded in code)
-  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_500k_samples_20250917/models/"
-  data_path: "s3://medwav-dev-data/parquet/hourly/"
+  # model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250922_2148_xgb_500K_samples_robust_stratified"
+  model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250921_2203_xgb_500K_samples_basin/"
+  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
   file_pattern: "*.parquet"
 
 # Feature configuration (synchronized with training pipeline)
@@ -45,18 +46,18 @@ feature_block:
     bins:
       - name: "calm"
         min: 0.0
-        max: 0.5
+        max: 1.0
         description: "Calm conditions"
       - name: "light"
-        min: 0.5
-        max: 1.0
-        description: "Light seas"
-      - name: "moderate"
         min: 1.0
         max: 2.0
+        description: "Light seas"
+      - name: "moderate"
+        min: 2.0
+        max: 3.0
         description: "Moderate seas"
       - name: "rough"
-        min: 2.0
+        min: 3.0
         max: 4.0
         description: "Rough seas"
       - name: "very_rough"
@@ -67,15 +68,23 @@ feature_block:
         min: 6.0
         max: 10.0
         description: "High seas"
+      - name: "very_high"
+        min: 10.0
+        max: 12.0
+        description: "Very high seas"
+      - name: "phenomenal"
+        min: 12.0
+        max: 999.0
+        description: "Phenomenal seas"
 
 # Preprocessing configuration (synchronized with training pipeline)
-preprocessing:
-  scaler: "standard" # Options: "standard", "robust", "minmax", "null"
+# preprocessing:
+#   scaler: "standard" # Options: "standard", "robust", "minmax", "null"
 
-  # Regional scaling (applies different scalers to different regions)
-  regional_scaling:
-    enabled: false # Set to true to enable regional scaling
-    # NOTE: Cannot be used with scaler: "null"
+#   # Regional scaling (applies different scalers to different regions)
+#   regional_scaling:
+#     enabled: false # Set to true to enable regional scaling
+#     # NOTE: Cannot be used with scaler: "null"
 
 # Evaluation configuration
 evaluation:
@@ -110,14 +119,14 @@ evaluation:
 
 # S3 configuration for model loading and results saving
 s3:
-  enabled: true # Enable S3 model loading
+  enabled: false # Enable S3 model loading
   bucket: "medwav-dev-data" # S3 bucket name
   region: "eu-central-1" # AWS region
   aws_profile: null # AWS profile name (optional, uses default if null)
 
 # Output configuration
 output:
-  output_dir: "evaluation_results"
+  output_dir: "evaluation_results_refactored"
   save_plots: true # Let users skip plot generation
 
   # S3 configuration for saving results
@@ -130,8 +139,23 @@ output:
 
 # Parallel processing configuration
 parallel_processing:
-  enabled: true # Re-enable parallel processing for speed
+  enabled: false # Re-enable parallel processing for speed
   n_workers: 4 # Use 4 workers for processing all 365 files
   batch_size: 8 # Process 10 files per batch for efficiency
   use_multiprocessing: false # Use ProcessPoolExecutor for true parallelism
   max_workers: 6 # Maximum number of workers
+
+# Training diagnostics
+diagnostics:
+  enabled: true
+  plots_save_path: "evaluation_results_refactored/diagnostic_plots"
+  save_training_history: false
+  create_learning_curves: false
+  create_residual_plots: false
+  create_prediction_plots: false
+  create_regional_analysis: true # Enable regional performance analysis plots
+  create_sea_bin_analysis: true # Enable sea-bin performance analysis plots
+  create_spatial_maps: false
+  create_regional_error_box_plots: true
+  create_wave_height_performance_plots: true
+  create_snr_comparison_plot: false

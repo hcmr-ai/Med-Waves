@@ -52,4 +52,4 @@ ruff_cache/
 *.bak
 nohup*
 *.png
-results/
+*results*/
