@@ -4,9 +4,15 @@
 data:
   # Data path will be specified via command line
   target_column: "vhm0_y" # Target column name (currently hardcoded in code)
-  # model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250922_2148_xgb_500K_samples_robust_stratified"
-  model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250921_2203_xgb_500K_samples_basin/"
-  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
+  # Local model path example:
+  # model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250921_2203_xgb_500K_samples_basin/"
+  # S3 model path example (when s3.enabled: true):
+  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_500K_samples_robust_stratified_20250922_214804/model"
+
+  # Local data path example:
+  # data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
+  # S3 data path example (when s3.enabled: true):
+  data_path: "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "*.parquet"
 
 # Feature configuration (synchronized with training pipeline)
@@ -23,7 +29,7 @@ feature_block:
   # Geographic context features
   use_geo_context:
     enabled: false # Set to true to enable geographic context features
-    include_basin: true # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
+    include_basin: false # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
 
   # Lag features for temporal patterns
   lag_features:
@@ -77,30 +83,10 @@ feature_block:
         max: 999.0
         description: "Phenomenal seas"
 
-# Preprocessing configuration (synchronized with training pipeline)
-# preprocessing:
-#   scaler: "standard" # Options: "standard", "robust", "minmax", "null"
-
-#   # Regional scaling (applies different scalers to different regions)
-#   regional_scaling:
-#     enabled: false # Set to true to enable regional scaling
-#     # NOTE: Cannot be used with scaler: "null"
-
 # Evaluation configuration
 evaluation:
   year: "2023"
   max_files: null # Process all December 2023 files (31 days) for faster evaluation
-  # Spatial metrics to compute and plot
-  spatial_metrics:
-    - "bias"
-    - "mae"
-    - "rmse"
-    - "pearson"
-    - "diff"
-    - "var_true"
-    - "var_pred"
-    - "snr"
-    - "snr_db"
 
   # Temporal analysis
   temporal_analysis:
@@ -119,21 +105,19 @@ evaluation:
 
 # S3 configuration for model loading and results saving
 s3:
-  enabled: false # Enable S3 model loading
+  enabled: true # Set to true to enable S3 saving
   bucket: "medwav-dev-data" # S3 bucket name
   region: "eu-central-1" # AWS region
   aws_profile: null # AWS profile name (optional, uses default if null)
 
 # Output configuration
 output:
-  output_dir: "evaluation_results_refactored"
-  save_plots: true # Let users skip plot generation
+  output_dir: "evaluation_results"
 
-  # S3 configuration for saving results
   s3:
-    enabled: false # Set to true to enable S3 saving
-    bucket: "medwav-dev-data" # Replace with your S3 bucket
-    prefix: "experiments/full_dataset_experiment/xgb_500k_samples_20250917/evaluation_results" # S3 prefix for organizing results
+    enabled: true # Set to true to enable S3 saving
+    bucket: "medwav-dev-data" # S3 bucket name
+    prefix: "experiments/full_dataset_experiment/xgb_500K_samples_robust_stratified_20250922_214804/evaluation_results" # S3 prefix for organizing results
     region: "eu-central-1" # AWS region
     aws_profile: null # AWS profile name (optional, uses default if null)
 
