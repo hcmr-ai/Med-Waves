@@ -6,8 +6,6 @@ and basic sampling operations in a modular and reusable way.
 """
 
 import glob
-import os
-import re
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
