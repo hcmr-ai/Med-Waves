@@ -87,6 +87,7 @@ feature_block:
 evaluation:
   year: "2023"
   max_files: null # Process all December 2023 files (31 days) for faster evaluation
+  max_workers: 4 # Number of parallel workers for file evaluation (set to 1 for sequential)
 
   # Temporal analysis
   temporal_analysis:
