@@ -10,12 +10,14 @@ import yaml
 import argparse
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent.parent
@@ -38,6 +40,77 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _extract_date_from_filename(filename: str) -> Dict[str, Any]:
+    """Extract date information from filename (standalone function for both worker and class)."""
+    try:
+        # Extract date from filename like WAVEAN2023010100.parquet
+        if "WAVEAN" in filename:
+            date_str = filename.split("WAVEAN")[1].split(".")[0]
+            if len(date_str) >= 8:
+                year = int(date_str[:4])
+                month = int(date_str[4:6])
+                day = int(date_str[6:8])
+                
+                # Determine season
+                if month in [12, 1, 2]:
+                    season = "winter"
+                elif month in [3, 4, 5]:
+                    season = "spring"
+                elif month in [6, 7, 8]:
+                    season = "summer"
+                else:  # 9, 10, 11
+                    season = "autumn"
+                
+                return {
+                    "year": year,
+                    "month": month,
+                    "day": day,
+                    "season": season
+                }
+    except Exception:
+        pass
+    
+    return {"year": None, "month": None, "day": None, "season": "unknown"}
+
+
+def _evaluate_single_file_worker(args: Tuple[str, Dict[str, Any]]) -> Tuple[str, Optional[Dict[str, Any]], bool]:
+    """
+    Standalone worker function for parallel file evaluation.
+    This avoids S3 client pickling issues by creating a new evaluator in each worker.
+    
+    Args:
+        args: Tuple of (file_path, config)
+        
+    Returns:
+        Tuple of (file_path, results_dict, success_flag)
+    """
+    file_path, config = args
+    
+    try:
+        # Create a new evaluator instance for this worker process
+        # This avoids S3 client pickling issues
+        worker_evaluator = RobustModelEvaluator(config)
+        
+        # Load the model in the worker process
+        model_path = config["data"]["model_path"]
+        worker_evaluator.load_model(model_path)
+        
+        # Use the worker's evaluate_file method
+        results = worker_evaluator.evaluate_file(file_path)
+        
+        # Clean up the worker evaluator
+        worker_evaluator.cleanup()
+        
+        if results:
+            return file_path, results, True
+        else:
+            return file_path, None, False
+            
+    except Exception as e:
+        logger.error(f"Error evaluating file {file_path}: {e}")
+        return file_path, None, False
+
+
 class RobustModelEvaluator:
     """Robust model evaluator using training infrastructure."""
     
@@ -51,6 +124,9 @@ class RobustModelEvaluator:
         self.feature_engineer = FeatureEngineer(config)
         self.preprocessing_manager = PreprocessingManager(config)
         self.diagnostic_plotter = DiagnosticPlotter(config)
+        
+        # Configure DataLoader with parallel processing settings
+        self._configure_dataloader_parallel_processing()
         
         # Initialize S3 components
         self.s3_results_saver = S3ResultsSaver(config)
@@ -80,7 +156,28 @@ class RobustModelEvaluator:
 
         self.target_column = config.get("data", {}).get("target_column", "vhm0_y")
         
+        # Parallel processing configuration
+        self.max_workers = config.get("evaluation", {}).get("max_workers", 1)
+        self.use_parallel = self.max_workers > 1
+        
         logger.info(f"Initialized RobustModelEvaluator with output directory: {self.output_dir}")
+        logger.info(f"Parallel processing: {'enabled' if self.use_parallel else 'disabled'} (max_workers={self.max_workers})")
+    
+    def _configure_dataloader_parallel_processing(self) -> None:
+        """Configure DataLoader with parallel processing settings from evaluation config."""
+        # Get parallel processing settings from evaluation config
+        evaluation_config = self.config.get("evaluation", {})
+        max_workers = evaluation_config.get("max_workers", 1)
+        
+        # Update DataLoader config to use the same parallel processing settings
+        if "data" not in self.config:
+            self.config["data"] = {}
+        
+        # Configure DataLoader parallel processing
+        self.config["data"]["parallel_loading"] = max_workers > 1
+        self.config["data"]["max_workers"] = max_workers
+        
+        logger.info(f"DataLoader parallel processing: {'enabled' if max_workers > 1 else 'disabled'} (max_workers={max_workers})")
     
     def cleanup(self):
         """Clean up resources, especially S3 temporary files."""
@@ -273,22 +370,7 @@ class RobustModelEvaluator:
     
     def _extract_date_from_filename(self, filename: str) -> Dict[str, Any]:
         """Extract date information from filename."""
-        # Extract date from filename like WAVEAN20231201
-        import re
-        date_match = re.search(r'(\d{8})', filename)
-        if date_match:
-            date_str = date_match.group(1)
-            try:
-                date_obj = datetime.strptime(date_str, '%Y%m%d')
-                return {
-                    "year": date_obj.year,
-                    "month": date_obj.month,
-                    "day": date_obj.day,
-                    "date": date_obj.strftime('%Y-%m-%d')
-                }
-            except ValueError:
-                pass
-        return {"year": None, "month": None, "day": None, "date": None}
+        return _extract_date_from_filename(filename)
     
     def _create_mock_trainer(self, results: Dict[str, Any], regions: np.ndarray, regional_metrics: Dict[str, Any], sea_bin_metrics: Dict[str, Any]) -> Any:
         """Create a mock trainer object for DiagnosticPlotter."""
@@ -902,15 +984,11 @@ class RobustModelEvaluator:
         data_files = self.get_data_files(data_path)
         logger.info(f"Found {len(data_files)} files to evaluate")
         
-        # Evaluate each file
-        for file_path in data_files:
-            try:
-                results = self.evaluate_file(file_path)
-                if results:
-                    self.file_results[results["file_name"]] = results
-                    
-            except Exception as e:
-                logger.error(f"Error evaluating {file_path}: {e}")
+        # Evaluate files (parallel or sequential)
+        if self.use_parallel:
+            self._evaluate_files_parallel(data_files)
+        else:
+            self._evaluate_files_sequential(data_files)
         
         # Create spatial maps (seasonal and aggregated) - calculate spatial metrics once
         self.create_all_spatial_maps()
@@ -931,6 +1009,66 @@ class RobustModelEvaluator:
         self.save_results_to_s3()
         
         logger.info("✅ Evaluation completed successfully!")
+    
+    def _evaluate_files_parallel(self, data_files: List[str]) -> None:
+        """Evaluate files in parallel using ProcessPoolExecutor."""
+        logger.info(f"Evaluating {len(data_files)} files in parallel with {self.max_workers} workers...")
+        
+        successful_files = 0
+        failed_files = 0
+        
+        # Process files in batches to avoid overwhelming the system
+        batch_size = self.max_workers * 2  # Process 2x the number of workers at a time
+        logger.info(f"Processing files in batches of {batch_size}")
+        
+        for i in tqdm(range(0, len(data_files), batch_size), desc="Processing batches"):
+            batch_files = data_files[i:i + batch_size]
+            
+            # Prepare arguments for worker function (file_path, config)
+            worker_args = [(file_path, self.config) for file_path in batch_files]
+            
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                # Submit batch tasks using the standalone worker function
+                futures = [executor.submit(_evaluate_single_file_worker, args) for args in worker_args]
+                
+                # Collect results
+                for future in as_completed(futures):
+                    try:
+                        file_path, results, success = future.result(timeout=300)  # 5 minute timeout
+                        
+                        if success and results is not None:
+                            self.file_results[results["file_name"]] = results
+                            successful_files += 1
+                            
+                            # Log progress for first few files
+                            if successful_files <= 3:
+                                logger.info(f"File {successful_files}: {results['file_name']} evaluated successfully")
+                        else:
+                            failed_files += 1
+                            logger.warning(f"Failed to evaluate file: {file_path}")
+                            
+                    except Exception as e:
+                        failed_files += 1
+                        logger.error(f"Error processing file: {e}")
+                        continue
+        
+        logger.info(f"✅ Parallel evaluation completed: {successful_files} successful, {failed_files} failed")
+    
+    def _evaluate_files_sequential(self, data_files: List[str]) -> None:
+        """Evaluate files sequentially (original method)."""
+        logger.info(f"Evaluating {len(data_files)} files sequentially...")
+        
+        for file_path in tqdm(data_files, desc="Evaluating files"):
+            try:
+                results = self.evaluate_file(file_path)
+                if results:
+                    self.file_results[results["file_name"]] = results
+                    
+            except Exception as e:
+                logger.error(f"Error evaluating {file_path}: {e}")
+        
+        logger.info(f"✅ Sequential evaluation completed: {len(self.file_results)} files processed")
+    
     
     def compute_aggregated_results(self) -> None:
         """Compute aggregated results across all files."""
