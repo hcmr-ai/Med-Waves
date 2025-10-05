@@ -7,7 +7,7 @@ data:
   # Local model path example:
   # model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250921_2203_xgb_500K_samples_basin/"
   # S3 model path example (when s3.enabled: true):
-  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_500k_samples_20250917/models"
+  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_20251005_224846/model"
 
   # Local data path example:
   # data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
@@ -25,6 +25,8 @@ feature_block:
     - "lon"
     - "latitude"
     - "longitude"
+    - "WDIR"
+    - "VMDR"
 
   # Geographic context features
   use_geo_context:
@@ -72,10 +74,10 @@ feature_block:
         description: "Very rough seas"
       - name: "high"
         min: 6.0
-        max: 10.0
+        max: 9.0
         description: "High seas"
       - name: "very_high"
-        min: 10.0
+        min: 9.0
         max: 12.0
         description: "Very high seas"
       - name: "phenomenal"
@@ -118,7 +120,7 @@ output:
   s3:
     enabled: true # Set to true to enable S3 saving
     bucket: "medwav-dev-data" # S3 bucket name
-    prefix: "experiments/full_dataset_experiment/xgb_500k_samples_20250917/evaluation_results" # S3 prefix for organizing results
+    prefix: "experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_20251005_224846/evaluation_results" # S3 prefix for organizing results
     region: "eu-central-1" # AWS region
     aws_profile: null # AWS profile name (optional, uses default if null)
 
@@ -141,6 +143,6 @@ diagnostics:
   create_regional_analysis: true # Enable regional performance analysis plots
   create_sea_bin_analysis: true # Enable sea-bin performance analysis plots
   create_spatial_maps: false
-  create_regional_error_box_plots: true
+  create_regional_error_box_plots: false
   create_wave_height_performance_plots: true
   create_snr_comparison_plot: false
