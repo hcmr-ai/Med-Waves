@@ -69,6 +69,8 @@ class SamplingManager:
             sampled_df = self._apply_robust_stratified_sampling(df, max_samples, sampling_seed)
         elif sampling_strategy == "single_region_robust":
             sampled_df = self._apply_single_region_robust_sampling(df, max_samples, sampling_seed)
+        elif sampling_strategy == "per_point_stratified":
+            sampled_df = self._apply_per_point_stratification(df, max_samples, sampling_seed)
         else:
             self.logger.warning(f"Unknown sampling strategy: {sampling_strategy}")
             return df
@@ -689,3 +691,26 @@ class SamplingManager:
         self.logger.info(f"    High (>{q66:.3f}): {high_count:,} ({high_count/total*100:.1f}%)")
         self.logger.info(f"      Rough (2.5-4.0m): {rough_count:,} ({rough_count/total*100:.1f}%)")
         self.logger.info(f"      Very-rough (>4.0m): {very_rough_count:,} ({very_rough_count/total*100:.1f}%)")
+    
+    def _apply_per_point_stratification(self, df: pl.DataFrame, max_samples: int, sampling_seed: int) -> pl.DataFrame:
+        """
+        Apply per-point wave height stratification.
+        
+        This ensures every location contributes samples across all wave height conditions,
+        providing balanced training data for all geographic points.
+        """
+        from src.data_engineering.per_point_stratification import apply_per_point_stratification
+        
+        self.logger.info("  - Per-point wave height stratification: balanced samples per location across wave height bins")
+        
+        # Update feature config with the actual max_samples parameter
+        updated_config = self.feature_config.copy()
+        updated_config["max_samples_per_file"] = max_samples
+        
+        # Create full config structure that PerPointStratification expects
+        full_config = {"feature_block": updated_config}
+        
+        self.logger.info(f"SamplingManager passing max_samples: {max_samples:,} to per-point stratification")
+        
+        # Apply per-point stratification
+        return apply_per_point_stratification(df, full_config)
