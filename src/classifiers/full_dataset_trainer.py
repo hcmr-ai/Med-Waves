@@ -37,97 +37,97 @@ from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
 
 
-def _load_single_file_worker(args):
-    """
-    Worker function for parallel file loading.
-    This function needs to be at module level for multiprocessing.
+# def _load_single_file_worker(args):
+#     """
+#     Worker function for parallel file loading.
+#     This function needs to be at module level for multiprocessing.
     
-    Args:
-        args: Tuple of (file_path, feature_config)
+#     Args:
+#         args: Tuple of (file_path, feature_config)
         
-    Returns:
-        Tuple of (file_path, df, success_flag)
-    """
-    file_path, feature_config = args
+#     Returns:
+#         Tuple of (file_path, df, success_flag)
+#     """
+#     file_path, feature_config = args
     
-    try:
-        # Import everything at the top to avoid import issues
-        import sys
-        import os
-        import logging
+#     try:
+#         # Import everything at the top to avoid import issues
+#         import sys
+#         import os
+#         import logging
         
-        # Add the project root to the path to ensure imports work
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
+#         # Add the project root to the path to ensure imports work
+#         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+#         if project_root not in sys.path:
+#             sys.path.insert(0, project_root)
         
-        # Now import our modules
-        from src.features.helpers import extract_features_from_parquet
-        from src.data_engineering.split import stratified_sample_by_location, temporal_sample_within_file
+#         # Now import our modules
+#         from src.features.helpers import extract_features_from_parquet
+#         from src.data_engineering.split import stratified_sample_by_location, temporal_sample_within_file
         
-        # Load the file
-        df = extract_features_from_parquet(file_path, use_dask=False)
+#         # Load the file
+#         df = extract_features_from_parquet(file_path, use_dask=False)
         
-        # Create lag features BEFORE sampling to preserve temporal sequences
-        use_lag_features = feature_config.get("lag_features", {}).get("enabled", False)
-        if use_lag_features:
-            logger.debug(f"Creating lag features for {file_path} before sampling...")
-            lag_config = feature_config.get("lag_features", {}).get("lags", {})
+#         # Create lag features BEFORE sampling to preserve temporal sequences
+#         use_lag_features = feature_config.get("lag_features", {}).get("enabled", False)
+#         if use_lag_features:
+#             logger.debug(f"Creating lag features for {file_path} before sampling...")
+#             lag_config = feature_config.get("lag_features", {}).get("lags", {})
             
-            # Check if we have temporal data (time column)
-            if "time" in df.columns or "timestamp" in df.columns:
-                time_col = "time" if "time" in df.columns else "timestamp"
+#             # Check if we have temporal data (time column)
+#             if "time" in df.columns or "timestamp" in df.columns:
+#                 time_col = "time" if "time" in df.columns else "timestamp"
                 
-                # Sort by time to ensure proper lag calculation
-                df = df.sort([time_col, "lat", "lon"])
+#                 # Sort by time to ensure proper lag calculation
+#                 df = df.sort([time_col, "lat", "lon"])
                 
-                # Create lag features for each variable
-                for variable, lags in lag_config.items():
-                    if variable in df.columns:
-                        for lag in lags:
-                            lag_col_name = f"{variable}_lag_{lag}h"
-                            # Create lag feature by shifting values within each location
-                            df = df.with_columns([
-                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
-                            ])
-                    else:
-                        logger.warning(f"Variable {variable} not found in data for lag features")
-            else:
-                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
+#                 # Create lag features for each variable
+#                 for variable, lags in lag_config.items():
+#                     if variable in df.columns:
+#                         for lag in lags:
+#                             lag_col_name = f"{variable}_lag_{lag}h"
+#                             # Create lag feature by shifting values within each location
+#                             df = df.with_columns([
+#                                 pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
+#                             ])
+#                     else:
+#                         logger.warning(f"Variable {variable} not found in data for lag features")
+#             else:
+#                 logger.warning("Lag features enabled but no time column found. Skipping lag features.")
         
-        # Apply sampling AFTER lag features are created
-        max_samples = feature_config.get("max_samples_per_file", None)
-        sampling_strategy = feature_config.get("sampling_strategy", "none")
+#         # Apply sampling AFTER lag features are created
+#         max_samples = feature_config.get("max_samples_per_file", None)
+#         sampling_strategy = feature_config.get("sampling_strategy", "none")
         
-        if max_samples is not None and sampling_strategy != "none":
-            original_size = len(df)
-            if original_size <= max_samples:
-                pass  # No sampling needed
-            else:
-                sampling_seed = feature_config.get("sampling_seed", 42)
+#         if max_samples is not None and sampling_strategy != "none":
+#             original_size = len(df)
+#             if original_size <= max_samples:
+#                 pass  # No sampling needed
+#             else:
+#                 sampling_seed = feature_config.get("sampling_seed", 42)
                 
-                if sampling_strategy == "random":
-                    df = df.sample(n=max_samples, seed=sampling_seed)
-                elif sampling_strategy == "per_location":
-                    samples_per_location = feature_config.get("samples_per_location", 20)
-                    # Use correct column names based on data format
-                    location_cols = ["lat", "lon"] if "lat" in df.columns else ["latitude", "longitude"]
-                    df = stratified_sample_by_location(df, max_samples, samples_per_location, location_cols, sampling_seed)
-                elif sampling_strategy == "temporal":
-                    samples_per_hour = feature_config.get("samples_per_hour", 100)
-                    df = temporal_sample_within_file(df, samples_per_hour, sampling_seed)
-                else:
-                    # Default to random sampling
-                    df = df.sample(n=max_samples, seed=sampling_seed)
+#                 if sampling_strategy == "random":
+#                     df = df.sample(n=max_samples, seed=sampling_seed)
+#                 elif sampling_strategy == "per_location":
+#                     samples_per_location = feature_config.get("samples_per_location", 20)
+#                     # Use correct column names based on data format
+#                     location_cols = ["lat", "lon"] if "lat" in df.columns else ["latitude", "longitude"]
+#                     df = stratified_sample_by_location(df, max_samples, samples_per_location, location_cols, sampling_seed)
+#                 elif sampling_strategy == "temporal":
+#                     samples_per_hour = feature_config.get("samples_per_hour", 100)
+#                     df = temporal_sample_within_file(df, samples_per_hour, sampling_seed)
+#                 else:
+#                     # Default to random sampling
+#                     df = df.sample(n=max_samples, seed=sampling_seed)
         
-        return (file_path, df, True)
+#         return (file_path, df, True)
         
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Error loading file {file_path}: {e}")
-        import traceback
-        logging.getLogger(__name__).warning(f"Traceback: {traceback.format_exc()}")
-        return (file_path, None, False)
+#     except Exception as e:
+#         import logging
+#         logging.getLogger(__name__).warning(f"Error loading file {file_path}: {e}")
+#         import traceback
+#         logging.getLogger(__name__).warning(f"Traceback: {traceback.format_exc()}")
+#         return (file_path, None, False)
 
 
 class FullDatasetTrainer:
@@ -179,6 +179,11 @@ class FullDatasetTrainer:
         self.coords_train = None
         self.coords_val = None
         self.coords_test = None
+        
+        # Raw input data for baseline metrics
+        self.vhm0_x_train = None
+        self.vhm0_x_val = None
+        self.vhm0_x_test = None
         
         # Training history
         self.training_history = {
@@ -406,6 +411,13 @@ class FullDatasetTrainer:
         # Prepare features using FeatureEngineer
         X, y, regions, coords = self.feature_engineer.prepare_features(combined_df, target_column)
         
+        # Extract raw input data for baseline metrics
+        if 'vhm0_x' in combined_df.columns:
+            self.vhm0_x_raw = combined_df['vhm0_x'].to_numpy()
+        else:
+            logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
+            self.vhm0_x_raw = None
+        
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
         
@@ -490,7 +502,7 @@ class FullDatasetTrainer:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
 
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None) -> None:
+    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None) -> None:
         """
         Split data into train/validation/test sets using DataSplitter.
         
@@ -519,6 +531,32 @@ class FullDatasetTrainer:
         self.coords_train = split_data['coords_train']
         self.coords_val = split_data['coords_val']
         self.coords_test = split_data['coords_test']
+        
+        # Split raw input data for baseline metrics
+        if vhm0_x is not None:
+            # Use the same indices as the main split
+            train_indices = split_data.get('train_indices', None)
+            val_indices = split_data.get('val_indices', None)
+            test_indices = split_data.get('test_indices', None)
+            
+            if train_indices is not None:
+                self.vhm0_x_train = vhm0_x[train_indices]
+                self.vhm0_x_val = vhm0_x[val_indices] if val_indices is not None else np.array([])
+                self.vhm0_x_test = vhm0_x[test_indices] if test_indices is not None else np.array([])
+            else:
+                # Fallback: assume equal distribution (not ideal but works)
+                logger.warning("DataSplitter didn't return indices. Using fallback splitting for vhm0_x.")
+                n_samples = len(vhm0_x)
+                n_train = len(self.X_train)
+                n_val = len(self.X_val)
+                
+                self.vhm0_x_train = vhm0_x[:n_train]
+                self.vhm0_x_val = vhm0_x[n_train:n_train+n_val] if n_val > 0 else np.array([])
+                self.vhm0_x_test = vhm0_x[n_train+n_val:] if n_train+n_val < n_samples else np.array([])
+        else:
+            self.vhm0_x_train = None
+            self.vhm0_x_val = None
+            self.vhm0_x_test = None
         
         # Log split information
         self.data_splitter.log_split_info(split_data)
@@ -861,6 +899,16 @@ class FullDatasetTrainer:
             self.y_train, train_pred, self.regions_train
         )
         
+        # Calculate baseline regional training metrics
+        logger.info("Calculating baseline regional training metrics...")
+        if self.vhm0_x_train is not None:
+            baseline_regional_train_metrics = self._calculate_regional_metrics(
+                self.y_train, self.vhm0_x_train, self.regions_train
+            )
+        else:
+            logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
+            baseline_regional_train_metrics = {}
+        
         # Calculate sea-bin training metrics
         sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
         
@@ -878,6 +926,16 @@ class FullDatasetTrainer:
             regional_val_metrics = self._calculate_regional_metrics(
                 self.y_val, val_pred, self.regions_val
             )
+            
+            # Calculate baseline regional validation metrics
+            logger.info("Calculating baseline regional validation metrics...")
+            if self.vhm0_x_val is not None and len(self.vhm0_x_val) > 0:
+                baseline_regional_val_metrics = self._calculate_regional_metrics(
+                    self.y_val, self.vhm0_x_val, self.regions_val
+                )
+            else:
+                logger.warning("vhm0_x_val not available. Skipping baseline regional validation metrics.")
+                baseline_regional_val_metrics = {}
             
             # Calculate sea-bin validation metrics
             sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
@@ -906,9 +964,11 @@ class FullDatasetTrainer:
         return {
             'train_metrics': train_metrics,
             'regional_train_metrics': regional_train_metrics,
+            'baseline_regional_train_metrics': baseline_regional_train_metrics,
             'sea_bin_train_metrics': sea_bin_train_metrics,
             'val_metrics': val_metrics,
             'regional_val_metrics': regional_val_metrics,
+            'baseline_regional_val_metrics': baseline_regional_val_metrics if len(self.X_val) > 0 else {},
             'sea_bin_val_metrics': sea_bin_val_metrics if len(self.X_val) > 0 else {},
             'training_history': self.training_history
         }
@@ -967,6 +1027,17 @@ class FullDatasetTrainer:
             self.y_test, test_pred, self.regions_test
         )
         
+        # Calculate baseline regional test metrics
+        logger.info("Calculating baseline regional test metrics...")
+        if self.vhm0_x_test is not None and len(self.vhm0_x_test) > 0:
+            baseline_regional_test_metrics = self._calculate_regional_metrics(
+                self.y_test, self.vhm0_x_test, self.regions_test
+            )
+            baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, self.vhm0_x_test)
+        else:
+            logger.warning("vhm0_x_test not available. Skipping baseline regional test metrics.")
+            baseline_regional_test_metrics = {}
+        
         # Calculate sea-bin test metrics
         sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
         
@@ -975,6 +1046,8 @@ class FullDatasetTrainer:
         
         # Store regional and sea-bin metrics as attributes for DiagnosticPlotter
         self.regional_test_metrics = regional_test_metrics
+        self.baseline_regional_test_metrics = baseline_regional_test_metrics
+        self.baseline_sea_bin_test_metrics = baseline_sea_bin_test_metrics
         self.sea_bin_test_metrics = sea_bin_test_metrics
         
         # Create diagnostic plots
@@ -999,6 +1072,7 @@ class FullDatasetTrainer:
         return {
             'test_metrics': test_metrics,
             'regional_test_metrics': regional_test_metrics,
+            'baseline_regional_test_metrics': baseline_regional_test_metrics,
             'sea_bin_test_metrics': sea_bin_test_metrics
             # Removed 'predictions' and 'actual' to save memory
         } 
