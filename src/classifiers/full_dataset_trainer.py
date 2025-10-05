@@ -1022,18 +1022,8 @@ class FullDatasetTrainer:
         else:
             joblib.dump(self.model, save_path / "model.pkl")
         
-        # Save preprocessing components
-        if self.scaler is not None:
-            joblib.dump(self.scaler, save_path / "scaler.pkl")
-        
-        if self.regional_scaler is not None:
-            joblib.dump(self.regional_scaler, save_path / "regional_scaler.pkl")
-        
-        if self.feature_selector is not None:
-            joblib.dump(self.feature_selector, save_path / "feature_selector.pkl")
-        
-        if self.dimension_reducer is not None:
-            joblib.dump(self.dimension_reducer, save_path / "dimension_reducer.pkl")
+        # Save preprocessing components using PreprocessingManager's save method
+        self.preprocessing_manager.save_preprocessing(save_path)
         
         # Save feature names and selected features
         joblib.dump(self.feature_names, save_path / "feature_names.pkl")
@@ -1054,22 +1044,8 @@ class FullDatasetTrainer:
         # Load model
         self.model = joblib.load(load_path / "model.pkl")
         
-        # Load preprocessing components
-        if (load_path / "scaler.pkl").exists():
-            self.scaler = joblib.load(load_path / "scaler.pkl")
-        else:
-            self.scaler = None
-        
-        if (load_path / "regional_scaler.pkl").exists():
-            self.regional_scaler = joblib.load(load_path / "regional_scaler.pkl")
-        else:
-            self.regional_scaler = None
-        
-        if (load_path / "feature_selector.pkl").exists():
-            self.feature_selector = joblib.load(load_path / "feature_selector.pkl")
-        
-        if (load_path / "dimension_reducer.pkl").exists():
-            self.dimension_reducer = joblib.load(load_path / "dimension_reducer.pkl")
+        # Load preprocessing components using PreprocessingManager's load method
+        self.preprocessing_manager.load_preprocessing(load_path)
         
         # Load feature names and selected features
         self.feature_names = joblib.load(load_path / "feature_names.pkl")
