@@ -1149,15 +1149,17 @@ class RobustModelEvaluator:
         if not all_metrics:
             return
         
-        # Compute mean metrics
-        metrics_df = pd.DataFrame(all_metrics)
-        mean_metrics = metrics_df.mean().to_dict()
+        # Compute metrics directly on combined data (more accurate than file-weighted)
+        mean_metrics = self._compute_combined_metrics(self.file_results, 'model')
         
-        # Compute mean baseline metrics
+        # Compute baseline metrics directly on combined data
         mean_baseline_metrics = None
         if all_baseline_metrics:
-            baseline_metrics_df = pd.DataFrame(all_baseline_metrics)
-            mean_baseline_metrics = baseline_metrics_df.mean().to_dict()
+            mean_baseline_metrics = self._compute_combined_metrics(self.file_results, 'baseline')
+        
+        # Compute standard deviation across files for file-level variability
+        metrics_df = pd.DataFrame(all_metrics)
+        metrics_std = metrics_df.std().to_dict()
         
         self.aggregated_results = {
             "evaluation_timestamp": datetime.now().isoformat(),
@@ -1165,7 +1167,7 @@ class RobustModelEvaluator:
             "total_samples": total_samples,
             "mean_metrics": mean_metrics,
             "mean_baseline_metrics": mean_baseline_metrics,
-            "metrics_std": metrics_df.std().to_dict(),
+            "metrics_std": metrics_std,
             "file_summary": {
                 file_name: {
                     "n_samples": results["n_samples"],
@@ -1183,6 +1185,52 @@ class RobustModelEvaluator:
         }
         
         logger.info("Aggregated results computed")
+    
+    def _compute_combined_metrics(self, file_results: Dict, metric_type: str) -> Dict[str, float]:
+        """
+        Compute metrics directly on combined y_true and y_pred from all files.
+        
+        This is the most accurate approach because it calculates metrics on the actual
+        combined dataset rather than aggregating pre-computed file-level metrics.
+        
+        Args:
+            file_results: Dictionary containing file results with predictions
+            metric_type: 'model' or 'baseline' to determine which predictions to use
+            
+        Returns:
+            Dictionary of metrics computed on combined data
+        """
+        if not file_results:
+            return {}
+        
+        # Collect all y_true and y_pred from all files
+        all_y_true = []
+        all_y_pred = []
+        
+        for _, results in file_results.items():
+            if results and "predictions" in results:
+                y_true = results["predictions"]["y_true"]
+                all_y_true.append(y_true)
+                
+                if metric_type == 'model':
+                    y_pred = results["predictions"]["y_pred"]
+                elif metric_type == 'baseline':
+                    y_pred = results["vhm0_x"]  # Baseline predictions
+                else:
+                    raise ValueError(f"Unknown metric_type: {metric_type}")
+                
+                all_y_pred.append(y_pred)
+        
+        if not all_y_true or not all_y_pred:
+            return {}
+        
+        # Combine all arrays
+        combined_y_true = np.concatenate(all_y_true)
+        combined_y_pred = np.concatenate(all_y_pred)
+        
+        # Compute metrics on the combined data
+        from src.evaluation.metrics import evaluate_model
+        return evaluate_model(combined_y_pred, combined_y_true)
     
     def _save_spatial_metrics(self, model_spatial_metrics, baseline_spatial_metrics, seasonal_metrics: Dict[str, Dict[str, Any]]) -> None:
         """Save spatial metrics (model, baseline, and seasonal) to CSV files."""
