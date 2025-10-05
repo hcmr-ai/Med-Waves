@@ -234,7 +234,7 @@ class DiagnosticPlotter:
         self._create_regional_comparison_plot(trainer, plots_dir)
         
         # Create regional predictions vs actual plots
-        self._create_regional_predictions_plots(trainer, test_predictions, plots_dir)
+        # self._create_regional_predictions_plots(trainer, test_predictions, plots_dir)
         
         # Create regional error analysis plots
         self._create_regional_error_analysis(trainer, test_predictions, plots_dir)
@@ -439,7 +439,7 @@ class DiagnosticPlotter:
         self._create_sea_bin_performance_plot(trainer, plots_dir)
         
         # Create sea-bin predictions vs actual plots
-        self._create_sea_bin_predictions_plots(trainer, test_predictions, plots_dir)
+        # self._create_sea_bin_predictions_plots(trainer, test_predictions, plots_dir)
     
     def _create_sea_bin_performance_plot(self, trainer: Any, plots_dir: Path) -> None:
         """Create sea-bin performance metrics plot with baseline comparison."""
