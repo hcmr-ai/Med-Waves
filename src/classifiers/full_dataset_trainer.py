@@ -32,7 +32,7 @@ from src.commons.region_mapping import RegionMapper
 # Set up logger
 logger = logging.getLogger(__name__)
 
-from src.evaluation.metrics import evaluate_model
+from src.evaluation.metrics import evaluate_model, evaluate_bias_model
 from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
 
@@ -255,6 +255,11 @@ class FullDatasetTrainer:
             'val': self.val_metrics,
             'test': self.test_metrics
         }
+    
+    @property
+    def predict_bias(self) -> bool:
+        """Check if we're predicting bias instead of vhm0_y directly."""
+        return self.feature_config.get("predict_bias", False)
     
     def _initialize_model(self):
         """Initialize the model based on configuration."""
@@ -891,26 +896,56 @@ class FullDatasetTrainer:
         
         # Calculate training metrics
         train_pred = self.model.predict(self.X_train)
-        train_metrics = evaluate_model(self.y_train, train_pred)
+        
+        if self.predict_bias:
+            # For bias prediction, convert back to vhm0 level for metrics
+            # train_pred is bias, self.y_train is bias_true, we need vhm0_x and vhm0_y
+            vhm0_y_train = self.vhm0_x_train - self.y_train  # Reconstruct vhm0_y from bias
+            train_metrics = evaluate_bias_model(train_pred, self.y_train, self.vhm0_x_train, vhm0_y_train)
+        else:
+            # Standard vhm0 prediction
+            train_metrics = evaluate_model(self.y_train, train_pred)
         
         # Calculate regional training metrics (always available now)
         logger.info("Calculating regional training metrics...")
-        regional_train_metrics = self._calculate_regional_metrics(
-            self.y_train, train_pred, self.regions_train
-        )
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for regional metrics
+            vhm0_y_train = self.vhm0_x_train - self.y_train
+            vhm0_pred_train = self.vhm0_x_train - train_pred
+            regional_train_metrics = self._calculate_regional_metrics(
+                vhm0_y_train, vhm0_pred_train, self.regions_train
+            )
+        else:
+            regional_train_metrics = self._calculate_regional_metrics(
+                self.y_train, train_pred, self.regions_train
+            )
         
         # Calculate baseline regional training metrics
         logger.info("Calculating baseline regional training metrics...")
         if self.vhm0_x_train is not None:
-            baseline_regional_train_metrics = self._calculate_regional_metrics(
-                self.y_train, self.vhm0_x_train, self.regions_train
-            )
+            if self.predict_bias:
+                # For bias prediction, baseline is zero bias (no correction)
+                vhm0_y_train = self.vhm0_x_train - self.y_train
+                baseline_regional_train_metrics = self._calculate_regional_metrics(
+                    vhm0_y_train, self.vhm0_x_train, self.regions_train  # No correction = vhm0_x
+                )
+            else:
+                # Standard approach: vhm0_x vs vhm0_y
+                baseline_regional_train_metrics = self._calculate_regional_metrics(
+                    self.y_train, self.vhm0_x_train, self.regions_train
+                )
         else:
             logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
             baseline_regional_train_metrics = {}
         
         # Calculate sea-bin training metrics
-        sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for sea-bin metrics
+            vhm0_y_train = self.vhm0_x_train - self.y_train
+            vhm0_pred_train = self.vhm0_x_train - train_pred
+            sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
+        else:
+            sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
         
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del train_pred
@@ -919,26 +954,55 @@ class FullDatasetTrainer:
         # Calculate validation metrics if validation set exists
         if len(self.X_val) > 0:
             val_pred = self.model.predict(self.X_val)
-            val_metrics = evaluate_model(self.y_val, val_pred)
+            
+            if self.predict_bias:
+                # For bias prediction, convert back to vhm0 level for metrics
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                val_metrics = evaluate_bias_model(val_pred, self.y_val, self.vhm0_x_val, vhm0_y_val)
+            else:
+                # Standard vhm0 prediction
+                val_metrics = evaluate_model(self.y_val, val_pred)
             
             # Calculate regional validation metrics (always available now)
             logger.info("Calculating regional validation metrics...")
-            regional_val_metrics = self._calculate_regional_metrics(
-                self.y_val, val_pred, self.regions_val
-            )
+            if self.predict_bias:
+                # For bias prediction, convert to vhm0 level for regional metrics
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                vhm0_pred_val = self.vhm0_x_val - val_pred
+                regional_val_metrics = self._calculate_regional_metrics(
+                    vhm0_y_val, vhm0_pred_val, self.regions_val
+                )
+            else:
+                regional_val_metrics = self._calculate_regional_metrics(
+                    self.y_val, val_pred, self.regions_val
+                )
             
             # Calculate baseline regional validation metrics
             logger.info("Calculating baseline regional validation metrics...")
             if self.vhm0_x_val is not None and len(self.vhm0_x_val) > 0:
-                baseline_regional_val_metrics = self._calculate_regional_metrics(
-                    self.y_val, self.vhm0_x_val, self.regions_val
-                )
+                if self.predict_bias:
+                    # For bias prediction, baseline is zero bias (no correction)
+                    vhm0_y_val = self.vhm0_x_val - self.y_val
+                    baseline_regional_val_metrics = self._calculate_regional_metrics(
+                        vhm0_y_val, self.vhm0_x_val, self.regions_val  # No correction = vhm0_x
+                    )
+                else:
+                    # Standard approach: vhm0_x vs vhm0_y
+                    baseline_regional_val_metrics = self._calculate_regional_metrics(
+                        self.y_val, self.vhm0_x_val, self.regions_val
+                    )
             else:
                 logger.warning("vhm0_x_val not available. Skipping baseline regional validation metrics.")
                 baseline_regional_val_metrics = {}
             
             # Calculate sea-bin validation metrics
-            sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
+            if self.predict_bias:
+                # For bias prediction, convert to vhm0 level for sea-bin metrics
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                vhm0_pred_val = self.vhm0_x_val - val_pred
+                sea_bin_val_metrics = self._calculate_sea_bin_metrics(vhm0_y_val, vhm0_pred_val)
+            else:
+                sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
             
             # 🚀 MEMORY OPTIMIZATION: Delete val predictions immediately
             del val_pred
@@ -1019,27 +1083,57 @@ class FullDatasetTrainer:
             test_pred = self.model.predict(self.X_test)
         
         # Calculate metrics
-        test_metrics = evaluate_model(self.y_test, test_pred)
+        if self.predict_bias:
+            # For bias prediction, convert back to vhm0 level for metrics
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            test_metrics = evaluate_bias_model(test_pred, self.y_test, self.vhm0_x_test, vhm0_y_test)
+        else:
+            # Standard vhm0 prediction
+            test_metrics = evaluate_model(self.y_test, test_pred)
         
         # Calculate regional test metrics (always available now)
         logger.info("Calculating regional test metrics...")
-        regional_test_metrics = self._calculate_regional_metrics(
-            self.y_test, test_pred, self.regions_test
-        )
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for regional metrics
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            vhm0_pred_test = self.vhm0_x_test - test_pred
+            regional_test_metrics = self._calculate_regional_metrics(
+                vhm0_y_test, vhm0_pred_test, self.regions_test
+            )
+        else:
+            regional_test_metrics = self._calculate_regional_metrics(
+                self.y_test, test_pred, self.regions_test
+            )
         
         # Calculate baseline regional test metrics
         logger.info("Calculating baseline regional test metrics...")
         if self.vhm0_x_test is not None and len(self.vhm0_x_test) > 0:
-            baseline_regional_test_metrics = self._calculate_regional_metrics(
-                self.y_test, self.vhm0_x_test, self.regions_test
-            )
-            baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, self.vhm0_x_test)
+            if self.predict_bias:
+                # For bias prediction, baseline is zero bias (no correction)
+                vhm0_y_test = self.vhm0_x_test - self.y_test
+                baseline_regional_test_metrics = self._calculate_regional_metrics(
+                    vhm0_y_test, self.vhm0_x_test, self.regions_test  # No correction = vhm0_x
+                )
+                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, self.vhm0_x_test)
+            else:
+                # Standard approach: vhm0_x vs vhm0_y
+                baseline_regional_test_metrics = self._calculate_regional_metrics(
+                    self.y_test, self.vhm0_x_test, self.regions_test
+                )
+                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, self.vhm0_x_test)
         else:
             logger.warning("vhm0_x_test not available. Skipping baseline regional test metrics.")
             baseline_regional_test_metrics = {}
+            baseline_sea_bin_test_metrics = {}
         
         # Calculate sea-bin test metrics
-        sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for sea-bin metrics
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            vhm0_pred_test = self.vhm0_x_test - test_pred
+            sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, vhm0_pred_test)
+        else:
+            sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
         
         # Store current test metrics as class attribute
         self.current_test_metrics = test_metrics

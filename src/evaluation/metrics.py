@@ -46,6 +46,59 @@ def evaluate_model(y_pred, y):
     }
 
 
+def evaluate_bias_model(bias_pred, bias_true, vhm0_x, vhm0_y):
+    """
+    Evaluate a bias prediction model and convert results to vhm0 level metrics.
+    
+    Args:
+        bias_pred: Predicted bias values (vhm0_x - vhm0_y)
+        bias_true: True bias values (vhm0_x - vhm0_y)
+        vhm0_x: Original model predictions
+        vhm0_y: Observed values
+        
+    Returns:
+        Dictionary with vhm0-level metrics
+    """
+    # Convert bias predictions back to vhm0 level
+    vhm0_pred = vhm0_x - bias_pred  # Apply bias correction
+    
+    # Calculate vhm0-level metrics
+    rmse = np.sqrt(mean_squared_error(vhm0_y, vhm0_pred))
+    mae = mean_absolute_error(vhm0_y, vhm0_pred)
+    bias = np.mean(np.mean(vhm0_pred) - vhm0_y)
+    diff = np.mean(vhm0_pred - vhm0_y)
+    pearson = pearsonr(vhm0_y, vhm0_pred)
+    
+    # Calculate variance metrics
+    var_true = np.var(vhm0_y)
+    var_pred = np.var(vhm0_pred)
+    
+    # Calculate Signal-to-Noise Ratio (SNR)
+    residuals = vhm0_y - vhm0_pred
+    signal_power = var_true
+    noise_power = np.var(residuals)
+    
+    # Avoid division by zero
+    if noise_power > 0:
+        snr = signal_power / noise_power
+        snr_db = 10 * np.log10(snr)  # Convert to dB
+    else:
+        snr = float('inf')
+        snr_db = float('inf')
+
+    return {
+        "rmse": rmse,
+        "mae": mae,
+        "bias": bias,
+        "diff": diff,
+        "pearson": pearson[0],
+        "var_true": var_true,
+        "var_pred": var_pred,
+        "snr": snr,
+        "snr_db": snr_db,
+    }
+
+
 def evaluate_model_spatial(spatial_df):
     import numpy as np
     from scipy.stats import pearsonr

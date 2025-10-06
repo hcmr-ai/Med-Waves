@@ -74,7 +74,20 @@ class FeatureEngineer:
         
         # Extract features and target
         X_raw = df.select(feature_cols).to_numpy()
-        y_raw = df[target_column].to_numpy()
+        
+        # Check if we should predict bias instead of vhm0_y directly
+        predict_bias = self.feature_config.get("predict_bias", False)
+        if predict_bias:
+            # Target is bias: vhm0_x - vhm0_y (correction needed)
+            if 'vhm0_x' in df.columns and target_column in df.columns:
+                y_raw = (df['vhm0_x'] - df[target_column]).to_numpy()
+                self.logger.info("Using bias as target: vhm0_x - vhm0_y")
+            else:
+                self.logger.error("Cannot predict bias: vhm0_x or target column not found")
+                raise ValueError("vhm0_x and target column required for bias prediction")
+        else:
+            # Standard approach: predict vhm0_y directly
+            y_raw = df[target_column].to_numpy()
         
         # Extract regions from the filtered dataframe (not the original regions_raw)
         regions_filtered = df["region"].to_numpy()
