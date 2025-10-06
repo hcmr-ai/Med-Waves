@@ -27,7 +27,7 @@ from src.data_engineering.data_splitter import DataSplitter
 from src.commons.preprocessing_manager import PreprocessingManager
 from src.classifiers.eqm_corrector import EQMCorrector
 from src.classifiers.delta_corrector import DeltaCorrector
-from src.commons.region_mapping import RegionMapper
+from src.classifiers.sample_weighting import SampleWeighting
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -35,100 +35,6 @@ logger = logging.getLogger(__name__)
 from src.evaluation.metrics import evaluate_model
 from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
-
-
-def _load_single_file_worker(args):
-    """
-    Worker function for parallel file loading.
-    This function needs to be at module level for multiprocessing.
-    
-    Args:
-        args: Tuple of (file_path, feature_config)
-        
-    Returns:
-        Tuple of (file_path, df, success_flag)
-    """
-    file_path, feature_config = args
-    
-    try:
-        # Import everything at the top to avoid import issues
-        import sys
-        import os
-        import logging
-        
-        # Add the project root to the path to ensure imports work
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        
-        # Now import our modules
-        from src.features.helpers import extract_features_from_parquet
-        from src.data_engineering.split import stratified_sample_by_location, temporal_sample_within_file
-        
-        # Load the file
-        df = extract_features_from_parquet(file_path, use_dask=False)
-        
-        # Create lag features BEFORE sampling to preserve temporal sequences
-        use_lag_features = feature_config.get("lag_features", {}).get("enabled", False)
-        if use_lag_features:
-            logger.debug(f"Creating lag features for {file_path} before sampling...")
-            lag_config = feature_config.get("lag_features", {}).get("lags", {})
-            
-            # Check if we have temporal data (time column)
-            if "time" in df.columns or "timestamp" in df.columns:
-                time_col = "time" if "time" in df.columns else "timestamp"
-                
-                # Sort by time to ensure proper lag calculation
-                df = df.sort([time_col, "lat", "lon"])
-                
-                # Create lag features for each variable
-                for variable, lags in lag_config.items():
-                    if variable in df.columns:
-                        for lag in lags:
-                            lag_col_name = f"{variable}_lag_{lag}h"
-                            # Create lag feature by shifting values within each location
-                            df = df.with_columns([
-                                pl.col(variable).shift(lag).over(["lat", "lon"]).alias(lag_col_name)
-                            ])
-                    else:
-                        logger.warning(f"Variable {variable} not found in data for lag features")
-            else:
-                logger.warning("Lag features enabled but no time column found. Skipping lag features.")
-        
-        # Apply sampling AFTER lag features are created
-        max_samples = feature_config.get("max_samples_per_file", None)
-        sampling_strategy = feature_config.get("sampling_strategy", "none")
-        
-        if max_samples is not None and sampling_strategy != "none":
-            original_size = len(df)
-            if original_size <= max_samples:
-                pass  # No sampling needed
-            else:
-                sampling_seed = feature_config.get("sampling_seed", 42)
-                
-                if sampling_strategy == "random":
-                    df = df.sample(n=max_samples, seed=sampling_seed)
-                elif sampling_strategy == "per_location":
-                    samples_per_location = feature_config.get("samples_per_location", 20)
-                    # Use correct column names based on data format
-                    location_cols = ["lat", "lon"] if "lat" in df.columns else ["latitude", "longitude"]
-                    df = stratified_sample_by_location(df, max_samples, samples_per_location, location_cols, sampling_seed)
-                elif sampling_strategy == "temporal":
-                    samples_per_hour = feature_config.get("samples_per_hour", 100)
-                    df = temporal_sample_within_file(df, samples_per_hour, sampling_seed)
-                else:
-                    # Default to random sampling
-                    df = df.sample(n=max_samples, seed=sampling_seed)
-        
-        return (file_path, df, True)
-        
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"Error loading file {file_path}: {e}")
-        import traceback
-        logging.getLogger(__name__).warning(f"Traceback: {traceback.format_exc()}")
-        return (file_path, None, False)
-
 
 class FullDatasetTrainer:
     """
@@ -180,6 +86,11 @@ class FullDatasetTrainer:
         self.coords_val = None
         self.coords_test = None
         
+        # Raw input data for baseline metrics
+        self.vhm0_x_train = None
+        self.vhm0_x_val = None
+        self.vhm0_x_test = None
+        
         # Training history
         self.training_history = {
             'train_loss': [],
@@ -200,10 +111,13 @@ class FullDatasetTrainer:
         self.metrics_calculator = MetricsCalculator(config)
         self.data_splitter = DataSplitter(config)
         self.preprocessing_manager = PreprocessingManager(config)
+        self.sample_weighting = SampleWeighting(self.feature_config)
         self.diagnostic_plotter = DiagnosticPlotter(self.config)
         self.experiment_logger = ExperimentLogger(self.config)
         self.memory_monitor = MemoryMonitor(self.config)
         self.s3_results_saver = S3ResultsSaver(self.config)
+
+        self._validate_config()
         
         # Initialize model
         self._initialize_model()
@@ -211,6 +125,15 @@ class FullDatasetTrainer:
         # Preprocessing is now handled by PreprocessingManager
         
         logger.info(f"FullDatasetTrainer initialized with model: {self.model_config.get('type', 'xgb')}")
+        
+        # Log weighting configuration
+        weighting_info = self.sample_weighting.get_weight_function_info()
+        if weighting_info:
+            logger.info("Sample weighting configuration:")
+            for weight_type, description in weighting_info.items():
+                logger.info(f"  {weight_type}: {description}")
+        else:
+            logger.info("No sample weighting enabled")
         
         # Set up memory monitoring with experiment
         if hasattr(self.experiment_logger, 'experiment'):
@@ -250,6 +173,11 @@ class FullDatasetTrainer:
             'val': self.val_metrics,
             'test': self.test_metrics
         }
+    
+    @property
+    def predict_bias(self) -> bool:
+        """Check if we're predicting bias instead of vhm0_y directly."""
+        return self.feature_config.get("predict_bias", False)
     
     def _initialize_model(self):
         """Initialize the model based on configuration."""
@@ -325,7 +253,7 @@ class FullDatasetTrainer:
     
     def _validate_config(self):
         """Validate configuration for logical consistency."""
-        scaler_type = self.feature_config.get("scaler", "standard")
+        scaler_type = self.feature_config.get("scaler", None)
         use_regional_scaling = self.feature_config.get("regional_scaling", {}).get("enabled", False)
         
         # Check for conflicting configurations
@@ -335,76 +263,22 @@ class FullDatasetTrainer:
             logger.warning("  - Set scaler to 'standard', 'robust', or 'minmax' for regional scaling")
             logger.warning("  - Set regional_scaling.enabled to false for no scaling")
     
-    # def _initialize_preprocessing(self):
-    #     """Initialize preprocessing components."""
-    #     # Validate configuration first
-    #     self._validate_config()
-        
-    #     # Scaler
-    #     scaler_type = self.feature_config.get("scaler", "standard")
-    #     use_regional_scaling = self.feature_config.get("regional_scaling", {}).get("enabled", False)
-        
-    #     # Check if scaler is null first
-    #     if scaler_type is None or scaler_type == "null":
-    #         if use_regional_scaling:
-    #             logger.warning("Cannot use regional scaling with null scaler. Disabling regional scaling.")
-    #             use_regional_scaling = False
-            
-    #         logger.info("No scaling applied - using raw features")
-    #         self.scaler = None
-    #         self.regional_scaler = None
-    #     elif use_regional_scaling:
-    #         logger.info("Using regional scaling for geographic regions")
-    #         self.regional_scaler = RegionalScaler(
-    #             base_scaler=scaler_type,
-    #             region_column="atlantic_region"
-    #         )
-    #         # No need for regular scaler when using regional scaling
-    #         self.scaler = None
-    #     else:
-    #         logger.info(f"Using {scaler_type} scaling")
-    #         if scaler_type == "standard":
-    #             self.scaler = StandardScaler()
-    #         elif scaler_type == "robust":
-    #             self.scaler = RobustScaler()
-    #         elif scaler_type == "minmax":
-    #             self.scaler = MinMaxScaler()
-    #         else:
-    #             logger.warning(f"Unknown scaler type '{scaler_type}', using StandardScaler")
-    #             self.scaler = StandardScaler()
-    #         # No regional scaler when using standard scaling
-    #         self.regional_scaler = None
-        
-    #     # Feature selection
-    #     if self.feature_config.get("feature_selection", {}).get("enabled", False):
-    #         selection_type = self.feature_config["feature_selection"].get("type", "kbest")
-    #         k = self.feature_config["feature_selection"].get("k", 100)
-            
-    #         if selection_type == "kbest":
-    #             self.feature_selector = SelectKBest(score_func=f_regression, k=k)
-    #         elif selection_type == "rfe":
-    #             # RFE will be initialized after model is available
-    #             pass
-        
-    #     # Dimension reduction
-    #     if self.feature_config.get("dimension_reduction", {}).get("enabled", False):
-    #         reduction_type = self.feature_config["dimension_reduction"].get("type", "pca")
-    #         n_components = self.feature_config["dimension_reduction"].get("n_components", 50)
-            
-    #         if reduction_type == "pca":
-    #             self.dimension_reducer = PCA(n_components=n_components, random_state=42)
-    #         elif reduction_type == "svd":
-    #             self.dimension_reducer = TruncatedSVD(n_components=n_components, random_state=42)
-    
     def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
         """Load data using the DataLoader."""
         self._log_memory_usage("before loading data")
         
         # Use DataLoader to load and combine data (with per-file sampling)
-        combined_df, successful_files = self.data_loader.load_data(data_paths, target_column)
+        combined_df, successful_files = self.data_loader.load_data(data_paths)
         
         # Prepare features using FeatureEngineer
         X, y, regions, coords = self.feature_engineer.prepare_features(combined_df, target_column)
+        
+        # Extract raw input data for baseline metrics
+        if 'vhm0_x' in combined_df.columns:
+            self.vhm0_x_raw = combined_df['vhm0_x'].to_numpy()
+        else:
+            logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
+            self.vhm0_x_raw = None
         
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
@@ -437,51 +311,6 @@ class FullDatasetTrainer:
         
         return dataset_info
     
-    def _apply_regional_weights(self, y: np.ndarray, regions: np.ndarray) -> np.ndarray:
-        """
-        Apply regional weights to training data.
-        
-        Args:
-            X: Feature matrix
-            y: Target vector
-            regions: Region information for each sample
-            
-        Returns:
-            Sample weights array
-        """
-        if not self.feature_config.get("regional_weighting", {}).get("enabled", False):
-            # Return uniform weights if regional weighting is disabled
-            sample_weights = np.ones(len(y))
-            return sample_weights
-        
-        weights_config = self.feature_config.get("regional_weighting", {}).get("weights", {})
-        
-        # Create weight array
-        sample_weights = np.ones(len(y))
-        
-        # Apply weights based on region
-        for region, weight in weights_config.items():
-            region_mask = regions == region
-            region_count = np.sum(region_mask)
-            if region_count > 0:
-                sample_weights[region_mask] = weight
-                logger.info(f"Applied weight {weight} to {region_count:,} {region} samples")
-        
-        # Log weight statistics
-        total_weighted_samples = np.sum(sample_weights)
-        logger.info(f"Regional weighting applied - Total weighted samples: {total_weighted_samples:,.0f}")
-        
-        # Log effective sample counts per region
-        for region_id in weights_config.keys():
-            region_mask = regions == region_id
-            if np.sum(region_mask) > 0:
-                region_count = np.sum(region_mask)
-                effective_count = np.sum(sample_weights[region_mask])
-                region_name = RegionMapper.get_display_name(region_id)
-                logger.info(f"  {region_name}: {region_count:,} samples × {weights_config[region_id]} = {effective_count:,.0f} effective samples")
-        
-        return sample_weights
-    
     def _calculate_regional_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, regions: np.ndarray) -> Dict[str, Dict[str, float]]:
         """Calculate metrics per region using MetricsCalculator."""
         return self.metrics_calculator.calculate_regional_metrics(y_true, y_pred, regions)
@@ -490,7 +319,7 @@ class FullDatasetTrainer:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
 
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None) -> None:
+    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None) -> None:
         """
         Split data into train/validation/test sets using DataSplitter.
         
@@ -520,205 +349,41 @@ class FullDatasetTrainer:
         self.coords_val = split_data['coords_val']
         self.coords_test = split_data['coords_test']
         
+        # Split raw input data for baseline metrics
+        if vhm0_x is not None:
+            # Use the same indices as the main split
+            train_indices = split_data.get('train_indices', None)
+            val_indices = split_data.get('val_indices', None)
+            test_indices = split_data.get('test_indices', None)
+            
+            if train_indices is not None:
+                self.vhm0_x_train = vhm0_x[train_indices]
+                self.vhm0_x_val = vhm0_x[val_indices] if val_indices is not None else np.array([])
+                self.vhm0_x_test = vhm0_x[test_indices] if test_indices is not None else np.array([])
+            else:
+                # Fallback: assume equal distribution
+                logger.warning("DataSplitter didn't return indices. Using fallback splitting for vhm0_x.")
+                n_samples = len(vhm0_x)
+                n_train = len(self.X_train)
+                n_val = len(self.X_val)
+                
+                self.vhm0_x_train = vhm0_x[:n_train]
+                self.vhm0_x_val = vhm0_x[n_train:n_train+n_val] if n_val > 0 else np.array([])
+                self.vhm0_x_test = vhm0_x[n_train+n_val:] if n_train+n_val < n_samples else np.array([])
+        else:
+            self.vhm0_x_train = None
+            self.vhm0_x_val = None
+            self.vhm0_x_test = None
+        
         # Log split information
         self.data_splitter.log_split_info(split_data)
         
-        # Apply regional weighting to training data
-        self.sample_weights = self._apply_regional_weights(
+        # Apply sample weighting (regional and/or wave height bin weighting)
+        self.sample_weights = self.sample_weighting.apply_weights(
             self.y_train, self.regions_train
         )
         
         self._log_memory_usage("after splitting data")
-    
-    # def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray, coords: np.ndarray, file_paths: List[str], split_config: Dict[str, Any]) -> None:
-    #     """
-    #     Split data by years: 2017-2022 for train/val, 2023 for test.
-        
-    #     Args:
-    #         X: Feature matrix
-    #         y: Target vector
-    #         file_paths: List of file paths
-    #         split_config: Split configuration
-    #     """
-    #     train_end_year = split_config.get("train_end_year", 2022)
-    #     test_start_year = split_config.get("test_start_year", 2023)
-    #     val_months = split_config.get("val_months", [10, 11, 12])  # Default: Oct-Dec
-    #     eval_months = split_config.get("eval_months", list(range(1, 13)))  # Default: All months
-        
-    #     logger.info(f"Year-based split: Train up to {train_end_year}, Val months {val_months} of {train_end_year}, Test months {eval_months} from {test_start_year}")
-        
-    #     # Create file-to-indices mapping
-    #     file_indices = {}
-    #     current_idx = 0
-        
-    #     for file_path in file_paths:
-    #         try:
-    #             # Extract date from filename
-    #             date = extract_date_from_filename(file_path)
-    #             year = date.year
-    #             month = date.month
-                
-    #             # Count samples in this file (we need to estimate this)
-    #             # For now, we'll assume equal distribution across files
-    #             samples_per_file = len(X) // len(file_paths)
-    #             file_indices[file_path] = (current_idx, current_idx + samples_per_file)
-    #             current_idx += samples_per_file
-                
-    #             # Debug: log first few files
-    #             if len(file_indices) <= 5:
-    #                 logger.info(f"File: {file_path} -> Year: {year}, Month: {month}")
-                
-    #         except Exception as e:
-    #             logger.warning(f"Could not extract date from {file_path}: {e}")
-    #             continue
-        
-    #     # Log total files and their distribution
-    #     logger.info(f"Total files processed: {len(file_indices)}")
-    #     logger.info(f"Total samples: {len(X)}")
-    #     logger.info(f"Estimated samples per file: {samples_per_file}")
-        
-    #     # Create test mask based on eval_months
-    #     test_mask = np.zeros(len(X), dtype=bool)
-        
-    #     for file_path, (start_idx, end_idx) in file_indices.items():
-    #         try:
-    #             date = extract_date_from_filename(file_path)
-    #             year = date.year
-    #             month = date.month
-                
-    #             if year >= test_start_year and month in eval_months:
-    #                 test_mask[start_idx:end_idx] = True
-                    
-    #         except Exception as e:
-    #             logger.warning(f"Error processing {file_path}: {e}")
-    #             continue
-        
-    #     # Split train/val data by years and months
-    #     train_files = []
-    #     val_files = []
-        
-    #     for file_path, (start_idx, end_idx) in file_indices.items():
-    #         try:
-    #             date = extract_date_from_filename(file_path)
-    #             year = date.year
-    #             month = date.month
-                
-    #             if year <= train_end_year:
-    #                 # Determine if this file should be train or validation
-    #                 if year < train_end_year:
-    #                     # All years before the last year go to training
-    #                     train_files.append((file_path, start_idx, end_idx))
-    #                     logger.debug(f"Train file: {file_path} -> {year}-{month:02d}")
-    #                 elif year == train_end_year:
-    #                     # Last year: check if month is in validation months
-    #                     if month in val_months:
-    #                         val_files.append((file_path, start_idx, end_idx))
-    #                         logger.info(f"Validation file: {file_path} -> {year}-{month:02d}")
-    #                     else:
-    #                         train_files.append((file_path, start_idx, end_idx))
-    #                         logger.debug(f"Train file: {file_path} -> {year}-{month:02d}")
-                        
-    #         except Exception as e:
-    #             logger.warning(f"Error processing {file_path}: {e}")
-    #             continue
-        
-    #     # Create masks for train and validation
-    #     train_mask = np.zeros(len(X), dtype=bool)
-    #     val_mask = np.zeros(len(X), dtype=bool)
-        
-    #     for _, start_idx, end_idx in train_files:
-    #         train_mask[start_idx:end_idx] = True
-            
-    #     for _, start_idx, end_idx in val_files:
-    #         val_mask[start_idx:end_idx] = True
-        
-    #     # Store splits
-    #     self.X_train = X[train_mask]
-    #     self.X_val = X[val_mask]
-    #     self.X_test = X[test_mask]
-        
-    #     self.y_train = y[train_mask]
-    #     self.y_val = y[val_mask]
-    #     self.y_test = y[test_mask]
-        
-    #     # Store region information (always available now)
-    #     self.regions_train = regions[train_mask]
-    #     self.regions_val = regions[val_mask]
-    #     self.regions_test = regions[test_mask]
-    #     # Log regional distribution with readable names
-    #     train_regions, train_counts = np.unique(self.regions_train, return_counts=True)
-    #     val_regions, val_counts = np.unique(self.regions_val, return_counts=True)
-    #     test_regions, test_counts = np.unique(self.regions_test, return_counts=True)
-        
-    #     train_names = [RegionMapper.get_display_name(rid) for rid in train_regions]
-    #     val_names = [RegionMapper.get_display_name(rid) for rid in val_regions]
-    #     test_names = [RegionMapper.get_display_name(rid) for rid in test_regions]
-        
-    #     logger.info(f"Regional distribution - Train: {dict(zip(train_names, train_counts))}")
-    #     logger.info(f"Regional distribution - Val: {dict(zip(val_names, val_counts))}")
-    #     logger.info(f"Regional distribution - Test: {dict(zip(test_names, test_counts))}")
-        
-    #     # Store coordinate information if available
-    #     if coords is not None:
-    #         self.coords_train = coords[train_mask]
-    #         self.coords_val = coords[val_mask]
-    #         self.coords_test = coords[test_mask]
-        
-    #     # Apply regional weighting to training data
-    #     self.sample_weights = self._apply_regional_weights(
-    #         self.X_train, self.y_train, self.regions_train
-    #     )
-        
-    #     # Log split statistics BEFORE deleting file_indices
-    #     train_years_months = []
-    #     val_years_months = []
-    #     test_years_months = []
-        
-    #     for file_path, (start_idx, end_idx) in file_indices.items():
-    #         try:
-    #             date = extract_date_from_filename(file_path)
-    #             year = date.year
-    #             month = date.month
-                
-    #             if year < train_end_year:  # Training years
-    #                 train_years_months.append((year, month))
-    #             elif year == train_end_year and month in val_months:  # Validation months
-    #                 val_years_months.append((year, month))
-    #             elif year >= test_start_year and month in eval_months:  # Test months
-    #                 test_years_months.append((year, month))
-    #         except:
-    #             continue
-        
-    #     # Group by year for cleaner logging
-    #     train_years = sorted(set(year for year, month in train_years_months))
-    #     val_years = sorted(set(year for year, month in val_years_months))
-    #     test_years = sorted(set(year for year, month in test_years_months))
-        
-    #     logger.info(f"Year-based split completed:")
-    #     logger.info(f"  Train: {len(self.X_train)} samples, years: {train_years}")
-    #     logger.info(f"  Val: {len(self.X_val)} samples, months {val_months} of {val_years}")
-    #     logger.info(f"  Test: {len(self.X_test)} samples, months {eval_months} of {test_years}")
-        
-    #     # Check for empty splits
-    #     if len(self.X_val) == 0:
-    #         logger.warning("Validation set is empty! Check your val_months configuration.")
-    #     if len(self.X_test) == 0:
-    #         logger.warning("Test set is empty! Check your eval_months and test_start_year configuration.")
-        
-    #     # Log split information to Comet
-    #     split_info = {
-    #         "train_samples": len(self.X_train),
-    #         "val_samples": len(self.X_val),
-    #         "test_samples": len(self.X_test),
-    #         "train_ratio": len(self.X_train) / (len(self.X_train) + len(self.X_val) + len(self.X_test)) if (len(self.X_train) + len(self.X_val) + len(self.X_test)) > 0 else 0,
-    #         "val_ratio": len(self.X_val) / (len(self.X_train) + len(self.X_val) + len(self.X_test)) if (len(self.X_train) + len(self.X_val) + len(self.X_test)) > 0 else 0,
-    #         "test_ratio": len(self.X_test) / (len(self.X_train) + len(self.X_val) + len(self.X_test)) if (len(self.X_train) + len(self.X_val) + len(self.X_test)) > 0 else 0
-    #     }
-    #     self.experiment_logger.log_split_info(split_info)
-        
-    #     # 🚀 MEMORY OPTIMIZATION: Delete masks and file indices AFTER logging
-    #     del train_mask, val_mask, test_mask, file_indices
-    #     import gc; gc.collect()
     
     def preprocess_data(self) -> None:
         """Apply preprocessing to the data splits using PreprocessingManager."""
@@ -853,16 +518,57 @@ class FullDatasetTrainer:
         
         # Calculate training metrics
         train_pred = self.model.predict(self.X_train)
-        train_metrics = evaluate_model(self.y_train, train_pred)
+        
+        if self.predict_bias:
+            # For bias prediction, convert back to vhm0 level for metrics
+            # train_pred is bias, self.y_train is bias_true, we need vhm0_x and vhm0_y
+            vhm0_y_train = self.vhm0_x_train - self.y_train  # Reconstruct vhm0_y from bias
+            vhm0_pred_train = self.vhm0_x_train - train_pred  # Apply bias correction
+            train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
+        else:
+            # Standard vhm0 prediction
+            train_metrics = evaluate_model(train_pred, self.y_train)
         
         # Calculate regional training metrics (always available now)
         logger.info("Calculating regional training metrics...")
-        regional_train_metrics = self._calculate_regional_metrics(
-            self.y_train, train_pred, self.regions_train
-        )
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for regional metrics
+            vhm0_y_train = self.vhm0_x_train - self.y_train
+            vhm0_pred_train = self.vhm0_x_train - train_pred
+            regional_train_metrics = self._calculate_regional_metrics(
+                vhm0_y_train, vhm0_pred_train, self.regions_train
+            )
+        else:
+            regional_train_metrics = self._calculate_regional_metrics(
+                self.y_train, train_pred, self.regions_train
+            )
+        
+        # Calculate baseline regional training metrics
+        logger.info("Calculating baseline regional training metrics...")
+        if self.vhm0_x_train is not None:
+            if self.predict_bias:
+                # For bias prediction, baseline is zero bias (no correction)
+                vhm0_y_train = self.vhm0_x_train - self.y_train
+                baseline_regional_train_metrics = self._calculate_regional_metrics(
+                    vhm0_y_train, self.vhm0_x_train, self.regions_train  # No correction = vhm0_x
+                )
+            else:
+                # Standard approach: vhm0_x vs vhm0_y
+                baseline_regional_train_metrics = self._calculate_regional_metrics(
+                    self.y_train, self.vhm0_x_train, self.regions_train
+                )
+        else:
+            logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
+            baseline_regional_train_metrics = {}
         
         # Calculate sea-bin training metrics
-        sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for sea-bin metrics
+            vhm0_y_train = self.vhm0_x_train - self.y_train
+            vhm0_pred_train = self.vhm0_x_train - train_pred
+            sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
+        else:
+            sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
         
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del train_pred
@@ -871,16 +577,54 @@ class FullDatasetTrainer:
         # Calculate validation metrics if validation set exists
         if len(self.X_val) > 0:
             val_pred = self.model.predict(self.X_val)
-            val_metrics = evaluate_model(self.y_val, val_pred)
+            
+            if self.predict_bias:
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                vhm0_pred_val = self.vhm0_x_val - val_pred  # Apply bias correction
+                val_metrics = evaluate_model(vhm0_pred_val, vhm0_y_val)
+            else:
+                val_metrics = evaluate_model(val_pred, self.y_val)
             
             # Calculate regional validation metrics (always available now)
             logger.info("Calculating regional validation metrics...")
-            regional_val_metrics = self._calculate_regional_metrics(
-                self.y_val, val_pred, self.regions_val
-            )
+            if self.predict_bias:
+                # For bias prediction, convert to vhm0 level for regional metrics
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                vhm0_pred_val = self.vhm0_x_val - val_pred
+                regional_val_metrics = self._calculate_regional_metrics(
+                    vhm0_y_val, vhm0_pred_val, self.regions_val
+                )
+            else:
+                regional_val_metrics = self._calculate_regional_metrics(
+                    self.y_val, val_pred, self.regions_val
+                )
+            
+            # Calculate baseline regional validation metrics
+            logger.info("Calculating baseline regional validation metrics...")
+            if self.vhm0_x_val is not None and len(self.vhm0_x_val) > 0:
+                if self.predict_bias:
+                    # For bias prediction, baseline is zero bias (no correction)
+                    vhm0_y_val = self.vhm0_x_val - self.y_val
+                    baseline_regional_val_metrics = self._calculate_regional_metrics(
+                        vhm0_y_val, self.vhm0_x_val, self.regions_val  # No correction = vhm0_x
+                    )
+                else:
+                    # Standard approach: vhm0_x vs vhm0_y
+                    baseline_regional_val_metrics = self._calculate_regional_metrics(
+                        self.y_val, self.vhm0_x_val, self.regions_val
+                    )
+            else:
+                logger.warning("vhm0_x_val not available. Skipping baseline regional validation metrics.")
+                baseline_regional_val_metrics = {}
             
             # Calculate sea-bin validation metrics
-            sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
+            if self.predict_bias:
+                # For bias prediction, convert to vhm0 level for sea-bin metrics
+                vhm0_y_val = self.vhm0_x_val - self.y_val
+                vhm0_pred_val = self.vhm0_x_val - val_pred
+                sea_bin_val_metrics = self._calculate_sea_bin_metrics(vhm0_y_val, vhm0_pred_val)
+            else:
+                sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
             
             # 🚀 MEMORY OPTIMIZATION: Delete val predictions immediately
             del val_pred
@@ -906,9 +650,11 @@ class FullDatasetTrainer:
         return {
             'train_metrics': train_metrics,
             'regional_train_metrics': regional_train_metrics,
+            'baseline_regional_train_metrics': baseline_regional_train_metrics,
             'sea_bin_train_metrics': sea_bin_train_metrics,
             'val_metrics': val_metrics,
             'regional_val_metrics': regional_val_metrics,
+            'baseline_regional_val_metrics': baseline_regional_val_metrics if len(self.X_val) > 0 else {},
             'sea_bin_val_metrics': sea_bin_val_metrics if len(self.X_val) > 0 else {},
             'training_history': self.training_history
         }
@@ -955,26 +701,66 @@ class FullDatasetTrainer:
             
             logger.info(f"Applied Delta correction to {len(test_pred)} test samples")
         else:
-            # Traditional ML model prediction
             test_pred = self.model.predict(self.X_test)
         
-        # Calculate metrics
-        test_metrics = evaluate_model(self.y_test, test_pred)
+        if self.predict_bias:
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            vhm0_pred_test = self.vhm0_x_test - test_pred  # Apply bias correction
+            test_metrics = evaluate_model(vhm0_pred_test, vhm0_y_test)
+        else:
+            test_metrics = evaluate_model(test_pred, self.y_test)
         
         # Calculate regional test metrics (always available now)
         logger.info("Calculating regional test metrics...")
-        regional_test_metrics = self._calculate_regional_metrics(
-            self.y_test, test_pred, self.regions_test
-        )
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for regional metrics
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            vhm0_pred_test = self.vhm0_x_test - test_pred
+            regional_test_metrics = self._calculate_regional_metrics(
+                vhm0_y_test, vhm0_pred_test, self.regions_test
+            )
+        else:
+            regional_test_metrics = self._calculate_regional_metrics(
+                self.y_test, test_pred, self.regions_test
+            )
+        
+        # Calculate baseline regional test metrics
+        logger.info("Calculating baseline regional test metrics...")
+        if self.vhm0_x_test is not None and len(self.vhm0_x_test) > 0:
+            if self.predict_bias:
+                # For bias prediction, baseline is zero bias (no correction)
+                vhm0_y_test = self.vhm0_x_test - self.y_test
+                baseline_regional_test_metrics = self._calculate_regional_metrics(
+                    vhm0_y_test, self.vhm0_x_test, self.regions_test  # No correction = vhm0_x
+                )
+                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, self.vhm0_x_test)
+            else:
+                # Standard approach: vhm0_x vs vhm0_y
+                baseline_regional_test_metrics = self._calculate_regional_metrics(
+                    self.y_test, self.vhm0_x_test, self.regions_test
+                )
+                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, self.vhm0_x_test)
+        else:
+            logger.warning("vhm0_x_test not available. Skipping baseline regional test metrics.")
+            baseline_regional_test_metrics = {}
+            baseline_sea_bin_test_metrics = {}
         
         # Calculate sea-bin test metrics
-        sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
+        if self.predict_bias:
+            # For bias prediction, convert to vhm0 level for sea-bin metrics
+            vhm0_y_test = self.vhm0_x_test - self.y_test
+            vhm0_pred_test = self.vhm0_x_test - test_pred
+            sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, vhm0_pred_test)
+        else:
+            sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
         
         # Store current test metrics as class attribute
         self.current_test_metrics = test_metrics
         
         # Store regional and sea-bin metrics as attributes for DiagnosticPlotter
         self.regional_test_metrics = regional_test_metrics
+        self.baseline_regional_test_metrics = baseline_regional_test_metrics
+        self.baseline_sea_bin_test_metrics = baseline_sea_bin_test_metrics
         self.sea_bin_test_metrics = sea_bin_test_metrics
         
         # Create diagnostic plots
@@ -999,6 +785,7 @@ class FullDatasetTrainer:
         return {
             'test_metrics': test_metrics,
             'regional_test_metrics': regional_test_metrics,
+            'baseline_regional_test_metrics': baseline_regional_test_metrics,
             'sea_bin_test_metrics': sea_bin_test_metrics
             # Removed 'predictions' and 'actual' to save memory
         } 

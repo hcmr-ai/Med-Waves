@@ -17,6 +17,7 @@ data:
 
 # Feature configuration (synchronized with training pipeline)
 feature_block:
+  predict_bias: true # Set to true to predict bias
   # Features to exclude from the feature set
   features_to_exclude:
     - "corrected_VTM02"
@@ -70,20 +71,48 @@ feature_block:
         description: "Rough seas"
       - name: "very_rough"
         min: 4.0
-        max: 6.0
+        max: 5.0
         description: "Very rough seas"
       - name: "high"
-        min: 6.0
-        max: 9.0
+        min: 5.0
+        max: 6.0
         description: "High seas"
       - name: "very_high"
-        min: 9.0
-        max: 12.0
+        min: 6.0
+        max: 7.0
         description: "Very high seas"
-      - name: "phenomenal"
-        min: 12.0
-        max: 999.0
+      - name: "phenomenal_1"
+        min: 7.0
+        max: 8.0
         description: "Phenomenal seas"
+      - name: "extreme_1"
+        min: 8.0
+        max: 9.0
+        description: "Extreme seas"
+      - name: "phenomenal_2"
+        min: 9.0
+        max: 10.0
+        description: "Phenomenal seas"
+      - name: "extreme_2"
+        min: 10.0
+        max: 11.0
+        description: "Extreme seas"
+      - name: "phenomenal_3"
+        min: 11.0
+        max: 12.0
+        description: "Phenomenal seas"
+      - name: "extreme_3"
+        min: 12.0
+        max: 13.0
+        description: "Extreme seas"
+      - name: "phenomenal_4"
+        min: 13.0
+        max: 14.0
+        description: "Phenomenal seas"
+      - name: "extreme_4"
+        min: 14.0
+        max: 15.0
+        description: "Extreme seas"
 
 # Evaluation configuration
 evaluation:

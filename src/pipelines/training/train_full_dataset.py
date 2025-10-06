@@ -140,7 +140,7 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     
     # Split data
     logger.info("Splitting data...")
-    trainer.split_data(X, y, regions, coords, successful_files)
+    trainer.split_data(X, y, regions, coords, successful_files, trainer.vhm0_x_raw)
     
     # 🚀 MEMORY OPTIMIZATION: Delete original data after splitting
     del X, y
