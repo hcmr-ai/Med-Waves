@@ -28,6 +28,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def convert_numpy_types(obj):
+    """Convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {str(k): convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load configuration from YAML file."""
@@ -162,14 +176,14 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     }
     
     # Save results locally
-    save_results(results, save_path, trainer.experiment_logger.experiment)
+    save_results(convert_numpy_types(results), save_path, trainer.experiment_logger.experiment)
     
     # Save results to S3 if enabled
     s3_config = config["output"].get("s3", {})
     if s3_config.get("enabled", False):
         logger.info("Saving results to S3...")
         plots_dir = config.get("diagnostics", {}).get("plots_save_path", "diagnostic_plots")
-        s3_upload_results = trainer.save_results_to_s3(results, model_save_path, plots_dir)
+        s3_upload_results = trainer.save_results_to_s3(convert_numpy_types(results), model_save_path, plots_dir)
         
         # Log S3 URLs
         if s3_upload_results:
@@ -194,26 +208,10 @@ def save_results(results: Dict[str, Any], save_path: str, comet_experiment: Expe
     
     # Save results as JSON
     import json
-    import numpy as np
-    
-    def convert_numpy_types(obj):
-        """Convert numpy types to native Python types for JSON serialization."""
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {str(k): convert_numpy_types(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_numpy_types(item) for item in obj]
-        else:
-            return obj
     
     results_file = save_path / f"{results['experiment_name']}_results.json"
     with open(results_file, 'w') as f:
-        json.dump(convert_numpy_types(results), f, indent=2)
+        json.dump(results, f, indent=2)
     
     # Save summary
     summary_file = save_path / f"{results['experiment_name']}_summary.txt"

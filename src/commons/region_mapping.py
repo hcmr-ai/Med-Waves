@@ -196,3 +196,28 @@ def region_id_to_name(region_id: int) -> str:
 def region_id_to_display_name(region_id: int) -> str:
     """Convert region ID to display name (convenience function)."""
     return RegionMapper.get_display_name(region_id)
+
+
+def get_region_from_coordinates(lat: float, lon: float) -> int:
+    """
+    Map lat/lon coordinates to region ID based on Mediterranean Sea geography.
+    
+    Args:
+        lat: Latitude (-90 to 90)
+        lon: Longitude (-180 to 180)
+        
+    Returns:
+        Region ID: 0=Atlantic, 1=Mediterranean, 2=Eastern Mediterranean
+    """
+    # Mediterranean Sea boundaries (approximate)
+    # Atlantic: West of Gibraltar Strait
+    if lon < -6.0:
+        return 0  # Atlantic
+    
+    # Eastern Mediterranean: East of ~25°E
+    elif lon > 25.0:
+        return 2  # Eastern Mediterranean
+    
+    # Mediterranean: Between Gibraltar and Eastern boundary
+    else:
+        return 1  # Mediterranean
