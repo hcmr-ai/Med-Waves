@@ -183,42 +183,54 @@ class PerPointStratification:
     
     def _ensure_geographic_balance(self, df: pl.DataFrame, unique_regions: list) -> pl.DataFrame:
         """
-        Ensure geographic balance by sampling equally from each region.
+        Ensure geographic balance while preserving ALL extreme waves.
         
         Args:
             df: Combined sampled DataFrame
             unique_regions: List of unique region IDs
             
         Returns:
-            Geographically balanced DataFrame
+            Geographically balanced DataFrame with all extreme waves preserved
         """
         if len(unique_regions) <= 1:
             # No need to balance if only one region
             return df
         
-        # Calculate samples per region
-        samples_per_region = self.max_samples_per_file // len(unique_regions)
-        self.logger.info(f"  - Ensuring geographic balance: {samples_per_region:,} samples per region")
+        # First, identify and preserve ALL extreme waves (they should never be dropped)
+        extreme_waves = df.filter(pl.col("wave_height_bin") == "extreme")
+        non_extreme_waves = df.filter(pl.col("wave_height_bin") != "extreme")
         
-        balanced_dfs = []
+        extreme_count = len(extreme_waves)
+        non_extreme_count = len(non_extreme_waves)
+        
+        self.logger.info(f"  - Preserving ALL {extreme_count:,} extreme waves")
+        self.logger.info(f"  - Balancing {non_extreme_count:,} non-extreme waves across regions")
+        
+        # Calculate remaining quota for non-extreme waves
+        remaining_quota = self.max_samples_per_file - extreme_count
+        samples_per_region = remaining_quota // len(unique_regions)
+        
+        self.logger.info(f"  - Geographic balance: {samples_per_region:,} non-extreme samples per region")
+        
+        balanced_dfs = [extreme_waves]  # Always include all extreme waves
         
         for region in unique_regions:
-            region_df = df.filter(pl.col("region") == region)
+            region_df = non_extreme_waves.filter(pl.col("region") == region)
             region_samples = len(region_df)
             
             if region_samples > 0:
-                # Sample from this region
+                # Sample from this region's non-extreme waves
                 actual_samples = min(samples_per_region, region_samples)
                 sampled_region = region_df.sample(n=actual_samples, seed=self.sampling_seed + hash(region) % (2**32 - 1))
                 balanced_dfs.append(sampled_region)
-                self.logger.info(f"    → Region {region}: {actual_samples:,} samples (from {region_samples:,} available)")
+                self.logger.info(f"    → Region {region}: {actual_samples:,} non-extreme samples (from {region_samples:,} available)")
             else:
-                self.logger.warning(f"    → Region {region}: No samples available")
+                self.logger.warning(f"    → Region {region}: No non-extreme samples available")
         
-        if balanced_dfs:
+        if len(balanced_dfs) > 1:  # More than just extreme waves
             return pl.concat(balanced_dfs)
         else:
-            return df
+            return extreme_waves  # Only extreme waves available
     
     def _log_wave_height_distribution(self, df: pl.DataFrame) -> None:
         """Log the final wave height distribution."""
