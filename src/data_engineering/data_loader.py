@@ -90,13 +90,12 @@ class DataLoader:
         self.sampling_manager = sampling_manager
         self.logger = logging.getLogger(__name__)
     
-    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[pl.DataFrame, List[str]]:
+    def load_data(self, data_paths: Union[str, List[str]]) -> Tuple[pl.DataFrame, List[str]]:
         """
         Load and combine all data files from local or S3 paths.
         
         Args:
             data_paths: Single path or list of paths to data files/directories
-            target_column: Name of the target column
             
         Returns:
             Tuple of (combined_dataframe, successful_files)
@@ -174,9 +173,6 @@ class DataLoader:
         self.logger.info("Combining all dataframes...")
         combined_df = pl.concat(all_dataframes)
         self.logger.info(f"Combined dataframe shape: {combined_df.shape}")
-        
-        # Apply dataset-level sampling if configured (placeholder for now)
-        # This will be expanded in Phase 2 with SamplingManager
         
         return combined_df, successful_files
     
