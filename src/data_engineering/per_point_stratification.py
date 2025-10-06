@@ -196,14 +196,16 @@ class PerPointStratification:
             # No need to balance if only one region
             return df
         
-        # First, identify and preserve ALL extreme waves (they should never be dropped)
-        extreme_waves = df.filter(pl.col("wave_height_bin") == "extreme")
-        non_extreme_waves = df.filter(pl.col("wave_height_bin") != "extreme")
+        # First, identify and preserve ALL extreme waves - they should never be dropped
+        # Get extreme threshold from configuration
+        extreme_min = float(self.wave_bins["extreme"][0])
+        extreme_waves = df.filter(pl.col("vhm0_y") >= extreme_min)
+        non_extreme_waves = df.filter(pl.col("vhm0_y") < extreme_min)
         
         extreme_count = len(extreme_waves)
         non_extreme_count = len(non_extreme_waves)
         
-        self.logger.info(f"  - Preserving ALL {extreme_count:,} extreme waves")
+        self.logger.info(f"  - Preserving ALL {extreme_count:,} extreme waves (vhm0_y >= {extreme_min})")
         self.logger.info(f"  - Balancing {non_extreme_count:,} non-extreme waves across regions")
         
         # Calculate remaining quota for non-extreme waves
