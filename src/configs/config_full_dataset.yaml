@@ -45,7 +45,7 @@ data:
     train_end_year: 2022 # Train data up to this year (exclusive)
     test_start_year: 2023 # Test data from this year onwards
     val_months: [] # Months to use for validation
-    eval_months: [3, 4] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
+    eval_months: [3, 4, 5] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
     # For other split types:
     test_size: 0.2 # 20% for testing
     val_size: 0.2 # 20% for validation
@@ -127,6 +127,17 @@ feature_block:
       1: 1.0 # mediterranean - Normal weight for Mediterranean data
       2: 1.0 # eastern_med - Normal weight for Eastern Mediterranean data
 
+  # Wave height bin weighting (gives different importance to different wave height ranges)
+  # This helps the model focus more on extreme wave conditions
+  wave_height_weighting:
+    enabled: true # Enable wave height bin weighting
+    # Weighting formula:
+    # w(Hs) = 1                        if Hs ≤ 3
+    #       = 1 + 1.0*(Hs-3)           if 3 < Hs ≤ 4      → up to 2
+    #       = 2 + 1.5*(Hs-4)           if 4 < Hs ≤ 6      → up to 5
+    #       = 5 + 1.0*(Hs-6)           if 6 < Hs ≤ 8      → up to 7
+    #       = 8                        if Hs > 8
+
   # Regional training (train only in specific regions)
   # NOTE: When enabled, robust_stratified sampling will be automatically switched to single_region_robust
   # which maintains wave height stratification and temporal coverage within the selected region(s)
@@ -174,20 +185,48 @@ feature_block:
         description: "Rough seas"
       - name: "very_rough"
         min: 4.0
-        max: 6.0
+        max: 5.0
         description: "Very rough seas"
       - name: "high"
-        min: 6.0
-        max: 9.0
+        min: 5.0
+        max: 6.0
         description: "High seas"
       - name: "very_high"
-        min: 9.0
-        max: 12.0
+        min: 6.0
+        max: 7.0
         description: "Very high seas"
-      - name: "phenomenal"
-        min: 12.0
-        max: 999.0
+      - name: "phenomenal_1"
+        min: 7.0
+        max: 8.0
         description: "Phenomenal seas"
+      - name: "extreme_1"
+        min: 8.0
+        max: 9.0
+        description: "Extreme seas"
+      - name: "phenomenal_2"
+        min: 9.0
+        max: 10.0
+        description: "Phenomenal seas"
+      - name: "extreme_2"
+        min: 10.0
+        max: 11.0
+        description: "Extreme seas"
+      - name: "phenomenal_3"
+        min: 11.0
+        max: 12.0
+        description: "Phenomenal seas"
+      - name: "extreme_3"
+        min: 12.0
+        max: 13.0
+        description: "Extreme seas"
+      - name: "phenomenal_4"
+        min: 13.0
+        max: 14.0
+        description: "Phenomenal seas"
+      - name: "extreme_4"
+        min: 14.0
+        max: 15.0
+        description: "Extreme seas"
 
 # Evaluation configuration
 evaluation:
@@ -209,9 +248,6 @@ diagnostics:
 
 # Logging configuration
 logging:
-  level: "INFO"
-  save_logs: true
-  log_file: "full_dataset_training.log"
   use_comet: true
   comet_project: hcmr-ai
   comet_workspace: ioannisgkinis
@@ -226,8 +262,7 @@ memory_monitoring:
 # Output configuration
 output:
   model_save_path: "trained_models"
-  results_save_path: "training_results" # not used
-  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes"
+  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias"
 
   # S3 configuration for saving results
   s3:
