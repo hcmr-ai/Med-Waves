@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import pandas as pd
+import polars as pl
 import joblib
 from datetime import datetime
 import sys
@@ -73,42 +74,61 @@ def _extract_date_from_filename(filename: str) -> Dict[str, Any]:
     return {"year": None, "month": None, "day": None, "season": "unknown"}
 
 
-def _evaluate_single_file_worker(args: Tuple[str, Dict[str, Any]]) -> Tuple[str, Optional[Dict[str, Any]], bool]:
+def _evaluate_single_file_worker(args: Tuple[str, str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
-    Standalone worker function for parallel file evaluation.
-    This avoids S3 client pickling issues by creating a new evaluator in each worker.
+    Simple worker function for parallel file evaluation.
+    Similar to the approach used in training pipeline.
     
     Args:
-        args: Tuple of (file_path, config)
+        args: Tuple of (file_path, model_path, config)
         
     Returns:
-        Tuple of (file_path, results_dict, success_flag)
+        Evaluation results or None if failed
     """
-    file_path, config = args
+    file_path, model_path, config = args
     
     try:
-        # Create a new evaluator instance for this worker process
-        # This avoids S3 client pickling issues
-        worker_evaluator = RobustModelEvaluator(config)
+        # Import everything at the top to avoid import issues
+        import sys
+        import os
+        import logging
         
-        # Load the model in the worker process
-        model_path = config["data"]["model_path"]
-        worker_evaluator.load_model(model_path)
+        # Add the project root to the path to ensure imports work
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
         
-        # Use the worker's evaluate_file method
-        results = worker_evaluator.evaluate_file(file_path)
+        # Now import our modules
+        from src.data_engineering.data_loader import DataLoader
+        from src.data_engineering.feature_engineer import FeatureEngineer
+        from src.commons.preprocessing_manager import PreprocessingManager
+        from src.commons.aws.s3_model_loader import S3ModelLoader
+        from src.evaluation.metrics import evaluate_model
+        import joblib
+        from pathlib import Path
+        import numpy as np
+        import pandas as pd
         
-        # Clean up the worker evaluator
-        worker_evaluator.cleanup()
+        logger = logging.getLogger(__name__)
         
-        if results:
-            return file_path, results, True
-        else:
-            return file_path, None, False
-            
+        # Create temporary evaluator instance for this worker
+        temp_evaluator = RobustModelEvaluator(config)
+        temp_evaluator.load_model(model_path)
+        
+        # Evaluate the file
+        result = temp_evaluator.evaluate_file(file_path)
+        
+        # Clean up
+        temp_evaluator.cleanup()
+        
+        return result
+        
     except Exception as e:
-        logger.error(f"Error evaluating file {file_path}: {e}")
-        return file_path, None, False
+        import logging
+        logging.getLogger(__name__).error(f"Error evaluating file {file_path}: {e}")
+        import traceback
+        logging.getLogger(__name__).error(f"Traceback: {traceback.format_exc()}")
+        return None
 
 
 class RobustModelEvaluator:
@@ -354,8 +374,8 @@ class RobustModelEvaluator:
                 logger.warning("No scaler available - using raw features!")
                 X = X_raw
             
-            # Create metadata DataFrame
-            metadata_df = pd.DataFrame({
+            # Create metadata DataFrame using Polars for consistency
+            metadata_df = pl.DataFrame({
                 'lat': coords[:, 0],
                 'lon': coords[:, 1],
                 'region': regions
@@ -447,20 +467,21 @@ class RobustModelEvaluator:
             vhm0_x = results["vhm0_x"]
             date_info = results["date_info"]
             
-            # Create dataframe for this file
-            file_df = metadata.copy()
-            file_df["y_true"] = y_true
-            file_df["y_pred"] = y_pred
-            file_df["vhm0_x"] = vhm0_x
-            file_df["file_name"] = file_name
+            # Create dataframe for this file using Polars
+            file_df = metadata.with_columns([
+                pl.Series("y_true", y_true),
+                pl.Series("y_pred", y_pred),
+                pl.Series("vhm0_x", vhm0_x),
+                pl.lit(file_name).alias("file_name")
+            ])
             
             # Add season information
             if date_info.get("month") is not None:
                 month = date_info["month"]
                 season = self._get_season_from_month(month)
-                file_df["season"] = season
+                file_df = file_df.with_columns(pl.lit(season).alias("season"))
             else:
-                file_df["season"] = "unknown"
+                file_df = file_df.with_columns(pl.lit("unknown").alias("season"))
             
             all_data.append(file_df)
         
@@ -468,20 +489,21 @@ class RobustModelEvaluator:
             logger.warning("No data available for spatial maps")
             return
         
-        # Combine all data
-        combined_df = pd.concat(all_data, ignore_index=True)
+        # Combine all data using Polars for better performance
+        combined_df = pl.concat(all_data, how="vertical_relaxed")
         logger.info(f"Combined data from {len(all_data)} files: {len(combined_df)} total samples")
         
         # Calculate spatial metrics once for both model and baseline using optimized function
         logger.info("Calculating spatial metrics for model and baseline...")
         
-        # Create spatial dataframes for model and baseline
-        model_spatial_df = combined_df[["lat", "lon", "y_true", "y_pred"]].copy()
-        model_spatial_df["residual"] = model_spatial_df["y_pred"] - model_spatial_df["y_true"]
+        # Create spatial dataframes for model and baseline using Polars
+        model_spatial_df = combined_df.select(["lat", "lon", "y_true", "y_pred"]).with_columns(
+            (pl.col("y_pred") - pl.col("y_true")).alias("residual")
+        )
         
-        baseline_spatial_df = combined_df[["lat", "lon", "y_true", "vhm0_x"]].copy()
-        baseline_spatial_df["residual"] = baseline_spatial_df["vhm0_x"] - baseline_spatial_df["y_true"]
-        baseline_spatial_df = baseline_spatial_df.rename(columns={"vhm0_x": "y_pred"})
+        baseline_spatial_df = combined_df.select(["lat", "lon", "y_true", "vhm0_x"]).with_columns(
+            (pl.col("vhm0_x") - pl.col("y_true")).alias("residual")
+        ).rename({"vhm0_x": "y_pred"})
         
         # Calculate spatial metrics using optimized function
         from src.evaluation.metrics import evaluate_model_spatial
@@ -501,7 +523,7 @@ class RobustModelEvaluator:
         
         logger.info("✅ Created all spatial maps and saved spatial metrics")
     
-    def _create_seasonal_maps_from_metrics(self, combined_df: pd.DataFrame, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> Dict[str, Dict[str, pd.DataFrame]]:
+    def _create_seasonal_maps_from_metrics(self, combined_df, model_spatial_metrics, baseline_spatial_metrics) -> Dict[str, Dict[str, Any]]:
         """Create seasonal maps from pre-calculated spatial metrics and return seasonal metrics for saving."""
         logger.info("Creating seasonal spatial maps...")
         
@@ -509,7 +531,13 @@ class RobustModelEvaluator:
         output_dir = self.output_dir / "diagnostic_plots" / "spatial_maps" / "seasonal"
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        seasons = combined_df["season"].unique()
+        # Check if we're working with Polars DataFrames
+        is_polars = isinstance(combined_df, pl.DataFrame)
+        
+        if is_polars:
+            seasons = combined_df["season"].unique().to_list()
+        else:
+            seasons = combined_df["season"].unique()
         logger.info(f"Found seasons: {seasons}")
         
         # Store seasonal metrics for later saving
@@ -520,12 +548,18 @@ class RobustModelEvaluator:
                 continue
                 
             logger.info(f"Creating maps for {season} season...")
-            season_data = combined_df[combined_df["season"] == season]
-            
-            # Filter spatial metrics to only include locations present in this season
-            season_coords = season_data[["lat", "lon"]].drop_duplicates()
-            model_season_metrics = model_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
-            baseline_season_metrics = baseline_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
+            if is_polars:
+                season_data = combined_df.filter(pl.col("season") == season)
+                # Filter spatial metrics to only include locations present in this season
+                season_coords = season_data.select(["lat", "lon"]).unique()
+                model_season_metrics = model_spatial_metrics.join(season_coords, on=["lat", "lon"], how="inner")
+                baseline_season_metrics = baseline_spatial_metrics.join(season_coords, on=["lat", "lon"], how="inner")
+            else:
+                season_data = combined_df[combined_df["season"] == season]
+                # Filter spatial metrics to only include locations present in this season
+                season_coords = season_data[["lat", "lon"]].drop_duplicates()
+                model_season_metrics = model_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
+                baseline_season_metrics = baseline_spatial_metrics.merge(season_coords, on=["lat", "lon"], how="inner")
             
             # Store for saving later
             seasonal_metrics[season] = {
@@ -539,8 +573,12 @@ class RobustModelEvaluator:
             for metric in metrics_to_plot:
                 if metric in model_season_metrics.columns:
                     # Calculate consistent color scale for this metric across model and baseline
-                    model_values = model_season_metrics[metric].dropna()
-                    baseline_values = baseline_season_metrics[metric].dropna()
+                    if is_polars:
+                        model_values = model_season_metrics[metric].drop_nulls()
+                        baseline_values = baseline_season_metrics[metric].drop_nulls()
+                    else:
+                        model_values = model_season_metrics[metric].dropna()
+                        baseline_values = baseline_season_metrics[metric].dropna()
                     
                     if len(model_values) > 0 and len(baseline_values) > 0:
                         # Use the same color scale for both model and baseline
@@ -571,7 +609,7 @@ class RobustModelEvaluator:
         
         return seasonal_metrics
     
-    def _create_aggregated_maps_from_metrics(self, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame) -> None:
+    def _create_aggregated_maps_from_metrics(self, model_spatial_metrics, baseline_spatial_metrics) -> None:
         """Create aggregated maps from pre-calculated spatial metrics."""
         logger.info("Creating overall aggregated spatial maps...")
         
@@ -582,16 +620,27 @@ class RobustModelEvaluator:
         # Create maps for each metric
         metrics_to_plot = self.config.get("plots", {}).get("metrics_to_plot", ["bias", "mae", "rmse", "diff"])
         
+        # Check if we're working with Polars DataFrames
+        is_polars = isinstance(model_spatial_metrics, pl.DataFrame)
+        
         for metric in metrics_to_plot:
             if metric in model_spatial_metrics.columns:
                 # Calculate consistent color scale for this metric across model and baseline
-                model_values = model_spatial_metrics[metric].dropna()
-                baseline_values = baseline_spatial_metrics[metric].dropna()
+                if is_polars:
+                    model_values = model_spatial_metrics[metric].drop_nulls()
+                    baseline_values = baseline_spatial_metrics[metric].drop_nulls()
+                else:
+                    model_values = model_spatial_metrics[metric].dropna()
+                    baseline_values = baseline_spatial_metrics[metric].dropna()
                 
                 if len(model_values) > 0 and len(baseline_values) > 0:
                     # Use the same color scale for both model and baseline
-                    vmin = min(model_values.min(), baseline_values.min())
-                    vmax = max(model_values.max(), baseline_values.max())
+                    if is_polars:
+                        vmin = min(model_values.min(), baseline_values.min())
+                        vmax = max(model_values.max(), baseline_values.max())
+                    else:
+                        vmin = min(model_values.min(), baseline_values.min())
+                        vmax = max(model_values.max(), baseline_values.max())
                     
                     # Model aggregated map
                     self._create_single_spatial_map(
@@ -634,16 +683,16 @@ class RobustModelEvaluator:
                 month = date_info["month"]
                 season = self._get_season_from_month(month)
                 
-                # Create dataframe for this file
-                file_df = pd.DataFrame({
+                # Create dataframe for this file using Polars
+                file_df = pl.DataFrame({
                     'y_true': y_true,
                     'y_pred': y_pred,
                     'vhm0_x': vhm0_x,
                     'regions': regions,
                     'lat': coords[:, 0],
                     'lon': coords[:, 1],
-                    'season': season,
-                    'file_name': file_name
+                    'season': [season] * len(y_true),
+                    'file_name': [file_name] * len(y_true)
                 })
                 
                 all_data.append(file_df)
@@ -652,17 +701,17 @@ class RobustModelEvaluator:
             logger.warning("No data available for seasonal diagnostic plots")
             return
         
-        # Combine all data
-        combined_df = pd.concat(all_data, ignore_index=True)
+        # Combine all data using Polars
+        combined_df = pl.concat(all_data, how="vertical_relaxed")
         logger.info(f"Combined data from {len(all_data)} files: {len(combined_df)} total samples")
         
         # Create seasonal diagnostic plots
-        seasons = combined_df["season"].unique()
+        seasons = combined_df["season"].unique().to_list()
         logger.info(f"Found seasons: {seasons}")
         
         for season in seasons:
             logger.info(f"Creating diagnostic plots for {season} season...")
-            season_data = combined_df[combined_df["season"] == season]
+            season_data = combined_df.filter(pl.col("season") == season)
             
             # Create seasonal output directory
             season_output_dir = self.output_dir / "diagnostic_plots" / "seasonal" / season
@@ -675,7 +724,10 @@ class RobustModelEvaluator:
             season_config = self.config.copy()
             season_config["diagnostics"]["plots_save_path"] = str(season_output_dir)
             season_plotter = DiagnosticPlotter(season_config)
-            season_plotter.create_diagnostic_plots(mock_trainer, season_data["y_pred"].values)
+            if isinstance(season_data, pl.DataFrame):
+                season_plotter.create_diagnostic_plots(mock_trainer, season_data["y_pred"].to_numpy())
+            else:
+                season_plotter.create_diagnostic_plots(mock_trainer, season_data["y_pred"].values)
             
             logger.info(f"✅ Created diagnostic plots for {season} season")
     
@@ -692,15 +744,15 @@ class RobustModelEvaluator:
             regions = results["regions"]
             coords = results["coords"]
             
-            # Create dataframe for this file
-            file_df = pd.DataFrame({
+            # Create dataframe for this file using Polars
+            file_df = pl.DataFrame({
                 'y_true': y_true,
                 'y_pred': y_pred,
                 'vhm0_x': vhm0_x,
                 'regions': regions,
                 'lat': coords[:, 0],
                 'lon': coords[:, 1],
-                'file_name': file_name
+                'file_name': [file_name] * len(y_true)
             })
             
             all_data.append(file_df)
@@ -709,8 +761,8 @@ class RobustModelEvaluator:
             logger.warning("No data available for aggregated diagnostic plots")
             return
         
-        # Combine all data
-        combined_df = pd.concat(all_data, ignore_index=True)
+        # Combine all data using Polars
+        combined_df = pl.concat(all_data, how="vertical_relaxed")
         logger.info(f"Combined data from {len(all_data)} files: {len(combined_df)} total samples")
         
         # Create aggregated output directory
@@ -724,16 +776,24 @@ class RobustModelEvaluator:
         aggregated_config = self.config.copy()
         aggregated_config["diagnostics"]["plots_save_path"] = str(aggregated_output_dir)
         aggregated_plotter = DiagnosticPlotter(aggregated_config)
-        aggregated_plotter.create_diagnostic_plots(mock_trainer, combined_df["y_pred"].values)
+        if isinstance(combined_df, pl.DataFrame):
+            aggregated_plotter.create_diagnostic_plots(mock_trainer, combined_df["y_pred"].to_numpy())
+        else:
+            aggregated_plotter.create_diagnostic_plots(mock_trainer, combined_df["y_pred"].values)
         
         logger.info("✅ Created overall aggregated diagnostic plots")
     
     def _create_seasonal_mock_trainer(self, season_data: pd.DataFrame, season: str, config: dict):
         """Create a mock trainer object for seasonal diagnostic plots."""
         # Calculate metrics for this season
-        y_true = season_data["y_true"].values
-        y_pred = season_data["y_pred"].values
-        regions = season_data["regions"].values
+        if isinstance(season_data, pl.DataFrame):
+            y_true = season_data["y_true"].to_numpy()
+            y_pred = season_data["y_pred"].to_numpy()
+            regions = season_data["regions"].to_numpy()
+        else:
+            y_true = season_data["y_true"].values
+            y_pred = season_data["y_pred"].values
+            regions = season_data["regions"].values
         
         # Calculate overall metrics
         from src.evaluation.metrics import evaluate_model
@@ -741,13 +801,19 @@ class RobustModelEvaluator:
         
         # Calculate regional metrics
         regional_metrics = self._calculate_regional_metrics(y_true, y_pred, regions)
-        baseline_regional_metrics = self._calculate_regional_metrics(y_true, season_data["vhm0_x"].values, regions)
+        if isinstance(season_data, pl.DataFrame):
+            baseline_regional_metrics = self._calculate_regional_metrics(y_true, season_data["vhm0_x"].to_numpy(), regions)
+        else:
+            baseline_regional_metrics = self._calculate_regional_metrics(y_true, season_data["vhm0_x"].values, regions)
         
         # Calculate sea-bin metrics
         sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, y_pred)
         
         # Calculate baseline sea-bin metrics
-        baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, season_data["vhm0_x"].values)
+        if isinstance(season_data, pl.DataFrame):
+            baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, season_data["vhm0_x"].to_numpy())
+        else:
+            baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, season_data["vhm0_x"].values)
         
         # Create mock trainer
         class SeasonalMockTrainer:
@@ -771,11 +837,18 @@ class RobustModelEvaluator:
                 self.baseline_regional_test_metrics = baseline_regional_metrics
                 self.sea_bin_test_metrics = sea_bin_metrics
                 self.baseline_sea_bin_test_metrics = baseline_sea_bin_metrics
-                self.y_test = season_data["y_true"].values
-                self.regions_test = season_data["regions"].values
-                self.coords_test = season_data[["lat", "lon"]].values
-                self.metadata_test = season_data
-                self.vhm0_x_test = season_data["vhm0_x"].values  # Add baseline data
+                if isinstance(season_data, pl.DataFrame):
+                    self.y_test = season_data["y_true"].to_numpy()
+                    self.regions_test = season_data["regions"].to_numpy()
+                    self.coords_test = season_data.select(["lat", "lon"]).to_numpy()
+                    self.metadata_test = season_data
+                    self.vhm0_x_test = season_data["vhm0_x"].to_numpy()  # Add baseline data
+                else:
+                    self.y_test = season_data["y_true"].values
+                    self.regions_test = season_data["regions"].values
+                    self.coords_test = season_data[["lat", "lon"]].values
+                    self.metadata_test = season_data
+                    self.vhm0_x_test = season_data["vhm0_x"].values  # Add baseline data
                 self.season = season
                 self.config = config  # Add config attribute
         
@@ -784,22 +857,33 @@ class RobustModelEvaluator:
     def _create_aggregated_mock_trainer(self, combined_df: pd.DataFrame, config: dict):
         """Create a mock trainer object for aggregated diagnostic plots."""
         # Calculate metrics for all data
-        y_true = combined_df["y_true"].values
-        y_pred = combined_df["y_pred"].values
-        regions = combined_df["regions"].values
+        if isinstance(combined_df, pl.DataFrame):
+            y_true = combined_df["y_true"].to_numpy()
+            y_pred = combined_df["y_pred"].to_numpy()
+            regions = combined_df["regions"].to_numpy()
+        else:
+            y_true = combined_df["y_true"].values
+            y_pred = combined_df["y_pred"].values
+            regions = combined_df["regions"].values
         
         # Calculate overall metrics
         metrics = evaluate_model(y_pred, y_true)
         
         # Calculate regional metrics
         regional_metrics = self._calculate_regional_metrics(y_true, y_pred, regions)
-        baseline_regional_metrics = self._calculate_regional_metrics(y_true, combined_df["vhm0_x"].values, regions)
+        if isinstance(combined_df, pl.DataFrame):
+            baseline_regional_metrics = self._calculate_regional_metrics(y_true, combined_df["vhm0_x"].to_numpy(), regions)
+        else:
+            baseline_regional_metrics = self._calculate_regional_metrics(y_true, combined_df["vhm0_x"].values, regions)
         
         # Calculate sea-bin metrics
         sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, y_pred)
         
         # Calculate baseline sea-bin metrics
-        baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, combined_df["vhm0_x"].values)
+        if isinstance(combined_df, pl.DataFrame):
+            baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, combined_df["vhm0_x"].to_numpy())
+        else:
+            baseline_sea_bin_metrics = self._calculate_sea_bin_metrics(y_true, combined_df["vhm0_x"].values)
         
         # Create mock trainer
         class AggregatedMockTrainer:
@@ -823,11 +907,18 @@ class RobustModelEvaluator:
                 self.baseline_regional_test_metrics = baseline_regional_metrics
                 self.sea_bin_test_metrics = sea_bin_metrics
                 self.baseline_sea_bin_test_metrics = baseline_sea_bin_metrics
-                self.y_test = combined_df["y_true"].values
-                self.regions_test = combined_df["regions"].values
-                self.coords_test = combined_df[["lat", "lon"]].values
-                self.metadata_test = combined_df
-                self.vhm0_x_test = combined_df["vhm0_x"].values  # Add baseline data
+                if isinstance(combined_df, pl.DataFrame):
+                    self.y_test = combined_df["y_true"].to_numpy()
+                    self.regions_test = combined_df["regions"].to_numpy()
+                    self.coords_test = combined_df.select(["lat", "lon"]).to_numpy()
+                    self.metadata_test = combined_df
+                    self.vhm0_x_test = combined_df["vhm0_x"].to_numpy()  # Add baseline data
+                else:
+                    self.y_test = combined_df["y_true"].values
+                    self.regions_test = combined_df["regions"].values
+                    self.coords_test = combined_df[["lat", "lon"]].values
+                    self.metadata_test = combined_df
+                    self.vhm0_x_test = combined_df["vhm0_x"].values  # Add baseline data
                 self.config = config
         
         return AggregatedMockTrainer(combined_df, metrics, regional_metrics, baseline_regional_metrics, sea_bin_metrics, baseline_sea_bin_metrics, config)
@@ -843,7 +934,7 @@ class RobustModelEvaluator:
         else:  # 9, 10, 11
             return "autumn"
     
-    def _create_single_spatial_map(self, spatial_metrics: pd.DataFrame, metric: str, filename: str, title: str, output_dir: Path, vmin: float = None, vmax: float = None) -> None:
+    def _create_single_spatial_map(self, spatial_metrics, metric: str, filename: str, title: str, output_dir: Path, vmin: float = None, vmax: float = None) -> None:
         """Create a single spatial map."""
         try:
             from src.analytics.plots.spatial_plots import plot_spatial_feature_map
@@ -857,13 +948,23 @@ class RobustModelEvaluator:
                 logger.warning(f"No coordinate columns found for {filename}")
                 return
             
+            # Check if we're working with Polars DataFrames
+            is_polars = isinstance(spatial_metrics, pl.DataFrame)
+            
             # Prepare data for plotting
-            plot_df = spatial_metrics[coord_cols + [metric]].copy()
-            plot_df = plot_df.dropna()
+            if is_polars:
+                plot_df = spatial_metrics.select(coord_cols + [metric]).drop_nulls()
+            else:
+                plot_df = spatial_metrics[coord_cols + [metric]].copy()
+                plot_df = plot_df.dropna()
             
             if len(plot_df) == 0:
                 logger.warning(f"No data for {metric} in {filename}")
                 return
+            
+            # Convert to pandas for plotting if needed
+            if is_polars:
+                plot_df = plot_df.to_pandas()
             
             # Create spatial map
             save_path = output_dir / filename
@@ -976,46 +1077,37 @@ class RobustModelEvaluator:
         logger.info("✅ Evaluation completed successfully!")
     
     def _evaluate_files_parallel(self, data_files: List[str]) -> None:
-        """Evaluate files in parallel using ProcessPoolExecutor."""
+        """Evaluate files in parallel using ProcessPoolExecutor - simple approach like training pipeline."""
         logger.info(f"Evaluating {len(data_files)} files in parallel with {self.max_workers} workers...")
         
         successful_files = 0
         failed_files = 0
         
-        # Process files in batches to avoid overwhelming the system
-        batch_size = self.max_workers * 2  # Process 2x the number of workers at a time
-        logger.info(f"Processing files in batches of {batch_size}")
+        # Get model path from config
+        model_path = self.config["data"]["model_path"]
         
-        for i in tqdm(range(0, len(data_files), batch_size), desc="Processing batches"):
-            batch_files = data_files[i:i + batch_size]
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(_evaluate_single_file_worker, (file_path, model_path, self.config)): file_path 
+                for file_path in data_files
+            }
             
-            # Prepare arguments for worker function (file_path, config)
-            worker_args = [(file_path, self.config) for file_path in batch_files]
-            
-            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit batch tasks using the standalone worker function
-                futures = [executor.submit(_evaluate_single_file_worker, args) for args in worker_args]
+            # Process completed tasks
+            for future in tqdm(as_completed(future_to_file), total=len(data_files), desc="Evaluating files"):
+                result = future.result()
                 
-                # Collect results
-                for future in as_completed(futures):
-                    try:
-                        file_path, results, success = future.result(timeout=300)  # 5 minute timeout
-                        
-                        if success and results is not None:
-                            self.file_results[results["file_name"]] = results
-                            successful_files += 1
-                            
-                            # Log progress for first few files
-                            if successful_files <= 3:
-                                logger.info(f"File {successful_files}: {results['file_name']} evaluated successfully")
-                        else:
-                            failed_files += 1
-                            logger.warning(f"Failed to evaluate file: {file_path}")
-                            
-                    except Exception as e:
-                        failed_files += 1
-                        logger.error(f"Error processing file: {e}")
-                        continue
+                if result is not None:
+                    self.file_results[result["file_name"]] = result
+                    successful_files += 1
+                    
+                    # Log progress for first few files
+                    if successful_files <= 3:
+                        logger.info(f"File {successful_files}: {result['file_name']} evaluated successfully")
+                else:
+                    failed_files += 1
+                    file_path = future_to_file[future]
+                    logger.warning(f"Failed to evaluate file: {file_path}")
         
         logger.info(f"✅ Parallel evaluation completed: {successful_files} successful, {failed_files} failed")
     
@@ -1057,15 +1149,17 @@ class RobustModelEvaluator:
         if not all_metrics:
             return
         
-        # Compute mean metrics
-        metrics_df = pd.DataFrame(all_metrics)
-        mean_metrics = metrics_df.mean().to_dict()
+        # Compute metrics directly on combined data (more accurate than file-weighted)
+        mean_metrics = self._compute_combined_metrics(self.file_results, 'model')
         
-        # Compute mean baseline metrics
+        # Compute baseline metrics directly on combined data
         mean_baseline_metrics = None
         if all_baseline_metrics:
-            baseline_metrics_df = pd.DataFrame(all_baseline_metrics)
-            mean_baseline_metrics = baseline_metrics_df.mean().to_dict()
+            mean_baseline_metrics = self._compute_combined_metrics(self.file_results, 'baseline')
+        
+        # Compute standard deviation across files for file-level variability
+        metrics_df = pd.DataFrame(all_metrics)
+        metrics_std = metrics_df.std().to_dict()
         
         self.aggregated_results = {
             "evaluation_timestamp": datetime.now().isoformat(),
@@ -1073,7 +1167,7 @@ class RobustModelEvaluator:
             "total_samples": total_samples,
             "mean_metrics": mean_metrics,
             "mean_baseline_metrics": mean_baseline_metrics,
-            "metrics_std": metrics_df.std().to_dict(),
+            "metrics_std": metrics_std,
             "file_summary": {
                 file_name: {
                     "n_samples": results["n_samples"],
@@ -1092,7 +1186,53 @@ class RobustModelEvaluator:
         
         logger.info("Aggregated results computed")
     
-    def _save_spatial_metrics(self, model_spatial_metrics: pd.DataFrame, baseline_spatial_metrics: pd.DataFrame, seasonal_metrics: Dict[str, Dict[str, pd.DataFrame]]) -> None:
+    def _compute_combined_metrics(self, file_results: Dict, metric_type: str) -> Dict[str, float]:
+        """
+        Compute metrics directly on combined y_true and y_pred from all files.
+        
+        This is the most accurate approach because it calculates metrics on the actual
+        combined dataset rather than aggregating pre-computed file-level metrics.
+        
+        Args:
+            file_results: Dictionary containing file results with predictions
+            metric_type: 'model' or 'baseline' to determine which predictions to use
+            
+        Returns:
+            Dictionary of metrics computed on combined data
+        """
+        if not file_results:
+            return {}
+        
+        # Collect all y_true and y_pred from all files
+        all_y_true = []
+        all_y_pred = []
+        
+        for _, results in file_results.items():
+            if results and "predictions" in results:
+                y_true = results["predictions"]["y_true"]
+                all_y_true.append(y_true)
+                
+                if metric_type == 'model':
+                    y_pred = results["predictions"]["y_pred"]
+                elif metric_type == 'baseline':
+                    y_pred = results["vhm0_x"]  # Baseline predictions
+                else:
+                    raise ValueError(f"Unknown metric_type: {metric_type}")
+                
+                all_y_pred.append(y_pred)
+        
+        if not all_y_true or not all_y_pred:
+            return {}
+        
+        # Combine all arrays
+        combined_y_true = np.concatenate(all_y_true)
+        combined_y_pred = np.concatenate(all_y_pred)
+        
+        # Compute metrics on the combined data
+        from src.evaluation.metrics import evaluate_model
+        return evaluate_model(combined_y_pred, combined_y_true)
+    
+    def _save_spatial_metrics(self, model_spatial_metrics, baseline_spatial_metrics, seasonal_metrics: Dict[str, Dict[str, Any]]) -> None:
         """Save spatial metrics (model, baseline, and seasonal) to CSV files."""
         logger.info("Saving spatial metrics to files...")
         
@@ -1102,12 +1242,18 @@ class RobustModelEvaluator:
         
         # Save overall model spatial metrics
         model_file = spatial_metrics_dir / "model_spatial_metrics.csv"
-        model_spatial_metrics.to_csv(model_file, index=False)
+        if isinstance(model_spatial_metrics, pl.DataFrame):
+            model_spatial_metrics.write_csv(model_file)
+        else:
+            model_spatial_metrics.to_csv(model_file, index=False)
         logger.info(f"Saved model spatial metrics: {model_file}")
         
         # Save overall baseline spatial metrics
         baseline_file = spatial_metrics_dir / "baseline_spatial_metrics.csv"
-        baseline_spatial_metrics.to_csv(baseline_file, index=False)
+        if isinstance(baseline_spatial_metrics, pl.DataFrame):
+            baseline_spatial_metrics.write_csv(baseline_file)
+        else:
+            baseline_spatial_metrics.to_csv(baseline_file, index=False)
         logger.info(f"Saved baseline spatial metrics: {baseline_file}")
         
         # Save seasonal spatial metrics (reuse already calculated metrics)
@@ -1115,7 +1261,7 @@ class RobustModelEvaluator:
         
         logger.info("✅ All spatial metrics saved to files")
     
-    def _save_seasonal_spatial_metrics(self, seasonal_metrics: Dict[str, Dict[str, pd.DataFrame]], output_dir: Path) -> None:
+    def _save_seasonal_spatial_metrics(self, seasonal_metrics: Dict[str, Dict[str, Any]], output_dir: Path) -> None:
         """Save seasonal spatial metrics to separate CSV files using pre-calculated metrics."""
         logger.info("Saving seasonal spatial metrics...")
         
@@ -1138,12 +1284,18 @@ class RobustModelEvaluator:
             
             # Save model seasonal metrics
             model_season_file = seasonal_dir / f"{season}_model_spatial_metrics.csv"
-            model_season_metrics.to_csv(model_season_file, index=False)
+            if isinstance(model_season_metrics, pl.DataFrame):
+                model_season_metrics.write_csv(model_season_file)
+            else:
+                model_season_metrics.to_csv(model_season_file, index=False)
             logger.info(f"Saved {season} model spatial metrics: {model_season_file}")
             
             # Save baseline seasonal metrics
             baseline_season_file = seasonal_dir / f"{season}_baseline_spatial_metrics.csv"
-            baseline_season_metrics.to_csv(baseline_season_file, index=False)
+            if isinstance(baseline_season_metrics, pl.DataFrame):
+                baseline_season_metrics.write_csv(baseline_season_file)
+            else:
+                baseline_season_metrics.to_csv(baseline_season_file, index=False)
             logger.info(f"Saved {season} baseline spatial metrics: {baseline_season_file}")
     
     def save_results_to_s3(self) -> None:
