@@ -201,7 +201,7 @@ class DataLoader:
         # Count samples in each bin
         total_samples = len(combined_df)
         self.logger.info("=" * 80)
-        self.logger.info("TOTAL WAVE HEIGHT DISTRIBUTION AFTER PER-POINT SAMPLING")
+        self.logger.info("TOTAL WAVE HEIGHT DISTRIBUTION")
         self.logger.info("=" * 80)
         self.logger.info(f"Total samples across {len(successful_files)} files: {total_samples:,}")
         self.logger.info("")

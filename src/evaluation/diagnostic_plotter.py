@@ -70,6 +70,10 @@ class DiagnosticPlotter:
         # self._create_residual_geographic_analysis(trainer, test_predictions, plots_dir)
         # self._create_condition_performance_plots(trainer, test_predictions, plots_dir)
         
+        # Create data distribution plots (if enabled in config)
+        if self.diagnostics_config.get("create_data_distribution_plots", True):
+            self._create_data_distribution_plots(trainer, plots_dir)
+        
         logger.info(f"Diagnostic plots saved to {plots_dir}")
         
         # Log SNR values
@@ -1258,6 +1262,166 @@ class DiagnosticPlotter:
         plt.tight_layout()
         plt.savefig(plots_dir / 'condition_performance_by_region.png', dpi=300, bbox_inches='tight')
         plt.close()
+    
+    def _create_data_distribution_plots(self, trainer: Any, plots_dir: Path) -> None:
+        """Create plots showing the data distribution after split."""
+        logger.info("Creating data distribution plots...")
+        
+        try:
+            # Get wave height bins from configuration
+            wave_bins = self._get_wave_height_bins_from_config()
+            
+            # Create figure with subplots
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            fig.suptitle('Data Distribution After Split', fontsize=16, fontweight='bold')
+            
+            # Define colors for wave height bins
+            bin_names = list(wave_bins.keys())
+            colors = ['#2E8B57', '#FFD700', '#FF8C00', '#FF4500', '#8B0000']  # Green to Dark Red
+            
+            # Plot 1: Training Data Distribution (Pie Chart)
+            ax1 = axes[0, 0]
+            if len(trainer.y_train) > 0:
+                train_bin_counts = self._calculate_bin_counts(trainer.y_train, wave_bins)
+                _, _, _ = ax1.pie(train_bin_counts, labels=bin_names, 
+                                                  autopct='%1.1f%%', colors=colors, startangle=90)
+                ax1.set_title(f'Training Data\n({len(trainer.y_train):,} samples)', fontweight='bold')
+            else:
+                ax1.text(0.5, 0.5, 'No training data', ha='center', va='center', transform=ax1.transAxes)
+                ax1.set_title('Training Data', fontweight='bold')
+            
+            # Plot 2: Validation Data Distribution (Pie Chart)
+            ax2 = axes[0, 1]
+            if len(trainer.y_val) > 0:
+                val_bin_counts = self._calculate_bin_counts(trainer.y_val, wave_bins)
+                _, _, _ = ax2.pie(val_bin_counts, labels=bin_names, 
+                                                  autopct='%1.1f%%', colors=colors, startangle=90)
+                ax2.set_title(f'Validation Data\n({len(trainer.y_val):,} samples)', fontweight='bold')
+            else:
+                ax2.text(0.5, 0.5, 'No validation data', ha='center', va='center', transform=ax2.transAxes)
+                ax2.set_title('Validation Data', fontweight='bold')
+            
+            # Plot 3: Test Data Distribution (Pie Chart)
+            ax3 = axes[0, 2]
+            if len(trainer.y_test) > 0:
+                test_bin_counts = self._calculate_bin_counts(trainer.y_test, wave_bins)
+                _, _, _ = ax3.pie(test_bin_counts, labels=bin_names, 
+                                                  autopct='%1.1f%%', colors=colors, startangle=90)
+                ax3.set_title(f'Test Data\n({len(trainer.y_test):,} samples)', fontweight='bold')
+            else:
+                ax3.text(0.5, 0.5, 'No test data', ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title('Test Data', fontweight='bold')
+            
+            # Plot 4: Comparison Bar Chart
+            ax4 = axes[1, 0]
+            splits = ['Train', 'Val', 'Test']
+            split_data = [trainer.y_train, trainer.y_val, trainer.y_test]
+            
+            x = np.arange(len(splits))
+            width = 0.15
+            
+            for i, (bin_name, color) in enumerate(zip(bin_names, colors)):
+                counts = []
+                for data in split_data:
+                    if len(data) > 0:
+                        bin_counts = self._calculate_bin_counts(data, wave_bins)
+                        counts.append(bin_counts[i])
+                    else:
+                        counts.append(0)
+                
+                ax4.bar(x + i * width, counts, width, label=bin_name, color=color, alpha=0.8)
+            
+            ax4.set_title('Wave Height Distribution Comparison', fontweight='bold')
+            ax4.set_ylabel('Number of Samples')
+            ax4.set_xticks(x + width * 2)
+            ax4.set_xticklabels(splits)
+            ax4.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+            # Plot 5: Sample Size Comparison
+            ax5 = axes[1, 1]
+            split_sizes = [len(trainer.y_train), len(trainer.y_val), len(trainer.y_test)]
+            bars = ax5.bar(splits, split_sizes, color=['#1f77b4', '#ff7f0e', '#2ca02c'], alpha=0.7)
+            ax5.set_title('Data Split Sizes', fontweight='bold')
+            ax5.set_ylabel('Number of Samples')
+            
+            # Add value labels on bars
+            for bar, size in zip(bars, split_sizes):
+                height = bar.get_height()
+                ax5.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                        f'{size:,}', ha='center', va='bottom', fontsize=10)
+            
+            # Plot 6: Extreme Wave Analysis
+            ax6 = axes[1, 2]
+            extreme_counts = []
+            for data in split_data:
+                if len(data) > 0:
+                    extreme_count = np.sum(data >= 9.0)
+                    extreme_counts.append(extreme_count)
+                else:
+                    extreme_counts.append(0)
+            
+            bars = ax6.bar(splits, extreme_counts, color='red', alpha=0.7)
+            ax6.set_title('Extreme Waves (>9m) by Split', fontweight='bold')
+            ax6.set_ylabel('Number of Extreme Waves')
+            
+            # Add value labels on bars
+            for bar, count in zip(bars, extreme_counts):
+                height = bar.get_height()
+                ax6.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                        f'{count:,}', ha='center', va='bottom', fontsize=10)
+            
+            # Adjust layout and save
+            plt.tight_layout()
+            plt.savefig(plots_dir / 'data_distribution_after_split.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+        except Exception as e:
+            logger.warning(f"Failed to create data distribution plots: {e}")
+            plt.close()  # Ensure figure is closed even on error
+    
+    def _get_wave_height_bins_from_config(self) -> Dict[str, tuple]:
+        """Get wave height bins from configuration."""
+        # Get stratification bins from feature config
+        feature_config = self.config.get("feature_block", {})
+        stratification_bins = feature_config.get("per_point_stratification_bins", {})
+        
+        if not stratification_bins:
+            # Fallback to default bins if not configured
+            logger.warning("No per_point_stratification_bins found in config, using default bins")
+            return {
+                "calm": (0.0, 1.0),
+                "moderate": (1.0, 3.0), 
+                "rough": (3.0, 6.0),
+                "high": (6.0, 9.0),
+                "extreme": (9.0, float('inf'))
+            }
+        
+        # Convert config bins to the format expected by plotting
+        wave_bins = {}
+        for bin_name, bin_config in stratification_bins.items():
+            min_val, max_val = bin_config["range"]
+            
+            # Convert to float in case they come from YAML as strings
+            min_val = float(min_val)
+            if str(max_val) in [".inf", "float('inf')"] or max_val == float('inf'):
+                max_val = float('inf')
+            else:
+                max_val = float(max_val)
+            
+            wave_bins[bin_name] = (min_val, max_val)
+        
+        return wave_bins
+    
+    def _calculate_bin_counts(self, wave_data: np.ndarray, wave_bins: Dict[str, tuple]) -> list:
+        """Calculate bin counts for given wave data and bins."""
+        bin_counts = []
+        for _, (min_val, max_val) in wave_bins.items():
+            if max_val == float('inf'):
+                count = np.sum(wave_data >= min_val)
+            else:
+                count = np.sum((wave_data >= min_val) & (wave_data < max_val))
+            bin_counts.append(count)
+        return bin_counts
     
     def get_plot_files(self) -> list:
         """Get list of all plot files created."""

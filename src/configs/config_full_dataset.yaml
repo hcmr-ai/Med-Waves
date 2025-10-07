@@ -17,7 +17,9 @@ model:
   n_jobs: -1
   early_stopping_rounds: null
   eval_metric: ["rmse", "mae"]
-  objective: "reg:squarederror"
+  # objective: "reg:squarederror"
+  objective: "reg:pseudohubererror"
+  huber_slope: 0.5
   tree_method: hist
   gamma: 0.5
   max_bin: 256
@@ -45,7 +47,7 @@ data:
     train_end_year: 2022 # Train data up to this year (exclusive)
     test_start_year: 2023 # Test data from this year onwards
     val_months: [] # Months to use for validation
-    eval_months: [3, 4, 5] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
+    eval_months: [3, 10, 11] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
     # For other split types:
     test_size: 0.2 # 20% for testing
     val_size: 0.2 # 20% for validation
@@ -245,6 +247,7 @@ diagnostics:
   create_spatial_maps: true # Enable aggregated spatial maps
   create_regional_error_box_plots: true
   create_wave_height_performance_plots: true
+  create_data_distribution_plots: true
 
 # Logging configuration
 logging:
@@ -262,7 +265,7 @@ memory_monitoring:
 # Output configuration
 output:
   model_save_path: "trained_models"
-  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias_2"
+  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias_weighted_huber"
 
   # S3 configuration for saving results
   s3:

@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Tuple, Union
 
 import joblib
 import numpy as np
-import pandas as pd
 import polars as pl
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Lasso, Ridge
@@ -61,7 +60,7 @@ class FullDatasetTrainer:
         self.data_config = config.get("data", {})
         self.feature_config = config.get("feature_block", {})
         self.evaluation_config = config.get("evaluation", {})
-        self.diagnostics_config = config.get("training_diagnostics", {})
+        self.diagnostics_config = config.get("diagnostics", {})
         
         # Initialize components
         self.model = None
@@ -390,10 +389,19 @@ class FullDatasetTrainer:
         # Apply sample weighting (regional and/or wave height bin weighting)
         if self.predict_bias and actual_wave_heights is not None:
             # Use actual wave heights for weighting when predicting bias
-            self.sample_weights = self.sample_weighting.apply_weights(
-                actual_wave_heights, self.regions_train
-            )
-            logger.info("Applied sample weights based on actual wave heights (bias prediction mode)")
+            # The data splitter already provides the properly split actual wave heights
+            actual_wave_heights_train = split_data.get('actual_wave_heights_train', None)
+            if actual_wave_heights_train is not None:
+                self.sample_weights = self.sample_weighting.apply_weights(
+                    actual_wave_heights_train, self.regions_train
+                )
+                logger.info("Applied sample weights based on actual wave heights (bias prediction mode)")
+            else:
+                # Fallback to y_train if actual_wave_heights_train is not available
+                self.sample_weights = self.sample_weighting.apply_weights(
+                    self.y_train, self.regions_train
+                )
+                logger.warning("actual_wave_heights_train not found in split_data, using y_train for weighting")
         else:
             # Use y_train for weighting (standard mode)
             self.sample_weights = self.sample_weighting.apply_weights(
