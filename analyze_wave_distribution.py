@@ -130,34 +130,35 @@ def main():
     # Set AWS region to avoid polars warning
     os.environ["AWS_DEFAULT_REGION"] = "eu-central-1"
     
-    # Load config
-    config_path = "src/configs/config_per_point_stratified.yaml"
-    config = load_config(config_path)
+    # Configuration
+    s3_bucket = "medwav-dev-data"
+    s3_prefix = "parquet/hourly/"
+    years_to_analyze = [2021, 2022]  # Change this list to analyze different years
     
-    # Get data configuration
-    data_config = config["data"]
-    source = data_config["source"]
-    train_start_year = 2023
-    train_end_year = 2023
-    file_pattern = data_config["file_pattern"]
+    logger.info(f"Analyzing wave distribution for years: {years_to_analyze}")
+    logger.info(f"S3 bucket: {s3_bucket}")
+    logger.info(f"S3 prefix: {s3_prefix}")
     
-    logger.info(f"Analyzing wave distribution for {train_start_year}-{train_end_year}")
-    logger.info(f"Pattern: {file_pattern}")
+    # List actual files from S3 for the specified years
+    from src.commons.aws.utils import list_s3_parquet_files
     
-    # Generate list of training files directly
-    train_files = []
-    for year in range(train_start_year, train_end_year + 1):
-        for month in range(1, 13):  # All months
-            for day in range(1, 32):  # All days
-                # Handle different month lengths
-                if month in [4, 6, 9, 11] and day > 30:  # 30-day months
-                    continue
-                elif month == 2 and day > 28:  # February (assuming non-leap years)
-                    continue
-                
-                filename = f"WAVEAN{year}{month:02d}{day:02d}.parquet"
-                file_path = f"{source}year={year}/{filename}"
-                train_files.append(file_path)
+    # List parquet files for the specified years
+    train_files = list_s3_parquet_files(s3_bucket, s3_prefix, None, None, None)
+    
+    # Filter files to only include the years we want to analyze
+    filtered_files = []
+    for file_path in train_files:
+        # Extract year from file path (assuming format: year=YYYY/filename)
+        if "year=" in file_path:
+            year_str = file_path.split("year=")[1].split("/")[0]
+            try:
+                year = int(year_str)
+                if year in years_to_analyze:
+                    filtered_files.append(file_path)
+            except ValueError:
+                continue
+    
+    train_files = filtered_files
     
     logger.info(f"Found {len(train_files)} training files")
     

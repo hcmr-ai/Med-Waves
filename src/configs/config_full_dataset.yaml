@@ -262,7 +262,7 @@ memory_monitoring:
 # Output configuration
 output:
   model_save_path: "trained_models"
-  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias"
+  experiment_name: "xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias_2"
 
   # S3 configuration for saving results
   s3:

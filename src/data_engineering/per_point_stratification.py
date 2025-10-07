@@ -209,6 +209,12 @@ class PerPointStratification:
         self.logger.info(f"  - Balancing {non_extreme_count:,} non-extreme waves across regions")
         
         # Calculate remaining quota for non-extreme waves
+        # If extreme waves exceed max_samples_per_file, we keep ALL extreme waves and skip geographic balancing
+        if extreme_count >= self.max_samples_per_file:
+            self.logger.warning(f"  - Extreme waves ({extreme_count:,}) exceed max_samples_per_file ({self.max_samples_per_file:,})")
+            self.logger.warning(f"  - Keeping ALL extreme waves, skipping geographic balancing")
+            return extreme_waves
+        
         remaining_quota = self.max_samples_per_file - extreme_count
         samples_per_region = remaining_quota // len(unique_regions)
         

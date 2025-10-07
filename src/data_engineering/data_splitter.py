@@ -24,16 +24,18 @@ class DataSplitter:
         self.logger = logging.getLogger(__name__)
     
     def split_data(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None, 
-                   coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+                   coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
+                   actual_wave_heights: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Split data into train/validation/test sets based on configuration.
         
         Args:
             X: Feature matrix
-            y: Target vector
+            y: Target vector (may be bias values if predict_bias=true)
             regions: Regional classification array (optional)
             coords: Coordinate array (lat, lon) (optional)
             file_paths: List of file paths (required for year-based splitting)
+            actual_wave_heights: Actual wave heights for proper binning (optional)
             
         Returns:
             Dictionary containing all split data
@@ -47,19 +49,20 @@ class DataSplitter:
         self.logger.info(f"Splitting data using {split_type} strategy...")
         
         if split_type == "year_based":
-            return self._split_by_years(X, y, regions, coords, file_paths, split_config)
+            return self._split_by_years(X, y, regions, coords, file_paths, split_config, actual_wave_heights)
         elif split_type == "random":
-            return self._split_random(X, y, regions, coords, test_size, val_size, random_state)
+            return self._split_random(X, y, regions, coords, test_size, val_size, random_state, actual_wave_heights)
         elif split_type == "temporal":
-            return self._split_temporal(X, y, regions, coords, test_size, val_size)
+            return self._split_temporal(X, y, regions, coords, test_size, val_size, actual_wave_heights)
         elif split_type == "stratified":
-            return self._split_stratified(X, y, regions, coords, test_size, val_size, random_state, split_config)
+            return self._split_stratified(X, y, regions, coords, test_size, val_size, random_state, split_config, actual_wave_heights)
         else:
             raise ValueError(f"Unknown split type: {split_type}")
     
     def _split_random(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None,
                      coords: Optional[np.ndarray] = None, test_size: float = 0.2, 
-                     val_size: float = 0.2, random_state: int = 42) -> Dict[str, Any]:
+                     val_size: float = 0.2, random_state: int = 42, 
+                     actual_wave_heights: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """Random split: train -> val+test, then val -> val/test."""
         # Split train -> val+test
         X_temp, X_test, y_temp, y_test = train_test_split(
@@ -186,7 +189,7 @@ class DataSplitter:
     
     def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None,
                        coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
-                       split_config: Dict[str, Any] = None) -> Dict[str, Any]:
+                       split_config: Dict[str, Any] = None, actual_wave_heights: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Split data by years: 2017-2022 for train/val, 2023 for test.
         
@@ -304,6 +307,13 @@ class DataSplitter:
             coords_val = coords[val_mask]
             coords_test = coords[test_mask]
         
+        # Split actual wave heights if available
+        actual_wave_heights_train, actual_wave_heights_val, actual_wave_heights_test = None, None, None
+        if actual_wave_heights is not None:
+            actual_wave_heights_train = actual_wave_heights[train_mask]
+            actual_wave_heights_val = actual_wave_heights[val_mask]
+            actual_wave_heights_test = actual_wave_heights[test_mask]
+        
         # Log split statistics
         train_years_months = []
         val_years_months = []
@@ -350,7 +360,10 @@ class DataSplitter:
             'X_train': X_train, 'X_val': X_val, 'X_test': X_test,
             'y_train': y_train, 'y_val': y_val, 'y_test': y_test,
             'regions_train': regions_train, 'regions_val': regions_val, 'regions_test': regions_test,
-            'coords_train': coords_train, 'coords_val': coords_val, 'coords_test': coords_test
+            'coords_train': coords_train, 'coords_val': coords_val, 'coords_test': coords_test,
+            'actual_wave_heights_train': actual_wave_heights_train, 
+            'actual_wave_heights_val': actual_wave_heights_val, 
+            'actual_wave_heights_test': actual_wave_heights_test
         }
     
     def get_split_info(self, split_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -415,3 +428,129 @@ class DataSplitter:
         
         if info['coords_available']:
             self.logger.info("  Coordinates: Available for spatial analysis")
+        
+        # Log stratified distribution after split
+        self._log_stratified_distribution_after_split(split_data)
+    
+    def _log_stratified_distribution_after_split(self, split_data: Dict[str, Any]) -> None:
+        """Log the stratified distribution after data split to show actual training data."""
+        self.logger.info("=" * 80)
+        self.logger.info("STRATIFIED DISTRIBUTION AFTER DATA SPLIT")
+        self.logger.info("=" * 80)
+        
+        # Get wave height bins from configuration
+        wave_bins = self._get_wave_height_bins_from_config()
+        
+        # Check if we're predicting bias - if so, we need to use actual wave heights for binning
+        feature_config = self.config.get("feature_block", {})
+        predict_bias = feature_config.get("predict_bias", False)
+        
+        if predict_bias:
+            self.logger.info("NOTE: Model is predicting bias, but wave height bins are based on actual wave heights")
+            self.logger.info("Wave height distribution shows actual wave heights, not bias values")
+        
+        # Log training data distribution
+        if len(split_data['y_train']) > 0:
+            self.logger.info(f"TRAINING DATA: {len(split_data['y_train']):,} samples")
+            # Use actual wave heights if available, otherwise use y data
+            wave_data = split_data.get('actual_wave_heights_train', split_data['y_train'])
+            self._log_wave_height_distribution_for_split(wave_data, "Training", wave_bins)
+        
+        # Log validation data distribution
+        if len(split_data['y_val']) > 0:
+            self.logger.info(f"VALIDATION DATA: {len(split_data['y_val']):,} samples")
+            # Use actual wave heights if available, otherwise use y data
+            wave_data = split_data.get('actual_wave_heights_val', split_data['y_val'])
+            self._log_wave_height_distribution_for_split(wave_data, "Validation", wave_bins)
+        
+        # Log test data distribution
+        if len(split_data['y_test']) > 0:
+            self.logger.info(f"TEST DATA: {len(split_data['y_test']):,} samples")
+            # Use actual wave heights if available, otherwise use y data
+            wave_data = split_data.get('actual_wave_heights_test', split_data['y_test'])
+            self._log_wave_height_distribution_for_split(wave_data, "Test", wave_bins)
+        
+        self.logger.info("=" * 80)
+    
+    def _get_wave_height_bins_from_config(self) -> Dict[str, tuple]:
+        """Get wave height bins from configuration."""
+        # Get stratification bins from feature config
+        feature_config = self.config.get("feature_block", {})
+        stratification_bins = feature_config.get("per_point_stratification_bins", {})
+        
+        if not stratification_bins:
+            # Fallback to default bins if not configured
+            self.logger.warning("No per_point_stratification_bins found in config, using default bins")
+            return {
+                "calm": (0.0, 1.0),
+                "moderate": (1.0, 3.0), 
+                "rough": (3.0, 6.0),
+                "high": (6.0, 9.0),
+                "extreme": (9.0, float('inf'))
+            }
+        
+        # Convert config bins to the format expected by logging
+        wave_bins = {}
+        for bin_name, bin_config in stratification_bins.items():
+            min_val, max_val = bin_config["range"]
+            
+            # Convert to float in case they come from YAML as strings
+            min_val = float(min_val)
+            if str(max_val) in [".inf", "float('inf')"] or max_val == float('inf'):
+                max_val = float('inf')
+            else:
+                max_val = float(max_val)
+            
+            wave_bins[bin_name] = (min_val, max_val)
+        
+        return wave_bins
+    
+    def _log_wave_height_distribution_for_split(self, y_data: np.ndarray, split_name: str, wave_bins: Dict[str, tuple]) -> None:
+        """Log wave height distribution for a specific data split."""
+        if len(y_data) == 0:
+            return
+        
+        total_samples = len(y_data)
+        self.logger.info(f"  {split_name} wave height distribution:")
+        
+        # Debug: Log actual wave height range in the data
+        min_wave = float(np.min(y_data))
+        max_wave = float(np.max(y_data))
+        self.logger.info(f"    DEBUG: Actual wave height range: {min_wave:.2f}m - {max_wave:.2f}m")
+        
+        bin_counts = {}
+        total_counted = 0
+        for bin_name, (min_val, max_val) in wave_bins.items():
+            if max_val == float('inf'):
+                count = np.sum(y_data >= min_val)
+            else:
+                count = np.sum((y_data >= min_val) & (y_data < max_val))
+            
+            percentage = (count / total_samples) * 100
+            bin_counts[bin_name] = count
+            total_counted += count
+            
+            if max_val == float('inf'):
+                range_str = f"{min_val}+m"
+            else:
+                range_str = f"{min_val}-{max_val}m"
+            
+            self.logger.info(f"    {bin_name:12} ({range_str:>8}): {count:8,} samples ({percentage:5.1f}%)")
+        
+        # Debug: Check if all samples are accounted for
+        missing_samples = total_samples - total_counted
+        if missing_samples > 0:
+            self.logger.warning(f"    DEBUG: {missing_samples:,} samples not accounted for in any bin!")
+            self.logger.warning(f"    DEBUG: Total samples: {total_samples:,}, Total counted: {total_counted:,}")
+        
+        # Log extreme wave statistics
+        extreme_count = bin_counts.get("extreme", 0)
+        if extreme_count > 0:
+            extreme_mask = y_data >= 9.0
+            extreme_data = y_data[extreme_mask]
+            max_wave = float(np.max(extreme_data))
+            mean_extreme = float(np.mean(extreme_data))
+            
+            self.logger.info(f"    Extreme wave statistics:")
+            self.logger.info(f"      Maximum wave height: {max_wave:.2f}m")
+            self.logger.info(f"      Mean extreme wave: {mean_extreme:.2f}m")

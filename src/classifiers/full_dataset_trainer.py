@@ -263,7 +263,7 @@ class FullDatasetTrainer:
             logger.warning("  - Set scaler to 'standard', 'robust', or 'minmax' for regional scaling")
             logger.warning("  - Set regional_scaling.enabled to false for no scaling")
     
-    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], np.ndarray]:
         """Load data using the DataLoader."""
         self._log_memory_usage("before loading data")
         
@@ -280,6 +280,13 @@ class FullDatasetTrainer:
             logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
             self.vhm0_x_raw = None
         
+        # Extract actual wave heights for proper binning (needed when predict_bias=True)
+        if target_column in combined_df.columns:
+            actual_wave_heights = combined_df[target_column].to_numpy()
+        else:
+            logger.warning(f"{target_column} column not found in data. Wave height binning may be incorrect.")
+            actual_wave_heights = None
+        
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
         
@@ -288,7 +295,7 @@ class FullDatasetTrainer:
         self.experiment_logger.log_dataset_info(dataset_info)
         
         self._log_memory_usage("after loading data")
-        return X, y, regions, coords, successful_files
+        return X, y, regions, coords, successful_files, actual_wave_heights
     
     def _prepare_dataset_info(self, X: np.ndarray, y: np.ndarray, successful_files: List[str]) -> Dict[str, Any]:
         """Prepare dataset information for logging."""
@@ -319,21 +326,23 @@ class FullDatasetTrainer:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
 
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None) -> None:
+    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None, actual_wave_heights: np.ndarray = None) -> None:
         """
         Split data into train/validation/test sets using DataSplitter.
         
         Args:
             X: Feature matrix
-            y: Target vector
+            y: Target vector (may be bias values if predict_bias=true)
             regions: Regional classification array (optional)
             coords: Coordinate array (lat, lon) (optional)
             file_paths: List of file paths (required for year-based splitting)
+            vhm0_x: Raw input wave heights for baseline metrics (optional)
+            actual_wave_heights: Actual wave heights for proper binning (optional)
         """
         self._log_memory_usage("before splitting data")
         
         # Use DataSplitter to perform the split
-        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths)
+        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths, actual_wave_heights)
         
         # Store splits as instance variables
         self.X_train = split_data['X_train']
@@ -375,13 +384,22 @@ class FullDatasetTrainer:
             self.vhm0_x_val = None
             self.vhm0_x_test = None
         
-        # Log split information
+        # Log split information (includes stratified distribution logging)
         self.data_splitter.log_split_info(split_data)
         
         # Apply sample weighting (regional and/or wave height bin weighting)
-        self.sample_weights = self.sample_weighting.apply_weights(
-            self.y_train, self.regions_train
-        )
+        if self.predict_bias and actual_wave_heights is not None:
+            # Use actual wave heights for weighting when predicting bias
+            self.sample_weights = self.sample_weighting.apply_weights(
+                actual_wave_heights, self.regions_train
+            )
+            logger.info("Applied sample weights based on actual wave heights (bias prediction mode)")
+        else:
+            # Use y_train for weighting (standard mode)
+            self.sample_weights = self.sample_weighting.apply_weights(
+                self.y_train, self.regions_train
+            )
+            logger.info("Applied sample weights based on target values (standard mode)")
         
         self._log_memory_usage("after splitting data")
     
