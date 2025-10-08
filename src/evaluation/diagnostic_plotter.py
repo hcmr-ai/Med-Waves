@@ -440,15 +440,16 @@ class DiagnosticPlotter:
         logger.info("Creating sea-bin analysis plots...")
         
         # Create sea-bin performance plot
-        self._create_sea_bin_performance_plot(trainer, plots_dir)
-        
+        self._create_sea_bin_performance_plot(trainer.sea_bin_test_metrics, getattr(trainer, 'baseline_sea_bin_test_metrics', {}), plots_dir, mode="test")
+
+        # Create sea-bin performance plot
+        self._create_sea_bin_performance_plot(trainer.sea_bin_train_metrics, getattr(trainer, 'baseline_sea_bin_train_metrics', {}), plots_dir, mode="train")
+
         # Create sea-bin predictions vs actual plots
         # self._create_sea_bin_predictions_plots(trainer, test_predictions, plots_dir)
     
-    def _create_sea_bin_performance_plot(self, trainer: Any, plots_dir: Path) -> None:
+    def _create_sea_bin_performance_plot(self, sea_bin_metrics: Any, baseline_sea_bin_metrics: Any, plots_dir: Path, mode: str) -> None:
         """Create sea-bin performance metrics plot with baseline comparison."""
-        sea_bin_metrics = trainer.sea_bin_test_metrics
-        baseline_sea_bin_metrics = getattr(trainer, 'baseline_sea_bin_test_metrics', {})
         logger.info("Creating sea-bin performance metrics plot...")
         
         # Prepare data for plotting
@@ -544,7 +545,7 @@ class DiagnosticPlotter:
             axes[1, 1].text(i, v + 0.5, f'{v:.1f}%', ha='center', va='bottom', fontsize=9)
         
         plt.tight_layout()
-        plt.savefig(plots_dir / 'sea_bin_performance.png', dpi=300, bbox_inches='tight')
+        plt.savefig(plots_dir / f'sea_bin_performance_{mode}.png', dpi=300, bbox_inches='tight')
         plt.close()
     
     def _create_sea_bin_predictions_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
