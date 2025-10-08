@@ -77,11 +77,22 @@ class FeatureEngineer:
         
         # Check if we should predict bias instead of vhm0_y directly
         predict_bias = self.feature_config.get("predict_bias", False)
+        predict_bias_log_space = self.feature_config.get("predict_bias_log_space", False)
+        
         if predict_bias:
-            # Target is bias: vhm0_x - vhm0_y (correction needed)
             if 'vhm0_x' in df.columns and target_column in df.columns:
-                y_raw = (df['vhm0_x'] - df[target_column]).to_numpy()
-                self.logger.info("Using bias as target: vhm0_x - vhm0_y")
+                if predict_bias_log_space:
+                    # Multiplicative log-space bias: z = log(y_obs) - log(max(vhm0_x, eps))
+                    eps = self.feature_config.get("log_space_epsilon", 1e-6)
+                    y_raw = (np.log(np.maximum(df[target_column], eps)) -
+                            np.log(np.maximum(df['vhm0_x'], eps))).to_numpy()
+                    self.logger.info(
+                        f"Using log-space bias as target: log(vhm0_y) - log(max(vhm0_x, {eps}))"
+                    )
+                else:
+                    # Standard additive bias: y_obs - vhm0_x
+                    y_raw = (df[target_column] - df['vhm0_x']).to_numpy()
+                    self.logger.info("Using additive bias as target: vhm0_y - vhm0_x")
             else:
                 self.logger.error("Cannot predict bias: vhm0_x or target column not found")
                 raise ValueError("vhm0_x and target column required for bias prediction")

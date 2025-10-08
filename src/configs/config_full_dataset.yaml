@@ -72,6 +72,8 @@ data:
 # Feature engineering configuration
 feature_block:
   predict_bias: true # If true, the model will predict the bias instead of the vhm0_y
+  predict_bias_log_space: false # If true, use multiplicative log-space learning: z = log(y_obs) - log(max(vhm0_x, eps))
+  log_space_epsilon: 1e-6 # Small epsilon to prevent log(0) in log-space learning
   features_to_exclude:
     - "corrected_VTM02"
     - "time"

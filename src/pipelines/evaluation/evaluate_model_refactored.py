@@ -32,6 +32,7 @@ from src.evaluation.metrics import evaluate_model
 from src.commons.region_mapping import RegionMapper
 from src.commons.aws.s3_results_saver import S3ResultsSaver
 from src.commons.aws.s3_model_loader import S3ModelLoader
+from src.classifiers.helpers import reconstruct_vhm0_values
 
 # Set up logging
 logging.basicConfig(
@@ -104,6 +105,7 @@ def _evaluate_single_file_worker(args: Tuple[str, str, Dict[str, Any]]) -> Optio
         from src.commons.preprocessing_manager import PreprocessingManager
         from src.commons.aws.s3_model_loader import S3ModelLoader
         from src.evaluation.metrics import evaluate_model
+        from src.classifiers.helpers import reconstruct_vhm0_values
         import joblib
         from pathlib import Path
         import numpy as np
@@ -187,6 +189,11 @@ class RobustModelEvaluator:
     def predict_bias(self) -> bool:
         """Check if we're predicting bias instead of vhm0_y directly."""
         return self.feature_config.get("predict_bias", False)
+    
+    @property
+    def predict_bias_log_space(self) -> bool:
+        """Check if we're using log-space bias prediction."""
+        return self.feature_config.get("predict_bias_log_space", False)
     
     def _configure_dataloader_parallel_processing(self) -> None:
         """Configure DataLoader with parallel processing settings from evaluation config."""
@@ -1009,26 +1016,33 @@ class RobustModelEvaluator:
         if vhm0_x_index is not None:
             vhm0_x = X_raw[:, vhm0_x_index]
         
-        # Compute overall metrics
-        if self.predict_bias:
-            if vhm0_x is None:
-                logger.error("vhm0_x not available for bias prediction evaluation")
-                return None
-            vhm0_y_true = vhm0_x - y  # Reconstruct true vhm0 values from bias
-            vhm0_pred = vhm0_x - y_pred  # Apply bias correction to predictions
-            metrics = evaluate_model(vhm0_pred, vhm0_y_true)
-        else:
-            vhm0_y_true = y  # y already contains true vhm0 values
-            metrics = evaluate_model(y_pred, y)
-        
+        if self.predict_bias and vhm0_x is None:
+            logger.error("vhm0_x not available for bias prediction evaluation")
+            return None
+
+        # Reconstruct true and predicted VHM0 values in linear space
+        vhm0_y_true, vhm0_pred = reconstruct_vhm0_values(
+            predict_bias=self.predict_bias,
+            predict_bias_log_space=self.predict_bias_log_space,
+            vhm0_x=vhm0_x,
+            y_true=y,
+            y_pred=y_pred,
+        )
+
+        metrics = evaluate_model(vhm0_pred, vhm0_y_true)
+
         baseline_metrics = None
-        if vhm0_x_index is not None:
-            # Baseline comparison: vhm0_x vs true vhm0 values
+        if vhm0_x is not None:
             baseline_metrics = evaluate_model(vhm0_x, vhm0_y_true)
-            logger.info(f"Baseline metrics (vhm0_x vs vhm0_y): RMSE={baseline_metrics['rmse']:.4f}, MAE={baseline_metrics['mae']:.4f}, Bias={baseline_metrics['bias']:.4f}")
+            logger.info(
+                f"Baseline metrics (vhm0_x vs vhm0_y): "
+                f"RMSE={baseline_metrics['rmse']:.4f}, "
+                f"MAE={baseline_metrics['mae']:.4f}, "
+                f"Bias={baseline_metrics['bias']:.4f}"
+            )
         else:
             logger.warning("vhm0_x column not found in features - skipping baseline metrics")
-        
+
         # Extract date information
         file_name = Path(file_path).stem
         date_info = self._extract_date_from_filename(file_name)
