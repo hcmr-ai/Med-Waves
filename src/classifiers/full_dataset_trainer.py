@@ -559,13 +559,19 @@ class FullDatasetTrainer:
             y_pred=train_pred)
 
         train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
+        logger.info("Calculating regional training metrics...")
         regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, vhm0_pred_train, self.regions_train)
         if self.vhm0_x_train is not None:
+            logger.info("Calculating baseline regional training metrics...")
             baseline_regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, self.vhm0_x_train, self.regions_train)
+            baseline_sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, self.vhm0_x_train)
         else:
             logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
             baseline_regional_train_metrics = {}
+            baseline_sea_bin_train_metrics = {}
         sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
+        self.sea_bin_train_metrics = sea_bin_train_metrics
+        self.baseline_sea_bin_train_metrics = baseline_sea_bin_train_metrics
         
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del train_pred
@@ -709,11 +715,6 @@ class FullDatasetTrainer:
                 baseline_sea_bin_test_metrics = {}
 
             sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, vhm0_pred_test)
-
-            # 🚀 MEMORY OPTIMIZATION
-            del test_pred
-            gc.collect()
-
         else:
             test_metrics = {'rmse': 0.0, 'mae': 0.0, 'bias': 0.0, 'pearson': 0.0, 'snr': 0.0, 'snr_db': 0.0}
             regional_test_metrics = {}

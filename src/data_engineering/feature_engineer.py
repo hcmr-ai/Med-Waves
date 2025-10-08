@@ -83,7 +83,7 @@ class FeatureEngineer:
             if 'vhm0_x' in df.columns and target_column in df.columns:
                 if predict_bias_log_space:
                     # Multiplicative log-space bias: z = log(y_obs) - log(max(vhm0_x, eps))
-                    eps = self.feature_config.get("log_space_epsilon", 1e-6)
+                    eps = float(self.feature_config.get("log_space_epsilon", 1e-6))
                     y_raw = (np.log(np.maximum(df[target_column], eps)) -
                             np.log(np.maximum(df['vhm0_x'], eps))).to_numpy()
                     self.logger.info(

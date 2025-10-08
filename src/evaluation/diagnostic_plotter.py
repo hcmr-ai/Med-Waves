@@ -443,7 +443,8 @@ class DiagnosticPlotter:
         self._create_sea_bin_performance_plot(trainer.sea_bin_test_metrics, getattr(trainer, 'baseline_sea_bin_test_metrics', {}), plots_dir, mode="test")
 
         # Create sea-bin performance plot
-        self._create_sea_bin_performance_plot(trainer.sea_bin_train_metrics, getattr(trainer, 'baseline_sea_bin_train_metrics', {}), plots_dir, mode="train")
+        if hasattr(trainer, 'sea_bin_train_metrics'):
+            self._create_sea_bin_performance_plot(trainer.sea_bin_train_metrics, getattr(trainer, 'baseline_sea_bin_train_metrics', {}), plots_dir, mode="train")
 
         # Create sea-bin predictions vs actual plots
         # self._create_sea_bin_predictions_plots(trainer, test_predictions, plots_dir)
