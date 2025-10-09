@@ -455,6 +455,7 @@ class DiagnosticPlotter:
         
         # Prepare data for plotting
         bin_names = []
+        bin_labels = []
         rmse_values = []
         mae_values = []
         pearson_values = []
@@ -465,9 +466,27 @@ class DiagnosticPlotter:
         baseline_rmse_values = []
         baseline_mae_values = []
         baseline_pearson_values = []
-        
+
+        wave_bins = {}
+        for bin_config in self.config.get("feature_block", {}).get("sea_bin_metrics", {}).get("bins", []):
+            min_val, max_val = bin_config["min"], bin_config["max"]
+            bin_name = bin_config["name"]
+            
+            # Convert to float in case they come from YAML as strings
+            min_val = float(min_val)
+            if str(max_val) in [".inf", "float('inf')"] or max_val == float('inf'):
+                max_val = float('inf')
+            else:
+                max_val = float(max_val)
+            
+            wave_bins[bin_name] = (min_val, max_val)
+
         for bin_name, metrics in sea_bin_metrics.items():
-            bin_names.append(bin_name.replace('_', ' ').title())
+
+            label = f"{wave_bins[bin_name][0]}-{wave_bins[bin_name][1]}m"
+            bin_labels.append(label)
+            bin_names.append(bin_name)
+            # bin_names.append(bin_name.replace('_', ' ').title())
             rmse_values.append(metrics.get('rmse', 0))
             mae_values.append(metrics.get('mae', 0))
             pearson_values.append(metrics.get('pearson', 0))
@@ -494,7 +513,7 @@ class DiagnosticPlotter:
         axes[0, 0].set_title('RMSE by Sea State', fontweight='bold')
         axes[0, 0].set_ylabel('RMSE')
         axes[0, 0].set_xticks(x)
-        axes[0, 0].set_xticklabels(bin_names, rotation=45)
+        axes[0, 0].set_xticklabels(bin_labels, rotation=45)
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
         
@@ -509,7 +528,7 @@ class DiagnosticPlotter:
         axes[0, 1].set_title('MAE by Sea State', fontweight='bold')
         axes[0, 1].set_ylabel('MAE')
         axes[0, 1].set_xticks(x)
-        axes[0, 1].set_xticklabels(bin_names, rotation=45)
+        axes[0, 1].set_xticklabels(bin_labels, rotation=45)
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
@@ -524,7 +543,7 @@ class DiagnosticPlotter:
         axes[1, 0].set_title('Pearson Correlation by Sea State', fontweight='bold')
         axes[1, 0].set_ylabel('Pearson Correlation')
         axes[1, 0].set_xticks(x)
-        axes[1, 0].set_xticklabels(bin_names, rotation=45)
+        axes[1, 0].set_xticklabels(bin_labels, rotation=45)
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         axes[1, 0].set_ylim(0, 1)
@@ -535,7 +554,7 @@ class DiagnosticPlotter:
             axes[1, 0].text(i + width/2, v2 + 0.01, f'{v2:.3f}', ha='center', va='bottom', fontsize=8)
         
         # Plot 4: Sample distribution by sea state
-        axes[1, 1].bar(bin_names, percentages, color='gold', alpha=0.7)
+        axes[1, 1].bar(bin_labels, percentages, color='gold', alpha=0.7)
         axes[1, 1].set_title('Sample Distribution by Sea State', fontweight='bold')
         axes[1, 1].set_ylabel('Percentage of Samples (%)')
         axes[1, 1].tick_params(axis='x', rotation=45)

@@ -564,11 +564,13 @@ class FullDatasetTrainer:
         if self.vhm0_x_train is not None:
             logger.info("Calculating baseline regional training metrics...")
             baseline_regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, self.vhm0_x_train, self.regions_train)
+            logger.info("Calculating baseline sea-bin training metrics...")
             baseline_sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, self.vhm0_x_train)
         else:
             logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
             baseline_regional_train_metrics = {}
             baseline_sea_bin_train_metrics = {}
+        logger.info("Calculating sea-bin model training metrics...")
         sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
         self.sea_bin_train_metrics = sea_bin_train_metrics
         self.baseline_sea_bin_train_metrics = baseline_sea_bin_train_metrics
@@ -706,6 +708,7 @@ class FullDatasetTrainer:
                 baseline_regional_test_metrics = self._calculate_regional_metrics(
                     vhm0_y_test, self.vhm0_x_test, self.regions_test
                 )
+                logger.info("Calculating baseline sea-bin test metrics...")
                 baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(
                     vhm0_y_test, self.vhm0_x_test
                 )
@@ -714,6 +717,7 @@ class FullDatasetTrainer:
                 baseline_regional_test_metrics = {}
                 baseline_sea_bin_test_metrics = {}
 
+            logger.info("Calculating sea-bin model test metrics...")
             sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, vhm0_pred_test)
         else:
             test_metrics = {'rmse': 0.0, 'mae': 0.0, 'bias': 0.0, 'pearson': 0.0, 'snr': 0.0, 'snr_db': 0.0}

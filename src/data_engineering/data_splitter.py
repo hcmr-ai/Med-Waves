@@ -546,7 +546,7 @@ class DataSplitter:
         # Log extreme wave statistics
         extreme_count = bin_counts.get("extreme", 0)
         if extreme_count > 0:
-            extreme_mask = y_data >= 9.0
+            extreme_mask = y_data >= wave_bins["extreme"][0]
             extreme_data = y_data[extreme_mask]
             max_wave = float(np.max(extreme_data))
             mean_extreme = float(np.mean(extreme_data))

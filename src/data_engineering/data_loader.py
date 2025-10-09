@@ -229,7 +229,7 @@ class DataLoader:
         # Log extreme wave statistics
         extreme_count = bin_counts.get("extreme", 0)
         if extreme_count > 0:
-            extreme_df = combined_df.filter(pl.col(wave_height_col) >= 9.0)
+            extreme_df = combined_df.filter(pl.col(wave_height_col) >= wave_bins["extreme"][0])
             max_wave = float(extreme_df.select(pl.col(wave_height_col).max()).item())
             mean_extreme = float(extreme_df.select(pl.col(wave_height_col).mean()).item())
             

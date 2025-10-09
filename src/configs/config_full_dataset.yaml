@@ -93,13 +93,17 @@ feature_block:
 
   # Per-point stratification with global quotas (reduced to 4 bins for better sample density)
   per_point_stratification_bins:
-    calm: { "range": [0.0, 1.0], "global_target_percentage": 0.15 } # 15% (0-1m)
-    moderate: { "range": [1.0, 3.0], "global_target_percentage": 0.15 } # 25% (1-3m)
-    rough: { "range": [3.0, 6.0], "global_target_percentage": 0.15 } # 30% (3-6m)
-    high: { "range": [6.0, 9.0], "global_target_percentage": 0.20 } # 20% (6-9m)
+    calm: { "range": [0.0, 1.0], "global_target_percentage": 0.0 } # 15% (0-1m)
+    moderate: { "range": [1.0, 3.0], "global_target_percentage": 0.0 } # 25% (1-3m)
+    rough: { "range": [3.0, 5.0], "global_target_percentage": 0.0 } # 30% (3-6m)
+    high: {
+        "range": [5.0, 6.0],
+        "global_target_percentage": 0.0,
+        "keep_all": false,
+      } # 20% (6-9m)
     extreme:
       {
-        "range": [9.0, ".inf"],
+        "range": [6.0, ".inf"],
         "global_target_percentage": 0.30,
         "keep_all": true,
       }
