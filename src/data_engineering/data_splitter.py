@@ -25,7 +25,7 @@ class DataSplitter:
     
     def split_data(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None, 
                    coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
-                   actual_wave_heights: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                   actual_wave_heights: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, months: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Split data into train/validation/test sets based on configuration.
         
@@ -49,7 +49,7 @@ class DataSplitter:
         self.logger.info(f"Splitting data using {split_type} strategy...")
         
         if split_type == "year_based":
-            return self._split_by_years(X, y, regions, coords, file_paths, split_config, actual_wave_heights)
+            return self._split_by_years(X, y, regions, coords, file_paths, split_config, actual_wave_heights, years, months)
         elif split_type == "random":
             return self._split_random(X, y, regions, coords, test_size, val_size, random_state, actual_wave_heights)
         elif split_type == "temporal":
@@ -189,7 +189,8 @@ class DataSplitter:
     
     def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None,
                        coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
-                       split_config: Dict[str, Any] = None, actual_wave_heights: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                       split_config: Dict[str, Any] = None, actual_wave_heights: Optional[np.ndarray] = None, 
+                       years: Optional[np.ndarray] = None, months: Optional[np.ndarray] = None) -> Dict[str, Any]:
         """
         Split data by years: 2017-2022 for train/val, 2023 for test.
         
@@ -263,26 +264,34 @@ class DataSplitter:
         if total_files == 0:
             raise ValueError("No valid files found for splitting")
         
-        # Calculate proportional splits
-        train_ratio = len(train_files) / total_files
-        val_ratio = len(val_files) / total_files
-        test_ratio = len(test_files) / total_files
-        
-        # Create indices for splitting
-        n_samples = len(X)
-        train_end_idx = int(n_samples * train_ratio)
-        val_end_idx = int(n_samples * (train_ratio + val_ratio))
-        
         # Create masks
-        train_mask = np.zeros(n_samples, dtype=bool)
-        val_mask = np.zeros(n_samples, dtype=bool)
-        test_mask = np.zeros(n_samples, dtype=bool)
+        if years is not None and months is not None:
+            train_mask = (years < train_end_year) | ((years == train_end_year) & ~np.isin(months, val_months))
+            val_mask   = (years == train_end_year) & np.isin(months, val_months)
+            test_mask  = (years >= test_start_year) & np.isin(months, eval_months)
+            n_samples = len(X)
+            train_ratio = train_mask.sum() / n_samples
+            val_ratio   = val_mask.sum() / n_samples
+            test_ratio  = test_mask.sum() / n_samples
+        else:
+            # Calculate proportional splits
+            train_ratio = len(train_files) / total_files
+            val_ratio = len(val_files) / total_files
+            test_ratio = len(test_files) / total_files
+            # Create indices for splitting
+            n_samples = len(X)
+            train_end_idx = int(n_samples * train_ratio)
+            val_end_idx = int(n_samples * (train_ratio + val_ratio))
+            train_mask = np.zeros(n_samples, dtype=bool)
+            val_mask = np.zeros(n_samples, dtype=bool)
+            test_mask = np.zeros(n_samples, dtype=bool)
+
         
-        train_mask[:train_end_idx] = True
-        if val_ratio > 0:
-            val_mask[train_end_idx:val_end_idx] = True
-        if test_ratio > 0:
-            test_mask[val_end_idx:] = True
+            train_mask[:train_end_idx] = True
+            if val_ratio > 0:
+                val_mask[train_end_idx:val_end_idx] = True
+            if test_ratio > 0:
+                test_mask[val_end_idx:] = True
         
         # Create splits
         X_train = X[train_mask]
@@ -363,7 +372,10 @@ class DataSplitter:
             'coords_train': coords_train, 'coords_val': coords_val, 'coords_test': coords_test,
             'actual_wave_heights_train': actual_wave_heights_train, 
             'actual_wave_heights_val': actual_wave_heights_val, 
-            'actual_wave_heights_test': actual_wave_heights_test
+            'actual_wave_heights_test': actual_wave_heights_test,
+            'train_indices': np.where(train_mask)[0],
+            'val_indices': np.where(val_mask)[0],
+            'test_indices': np.where(test_mask)[0],
         }
     
     def get_split_info(self, split_data: Dict[str, Any]) -> Dict[str, Any]:

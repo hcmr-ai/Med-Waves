@@ -277,6 +277,18 @@ class FullDatasetTrainer:
         
         # Prepare features using FeatureEngineer
         X, y, regions, coords = self.feature_engineer.prepare_features(combined_df, target_column)
+
+        if "time" in combined_df.columns:
+            combined_df = combined_df.with_columns(
+                pl.col("time").cast(pl.Datetime).alias("time")
+            )
+
+            years = combined_df["time"].dt.year().to_numpy()
+            months = combined_df["time"].dt.month().to_numpy()
+        else:
+            logger.warning("No 'time' column in combined_df — year-based splitting may not work.")
+            years, months = None, None
+
         
         # Extract raw input data for baseline metrics
         if 'vhm0_x' in combined_df.columns:
@@ -300,7 +312,7 @@ class FullDatasetTrainer:
         self.experiment_logger.log_dataset_info(dataset_info)
         
         self._log_memory_usage("after loading data")
-        return X, y, regions, coords, successful_files, actual_wave_heights
+        return X, y, regions, coords, successful_files, actual_wave_heights, years, months
     
     def _prepare_dataset_info(self, X: np.ndarray, y: np.ndarray, successful_files: List[str]) -> Dict[str, Any]:
         """Prepare dataset information for logging."""
@@ -331,7 +343,11 @@ class FullDatasetTrainer:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
 
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None, actual_wave_heights: np.ndarray = None) -> None:
+    def split_data(
+        self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, 
+        coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None, 
+        actual_wave_heights: np.ndarray = None, years: np.ndarray = None, months: np.ndarray = None
+        ) -> None:
         """
         Split data into train/validation/test sets using DataSplitter.
         
@@ -343,11 +359,13 @@ class FullDatasetTrainer:
             file_paths: List of file paths (required for year-based splitting)
             vhm0_x: Raw input wave heights for baseline metrics (optional)
             actual_wave_heights: Actual wave heights for proper binning (optional)
+            years: Years for year-based splitting (optional)
+            months: Months for year-based splitting (optional)
         """
         self._log_memory_usage("before splitting data")
         
         # Use DataSplitter to perform the split
-        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths, actual_wave_heights)
+        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths, actual_wave_heights, years, months)
         
         # Store splits as instance variables
         self.X_train = split_data['X_train']
