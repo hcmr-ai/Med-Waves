@@ -13,7 +13,6 @@ import joblib
 import numpy as np
 import polars as pl
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNet, Lasso, Ridge
 import xgboost as xgb
 
 from src.commons.memory_monitor import MemoryMonitor
@@ -216,25 +215,6 @@ class FullDatasetTrainer:
                 random_state=self.model_config.get("random_state", 42),
                 n_jobs=self.model_config.get("n_jobs", -1)
             )
-        elif model_type == "elasticnet":
-            self.model = ElasticNet(
-                alpha=self.model_config.get("alpha", 1.0),
-                l1_ratio=self.model_config.get("l1_ratio", 0.5),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
-            )
-        elif model_type == "lasso":
-            self.model = Lasso(
-                alpha=self.model_config.get("alpha", 1.0),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
-            )
-        elif model_type == "ridge":
-            self.model = Ridge(
-                alpha=self.model_config.get("alpha", 1.0),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
-            )
         elif model_type == "eqm":
             # EQM is not a traditional ML model, so we'll handle it differently
             eqm_config = self.model_config.get("eqm", {})
@@ -342,6 +322,10 @@ class FullDatasetTrainer:
     def _calculate_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Dict[str, float]]:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
+
+    def _calculate_region_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, regions: np.ndarray, vhm0_x_test:np.ndarray = None) -> Dict[str, Dict[str, float]]:
+        """Calculate metrics for different sea state bins using MetricsCalculator."""
+        return self.metrics_calculator.calculate_region_sea_bin_metrics(y_true, y_pred, regions, vhm0_x_test)
 
     def split_data(
         self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, 
@@ -575,6 +559,8 @@ class FullDatasetTrainer:
             vhm0_x=self.vhm0_x_train, 
             y_true=self.y_train, 
             y_pred=train_pred)
+        
+        self.vhm0_y_train = vhm0_y_train
 
         train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
         logger.info("Calculating regional training metrics...")
@@ -608,6 +594,7 @@ class FullDatasetTrainer:
                 y_true=self.y_val,
                 y_pred=val_pred,
             )
+            self.vhm0_y_val = vhm0_y_val
 
             val_metrics = evaluate_model(vhm0_pred_val, vhm0_y_val)
 
@@ -704,8 +691,6 @@ class FullDatasetTrainer:
             test_pred = self.model.predict(self.X_test)
         
         if len(self.X_test) > 0:
-            test_pred = self.model.predict(self.X_test)
-
             vhm0_y_test, vhm0_pred_test = reconstruct_vhm0_values(
                 predict_bias=self.predict_bias,
                 predict_bias_log_space=self.predict_bias_log_space,
@@ -713,6 +698,7 @@ class FullDatasetTrainer:
                 y_true=self.y_test,
                 y_pred=test_pred,
             )
+            self.vhm0_y_test = vhm0_y_test
 
             test_metrics = evaluate_model(vhm0_pred_test, vhm0_y_test)
 
@@ -744,6 +730,8 @@ class FullDatasetTrainer:
             baseline_sea_bin_test_metrics = {}
             sea_bin_test_metrics = {}
         
+        self.region_sea_bin_metrics = self._calculate_region_sea_bin_metrics(vhm0_y_test, vhm0_pred_test, self.regions_test, self.vhm0_x_test)
+        
         # Store current test metrics as class attribute
         self.current_test_metrics = test_metrics
         
@@ -762,6 +750,7 @@ class FullDatasetTrainer:
         
         # 🚀 MEMORY OPTIMIZATION: Delete test predictions after plotting
         del test_pred
+        del vhm0_pred_test
         import gc; gc.collect()
         
         logger.info(f"Test evaluation - RMSE: {self.test_metrics.get('rmse', 0):.4f}, MAE: {self.test_metrics.get('mae', 0):.4f}, Pearson: {self.test_metrics.get('pearson', 0):.4f}")

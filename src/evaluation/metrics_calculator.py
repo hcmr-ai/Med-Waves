@@ -190,6 +190,134 @@ class MetricsCalculator:
             metrics['spatial'] = self.calculate_spatial_metrics(y_true, y_pred, coords, grid_resolution)
         
         return metrics
+
+    def calculate_region_sea_bin_metrics(
+            self, 
+            y_true: np.ndarray, 
+            y_pred: np.ndarray,
+            regions: np.ndarray,
+            vhm0_x_test:np.ndarray = None,
+        ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        """
+        Calculate sea-bin metrics for each region.
+        
+        Args:
+            y_true: True target values
+            y_pred: Predicted values
+            regions: Region information for each sample
+        
+        Returns:
+            Dictionary with sea-bin metrics per region
+        """    
+        logger.info("Creating wave height metrics by region plots...")
+
+        region_sea_bin_metrics = {}
+        # Get sea-bin configuration
+        sea_bin_config = self.feature_config.get('sea_bin_metrics', {})
+        if not sea_bin_config.get('enabled', False):
+            logger.warning("Sea-bin metrics not enabled, skipping wave height performance plots")
+            return
+        
+        bins = sea_bin_config.get('bins', [])
+        if not bins:
+            logger.warning("No sea-bin configuration found")
+            return
+        
+        # Calculate model errors
+        model_errors = y_pred - y_true
+        model_abs_errors = np.abs(model_errors)
+        
+        # Calculate baseline errors (if baseline data available)
+        baseline_errors = vhm0_x_test - y_true
+        baseline_abs_errors = np.abs(baseline_errors)
+        
+        # Get unique regions
+        unique_regions = np.unique(regions)
+        
+        # Prepare data for each plot
+        model_error_data_by_region_bin = {}
+        model_abs_error_data_by_region_bin = {}
+        model_rmse_data_by_region_bin = {}
+        model_count_data_by_region_bin = {}
+        
+        baseline_error_data_by_region_bin = {}
+        baseline_abs_error_data_by_region_bin = {}
+        baseline_rmse_data_by_region_bin = {}
+        baseline_count_data_by_region_bin = {}
+        
+        # Track which bins have data across all regions
+        bins_with_data = set()
+        
+        for region in unique_regions:
+            region_mask = regions == region
+            region_model_errors = model_errors[region_mask]
+            region_model_abs_errors = model_abs_errors[region_mask]
+            region_y_true = y_true[region_mask]
+            
+            if baseline_errors is not None:
+                region_baseline_errors = baseline_errors[region_mask]
+                region_baseline_abs_errors = baseline_abs_errors[region_mask]
+            
+            model_error_data_by_region_bin[region] = []
+            model_abs_error_data_by_region_bin[region] = []
+            model_rmse_data_by_region_bin[region] = []
+            model_count_data_by_region_bin[region] = []
+            
+            if baseline_errors is not None:
+                baseline_error_data_by_region_bin[region] = []
+                baseline_abs_error_data_by_region_bin[region] = []
+                baseline_rmse_data_by_region_bin[region] = []
+                baseline_count_data_by_region_bin[region] = []
+            
+            for bin_idx, bin_config in enumerate(bins):
+                bin_min = bin_config["min"]
+                bin_max = bin_config["max"]
+                
+                # Filter data for this wave height bin
+                bin_mask = (region_y_true >= bin_min) & (region_y_true < bin_max)
+                bin_model_errors = region_model_errors[bin_mask]
+                bin_model_abs_errors = region_model_abs_errors[bin_mask]
+                
+                if len(bin_model_errors) > 0:
+                    bins_with_data.add(bin_idx)
+                    model_error_data_by_region_bin[region].append(bin_model_errors)
+                    model_abs_error_data_by_region_bin[region].append(bin_model_abs_errors)
+                    model_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_model_errors**2)))
+                    model_count_data_by_region_bin[region].append(len(bin_model_errors))
+                else:
+                    model_error_data_by_region_bin[region].append([])
+                    model_abs_error_data_by_region_bin[region].append([])
+                    model_rmse_data_by_region_bin[region].append(0)
+                    model_count_data_by_region_bin[region].append(0)
+                
+                if baseline_errors is not None:
+                    bin_baseline_errors = region_baseline_errors[bin_mask]
+                    bin_baseline_abs_errors = region_baseline_abs_errors[bin_mask]
+                    
+                    if len(bin_baseline_errors) > 0:
+                        baseline_error_data_by_region_bin[region].append(bin_baseline_errors)
+                        baseline_abs_error_data_by_region_bin[region].append(bin_baseline_abs_errors)
+                        baseline_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_baseline_errors**2)))
+                        baseline_count_data_by_region_bin[region].append(len(bin_baseline_errors))
+                    else:
+                        baseline_error_data_by_region_bin[region].append([])
+                        baseline_abs_error_data_by_region_bin[region].append([])
+                        baseline_rmse_data_by_region_bin[region].append(0)
+                        baseline_count_data_by_region_bin[region].append(0)
+
+            region_sea_bin_metrics = {
+                "model_error_data_by_region_bin": model_error_data_by_region_bin,
+                "model_abs_error_data_by_region_bin": model_abs_error_data_by_region_bin,
+                "model_rmse_data_by_region_bin": model_rmse_data_by_region_bin,
+                "model_count_data_by_region_bin" : model_count_data_by_region_bin,
+                "baseline_error_data_by_region_bin": baseline_error_data_by_region_bin,
+                "baseline_abs_error_data_by_region_bin": baseline_abs_error_data_by_region_bin,
+                "baseline_rmse_data_by_region_bin": baseline_rmse_data_by_region_bin,
+                "baseline_count_data_by_region_bin" : baseline_count_data_by_region_bin,
+                "bins_with_data": bins_with_data
+            }
+        
+        return region_sea_bin_metrics
     
     def log_metrics_summary(self, metrics: Dict[str, Any], stage: str = "Evaluation"):
         """

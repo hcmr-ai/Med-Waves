@@ -92,9 +92,9 @@ class DiagnosticPlotter:
         logger.info("Creating predictions vs actual plots...")
         # Test Predictions vs Actual
         plt.figure(figsize=(10, 8))
-        plt.scatter(trainer.y_test, test_predictions, alpha=0.5, s=1)
-        plt.plot([trainer.y_test.min(), trainer.y_test.max()], 
-                [trainer.y_test.min(), trainer.y_test.max()], 'r--', lw=2)
+        plt.scatter(trainer.vhm0_y_test, test_predictions, alpha=0.5, s=1)
+        plt.plot([trainer.vhm0_y_test.min(), trainer.vhm0_y_test.max()], 
+                [trainer.vhm0_y_test.min(), trainer.vhm0_y_test.max()], 'r--', lw=2)
         plt.xlabel('Actual (Test)')
         plt.ylabel('Predicted (Test)')
         plt.title('Test Set: Predictions vs Actual')
@@ -104,9 +104,9 @@ class DiagnosticPlotter:
         # Training Predictions vs Actual (for comparison)
         train_predictions = trainer.model.predict(trainer.X_train)
         plt.figure(figsize=(10, 8))
-        plt.scatter(trainer.y_train, train_predictions, alpha=0.5, s=1)
-        plt.plot([trainer.y_train.min(), trainer.y_train.max()], 
-                [trainer.y_train.min(), trainer.y_train.max()], 'r--', lw=2)
+        plt.scatter(trainer.vhm0_y_train, train_predictions, alpha=0.5, s=1)
+        plt.plot([trainer.vhm0_y_train.min(), trainer.vhm0_y_train.max()], 
+                [trainer.vhm0_y_train.min(), trainer.vhm0_y_train.max()], 'r--', lw=2)
         plt.xlabel('Actual (Train)')
         plt.ylabel('Predicted (Train)')
         plt.title('Training Set: Predictions vs Actual')
@@ -174,11 +174,11 @@ class DiagnosticPlotter:
             logger.warning("Metrics not available, calculating SNR from scratch")
             train_predictions = trainer.model.predict(trainer.X_train)
             test_predictions = trainer.model.predict(trainer.X_test)
-            train_residuals = trainer.y_train - train_predictions
-            test_residuals = trainer.y_test - test_predictions
+            train_residuals = trainer.vhm0_y_train - train_predictions
+            test_residuals = trainer.vhm0_y_test - test_predictions
             
-            train_snr = np.var(trainer.y_train) / np.var(train_residuals) if np.var(train_residuals) > 0 else float('inf')
-            test_snr = np.var(trainer.y_test) / np.var(test_residuals) if np.var(test_residuals) > 0 else float('inf')
+            train_snr = np.var(trainer.vhm0_y_train) / np.var(train_residuals) if np.var(train_residuals) > 0 else float('inf')
+            test_snr = np.var(trainer.vhm0_y_test) / np.var(test_residuals) if np.var(test_residuals) > 0 else float('inf')
             train_snr_db = 10 * np.log10(train_snr) if train_snr != float('inf') else float('inf')
             test_snr_db = 10 * np.log10(test_snr) if test_snr != float('inf') else float('inf')
         
@@ -408,7 +408,7 @@ class DiagnosticPlotter:
         
         for i, region in enumerate(unique_regions[:3]):  # Limit to 3 regions for readability
             mask = trainer.regions_test == region
-            region_y_true = trainer.y_test[mask]
+            region_y_true = trainer.vhm0_y_test[mask]
             region_y_pred = test_predictions[mask]
             region_errors = region_y_pred - region_y_true
             
@@ -688,7 +688,7 @@ class DiagnosticPlotter:
             data = {
                 'lat': lat_coords,
                 'lon': lon_coords,
-                'y_true': trainer.y_test,
+                'y_true': trainer.vhm0_y_test,
                 'y_pred': test_predictions
             }
             
@@ -750,7 +750,7 @@ class DiagnosticPlotter:
         logger.info("Creating regional error box plots...")
         
         # Calculate errors
-        errors = test_predictions - trainer.y_test
+        errors = test_predictions - trainer.vhm0_y_test
         abs_errors = np.abs(errors)
         
         # Create figure with subplots
@@ -845,10 +845,6 @@ class DiagnosticPlotter:
     
     def _create_wave_height_performance_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
         """Create performance vs wave height by region plots with baseline comparison."""
-        if not hasattr(trainer, 'regions_test') or trainer.regions_test is None:
-            logger.warning("No regional information available for wave height performance plots")
-            return
-        
         logger.info("Creating wave height performance plots with baseline comparison...")
         
         # Get sea-bin configuration
@@ -861,22 +857,6 @@ class DiagnosticPlotter:
         if not bins:
             logger.warning("No sea-bin configuration found")
             return
-        
-        # Calculate model errors
-        model_errors = test_predictions - trainer.y_test
-        model_abs_errors = np.abs(model_errors)
-        
-        # Calculate baseline errors (if baseline data available)
-        baseline_errors = None
-        baseline_abs_errors = None
-        if hasattr(trainer, 'baseline_sea_bin_test_metrics') and trainer.baseline_sea_bin_test_metrics:
-            # We need to get baseline predictions from somewhere - let's check if we have vhm0_x
-            if hasattr(trainer, 'vhm0_x_test'):
-                baseline_errors = trainer.vhm0_x_test - trainer.y_test
-                baseline_abs_errors = np.abs(baseline_errors)
-            else:
-                logger.warning("Baseline data not available for wave height performance plots")
-        
         # Get unique regions
         unique_regions = np.unique(trainer.regions_test)
         colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
@@ -884,78 +864,21 @@ class DiagnosticPlotter:
         # Create figure with subplots
         fig, axes = plt.subplots(2, 2, figsize=(24, 14))
         fig.suptitle('Performance vs Wave Height by Region (Model vs Baseline)', fontsize=16, fontweight='bold')
-        
-        # Prepare data for each plot
-        model_error_data_by_region_bin = {}
-        model_abs_error_data_by_region_bin = {}
-        model_rmse_data_by_region_bin = {}
-        model_count_data_by_region_bin = {}
-        
-        baseline_error_data_by_region_bin = {}
-        baseline_abs_error_data_by_region_bin = {}
-        baseline_rmse_data_by_region_bin = {}
-        baseline_count_data_by_region_bin = {}
-        
-        # Track which bins have data across all regions
-        bins_with_data = set()
-        
-        for region in unique_regions:
-            region_mask = trainer.regions_test == region
-            region_model_errors = model_errors[region_mask]
-            region_model_abs_errors = model_abs_errors[region_mask]
-            region_y_true = trainer.y_test[region_mask]
-            
-            if baseline_errors is not None:
-                region_baseline_errors = baseline_errors[region_mask]
-                region_baseline_abs_errors = baseline_abs_errors[region_mask]
-            
-            model_error_data_by_region_bin[region] = []
-            model_abs_error_data_by_region_bin[region] = []
-            model_rmse_data_by_region_bin[region] = []
-            model_count_data_by_region_bin[region] = []
-            
-            if baseline_errors is not None:
-                baseline_error_data_by_region_bin[region] = []
-                baseline_abs_error_data_by_region_bin[region] = []
-                baseline_rmse_data_by_region_bin[region] = []
-                baseline_count_data_by_region_bin[region] = []
-            
-            for bin_idx, bin_config in enumerate(bins):
-                bin_min = bin_config["min"]
-                bin_max = bin_config["max"]
-                
-                # Filter data for this wave height bin
-                bin_mask = (region_y_true >= bin_min) & (region_y_true < bin_max)
-                bin_model_errors = region_model_errors[bin_mask]
-                bin_model_abs_errors = region_model_abs_errors[bin_mask]
-                
-                if len(bin_model_errors) > 0:
-                    bins_with_data.add(bin_idx)
-                    model_error_data_by_region_bin[region].append(bin_model_errors)
-                    model_abs_error_data_by_region_bin[region].append(bin_model_abs_errors)
-                    model_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_model_errors**2)))
-                    model_count_data_by_region_bin[region].append(len(bin_model_errors))
-                else:
-                    model_error_data_by_region_bin[region].append([])
-                    model_abs_error_data_by_region_bin[region].append([])
-                    model_rmse_data_by_region_bin[region].append(0)
-                    model_count_data_by_region_bin[region].append(0)
-                
-                if baseline_errors is not None:
-                    bin_baseline_errors = region_baseline_errors[bin_mask]
-                    bin_baseline_abs_errors = region_baseline_abs_errors[bin_mask]
-                    
-                    if len(bin_baseline_errors) > 0:
-                        baseline_error_data_by_region_bin[region].append(bin_baseline_errors)
-                        baseline_abs_error_data_by_region_bin[region].append(bin_baseline_abs_errors)
-                        baseline_rmse_data_by_region_bin[region].append(np.sqrt(np.mean(bin_baseline_errors**2)))
-                        baseline_count_data_by_region_bin[region].append(len(bin_baseline_errors))
-                    else:
-                        baseline_error_data_by_region_bin[region].append([])
-                        baseline_abs_error_data_by_region_bin[region].append([])
-                        baseline_rmse_data_by_region_bin[region].append(0)
-                        baseline_count_data_by_region_bin[region].append(0)
-        
+
+        bins_with_data = trainer.region_sea_bin_metrics.get('bins_with_data')
+        model_error_data_by_region_bin = trainer.region_sea_bin_metrics.get('model_error_data_by_region_bin')
+        model_abs_error_data_by_region_bin = trainer.region_sea_bin_metrics.get('model_abs_error_data_by_region_bin')
+        model_rmse_data_by_region_bin = trainer.region_sea_bin_metrics.get('model_rmse_data_by_region_bin')
+        model_count_data_by_region_bin = trainer.region_sea_bin_metrics.get('model_count_data_by_region_bin')
+        baseline_error_data_by_region_bin = trainer.region_sea_bin_metrics.get('baseline_error_data_by_region_bin')
+        baseline_abs_error_data_by_region_bin = trainer.region_sea_bin_metrics.get('baseline_abs_error_data_by_region_bin')
+        baseline_rmse_data_by_region_bin = trainer.region_sea_bin_metrics.get('baseline_rmse_data_by_region_bin')
+
+        if baseline_error_data_by_region_bin is not None:
+            baseline_errors = True
+        else:
+            baseline_errors = None
+
         # Filter bins to only include those with data
         bins_with_data = sorted(bins_with_data)
         filtered_bins = [bins[i] for i in bins_with_data]
@@ -1302,55 +1225,76 @@ class DiagnosticPlotter:
             
             # Plot 1: Training Data Distribution (Pie Chart)
             ax1 = axes[0, 0]
-            if len(trainer.y_train) > 0:
-                train_bin_counts = self._calculate_bin_counts(trainer.y_train, wave_bins)
-                _, _, _ = ax1.pie(train_bin_counts, labels=bin_names, 
-                                                  autopct='%1.1f%%', colors=colors, startangle=90)
-                ax1.set_title(f'Training Data\n({len(trainer.y_train):,} samples)', fontweight='bold')
+            if len(trainer.vhm0_y_train) > 0:
+                train_bin_counts = self._calculate_bin_counts(trainer.vhm0_y_train, wave_bins)
+                train_bin_counts_non_zero = [count for count in train_bin_counts if count > 0]
+                train_bin_names_non_zero = [name for count, name in zip(train_bin_counts, bin_names) if count > 0]
+                colors_train = colors[:len(train_bin_counts_non_zero)]
+                logger.info(f"Training bin counts: {train_bin_counts_non_zero}")
+                logger.info(f"Training bin names (non-zero): {train_bin_names_non_zero}")
+                logger.info(f"Colors used for training bins: {colors_train}")
+
+                _, _, _ = ax1.pie(train_bin_counts_non_zero, labels=train_bin_names_non_zero, 
+                                                  autopct='%1.1f%%', colors=colors_train, startangle=90)
+                ax1.set_title(f'Training Data\n({len(trainer.vhm0_y_train):,} samples)', fontweight='bold')
             else:
                 ax1.text(0.5, 0.5, 'No training data', ha='center', va='center', transform=ax1.transAxes)
                 ax1.set_title('Training Data', fontweight='bold')
             
             # Plot 2: Validation Data Distribution (Pie Chart)
             ax2 = axes[0, 1]
-            if len(trainer.y_val) > 0:
-                val_bin_counts = self._calculate_bin_counts(trainer.y_val, wave_bins)
-                _, _, _ = ax2.pie(val_bin_counts, labels=bin_names, 
-                                                  autopct='%1.1f%%', colors=colors, startangle=90)
-                ax2.set_title(f'Validation Data\n({len(trainer.y_val):,} samples)', fontweight='bold')
+            if hasattr(trainer, "vhm0_y_val") and len(trainer.vhm0_y_val) > 0:
+                val_bin_counts = self._calculate_bin_counts(trainer.vhm0_y_val, wave_bins)
+                val_bin_counts_non_zero = [count for count in val_bin_counts if count > 0]
+                val_bin_names_non_zero = [name for count, name in zip(val_bin_counts, bin_names) if count > 0]
+                colors_val = colors[:len(val_bin_counts_non_zero)]
+
+                _, _, _ = ax2.pie(val_bin_counts_non_zero, labels=val_bin_names_non_zero, 
+                                                  autopct='%1.1f%%', colors=colors_val, startangle=90)
+                ax2.set_title(f'Validation Data\n({len(trainer.vhm0_y_val):,} samples)', fontweight='bold')
             else:
+                val_bin_counts = []
+                val_bin_counts_non_zero = []
+                val_bin_names_non_zero = []
+                colors_val = []
                 ax2.text(0.5, 0.5, 'No validation data', ha='center', va='center', transform=ax2.transAxes)
                 ax2.set_title('Validation Data', fontweight='bold')
             
             # Plot 3: Test Data Distribution (Pie Chart)
             ax3 = axes[0, 2]
-            if len(trainer.y_test) > 0:
-                test_bin_counts = self._calculate_bin_counts(trainer.y_test, wave_bins)
-                _, _, _ = ax3.pie(test_bin_counts, labels=bin_names, 
-                                                  autopct='%1.1f%%', colors=colors, startangle=90)
-                ax3.set_title(f'Test Data\n({len(trainer.y_test):,} samples)', fontweight='bold')
+            if len(trainer.vhm0_y_test) > 0:
+                test_bin_counts = self._calculate_bin_counts(trainer.vhm0_y_test, wave_bins)
+                test_bin_counts_non_zero = [count for count in test_bin_counts if count > 0]
+                test_bin_names_non_zero = [name for count, name in zip(test_bin_counts, bin_names) if count > 0]
+                colors_test = colors[:len(test_bin_counts_non_zero)]
+                logger.info(f"Test bin counts: {test_bin_counts_non_zero}")
+                logger.info(f"Test bin names (non-zero): {test_bin_names_non_zero}")
+                logger.info(f"Colors used for test bins: {colors_test}")
+
+                _, _, _ = ax3.pie(test_bin_counts_non_zero, labels=test_bin_names_non_zero, 
+                                                  autopct='%1.1f%%', colors=colors_test, startangle=90)
+                ax3.set_title(f'Test Data\n({len(trainer.vhm0_y_test):,} samples)', fontweight='bold')
             else:
+                test_bin_counts = []
+                test_bin_counts_non_zero = []
+                test_bin_names_non_zero = []
+                colors_test = []
                 ax3.text(0.5, 0.5, 'No test data', ha='center', va='center', transform=ax3.transAxes)
                 ax3.set_title('Test Data', fontweight='bold')
             
             # Plot 4: Comparison Bar Chart
             ax4 = axes[1, 0]
             splits = ['Train', 'Val', 'Test']
-            split_data = [trainer.y_train, trainer.y_val, trainer.y_test]
+            split_data = [trainer.vhm0_y_train, trainer.vhm0_y_val if hasattr(trainer, "vhm0_y_val") else [], trainer.vhm0_y_test if hasattr(trainer, "vhm0_y_test") else []]
             
             x = np.arange(len(splits))
             width = 0.15
-            
-            for i, (bin_name, color) in enumerate(zip(bin_names, colors)):
-                counts = []
-                for data in split_data:
-                    if len(data) > 0:
-                        bin_counts = self._calculate_bin_counts(data, wave_bins)
-                        counts.append(bin_counts[i])
-                    else:
-                        counts.append(0)
-                
-                ax4.bar(x + i * width, counts, width, label=bin_name, color=color, alpha=0.8)
+            bin_counts = [train_bin_counts_non_zero, val_bin_counts_non_zero, test_bin_counts_non_zero]
+            bin_names_uniq = list(set(train_bin_names_non_zero + val_bin_names_non_zero + test_bin_names_non_zero))
+
+            for j, bin_name in enumerate(bin_names_uniq):
+                values = [bin_counts[i][j] if bin_counts[i] and len(bin_counts[i]) > j else 0 for i in range(len(splits))]
+                ax4.bar(x + j * width, values, width, label=bin_name, color=colors[j], alpha=0.8)      
             
             ax4.set_title('Wave Height Distribution Comparison', fontweight='bold')
             ax4.set_ylabel('Number of Samples')
@@ -1360,7 +1304,7 @@ class DiagnosticPlotter:
             
             # Plot 5: Sample Size Comparison
             ax5 = axes[1, 1]
-            split_sizes = [len(trainer.y_train), len(trainer.y_val), len(trainer.y_test)]
+            split_sizes = [len(trainer.vhm0_y_train), len(trainer.vhm0_y_val) if hasattr(trainer, "vhm0_y_val") else 0 , len(trainer.vhm0_y_test) if hasattr(trainer, "vhm0_y_test") else 0]
             bars = ax5.bar(splits, split_sizes, color=['#1f77b4', '#ff7f0e', '#2ca02c'], alpha=0.7)
             ax5.set_title('Data Split Sizes', fontweight='bold')
             ax5.set_ylabel('Number of Samples')

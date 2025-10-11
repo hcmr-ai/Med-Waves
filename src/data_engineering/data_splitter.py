@@ -25,7 +25,9 @@ class DataSplitter:
     
     def split_data(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None, 
                    coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
-                   actual_wave_heights: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, months: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                   actual_wave_heights: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, 
+                   months: Optional[np.ndarray] = None
+        ) -> Dict[str, Any]:
         """
         Split data into train/validation/test sets based on configuration.
         
@@ -214,7 +216,7 @@ class DataSplitter:
         # Get configuration
         train_end_year = split_config.get("train_end_year", 2022)
         test_start_year = split_config.get("test_start_year", 2023)
-        val_months = split_config.get("val_months", [10, 11, 12])  # Default: Oct-Dec
+        val_months = split_config.get("val_months", [])
         eval_months = split_config.get("eval_months", list(range(1, 13)))  # Default: All months
         
         self.logger.info(f"Year-based split: Train up to {train_end_year}, Val months {val_months} of {train_end_year}, Test months {eval_months} from {test_start_year}")

@@ -158,7 +158,7 @@ class DataLoader:
             for file_path in tqdm(all_files, desc="Loading files"):
                 file_path, df, success = _load_single_file_worker_for_dataloader((file_path, self.feature_config, self.sampling_manager))
                 
-                if success and df is not None:
+                if success and len(df) > 0 and df is not None:
                     successful_files.append(file_path)
                     all_dataframes.append(df)
                 else:
