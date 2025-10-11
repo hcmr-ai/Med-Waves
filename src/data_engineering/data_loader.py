@@ -67,7 +67,7 @@ def _load_single_file_worker_for_dataloader(args):
                 logger.warning("Lag features enabled but no time column found. Skipping lag features.")
         
         # Apply per-file sampling using SamplingManager
-        if sampling_manager is not None:
+        if sampling_manager is not None and "2023" not in file_path:
             df = sampling_manager.apply_sampling(df)
         
         return (file_path, df, True)

@@ -743,7 +743,7 @@ class FullDatasetTrainer:
         
         # Create diagnostic plots
         if self.diagnostics_config.get("enabled", False):
-            self.diagnostic_plotter.create_diagnostic_plots(self, test_pred)
+            self.diagnostic_plotter.create_diagnostic_plots(self, vhm0_pred_test)
             # Log diagnostic plots to Comet
             plots_dir = Path(self.diagnostics_config.get("plots_save_path", "diagnostic_plots"))
             self.experiment_logger.log_diagnostic_plots(plots_dir)

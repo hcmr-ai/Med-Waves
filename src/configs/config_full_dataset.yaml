@@ -99,7 +99,7 @@ feature_block:
     high: {
         "range": [5.0, 6.0],
         "global_target_percentage": 0.0,
-        "keep_all": false,
+        "keep_all": true,
       } # 20% (6-9m)
     extreme:
       {
@@ -138,7 +138,7 @@ feature_block:
   # Wave height bin weighting (gives different importance to different wave height ranges)
   # This helps the model focus more on extreme wave conditions
   wave_height_weighting:
-    enabled: true # Enable wave height bin weighting
+    enabled: false # Enable wave height bin weighting
     # Weighting formula:
     # w(Hs) = 1                        if Hs ≤ 3
     #       = 1 + 1.0*(Hs-3)           if 3 < Hs ≤ 4      → up to 2

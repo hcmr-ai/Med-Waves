@@ -198,7 +198,7 @@ class PerPointStratification:
         
         # First, identify and preserve ALL extreme waves - they should never be dropped
         # Get extreme threshold from configuration
-        extreme_min = float(self.wave_bins["extreme"][0])
+        extreme_min = float(self.wave_bins["high"][0])
         extreme_waves = df.filter(pl.col("vhm0_y") >= extreme_min)
         non_extreme_waves = df.filter(pl.col("vhm0_y") < extreme_min)
         
