@@ -233,6 +233,8 @@ class ModelPerPointTrainer:
         # Get metadata
         years, months, self.vhm0_x_raw, actual_wave_heights = self.feature_engineer.prepare_metadata(combined_df, target_column)
         
+        del combined_df, data_paths
+        import gc; gc.collect()
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
         
@@ -302,6 +304,9 @@ class ModelPerPointTrainer:
         
         # Use DataSplitter to perform the split
         split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths, actual_wave_heights, years, months, cluster_ids)
+        
+        del X, y, regions, coords, file_paths, years, months, cluster_ids
+        import gc; gc.collect()
         
         # Store splits as instance variables
         self.X_train = split_data['X_train']
@@ -445,33 +450,75 @@ class ModelPerPointTrainer:
         Returns:
             Dictionary containing training results and metrics
         """
+        n_jobs = self.model_config.get("joblib_njobs", 1)
         self._log_memory_usage("before training")
-        logger.info("Starting model training...")
+        logger.info(f"Starting per-cluster training with {n_jobs} parallel workers...")
 
-        y_preds_train = []
-        y_trues_train = []
-        vhm0_x_train = []
-        regions_train = []
-
-        y_preds_test = []
-        y_trues_test = []
-        vhm0_x_test = []
-        regions_test = []
-        
-        # Calculate training metrics
-        for cluster_id in tqdm(self.unique_clusters[:2], desc="Training per cluster"):
-            # Train model for this cluster
+        def _train_and_eval_cluster(cluster_id: int):
+            """Helper: train + evaluate on a single cluster, return metrics + preds."""
+            # Train on cluster
             vhm0_y_train, vhm0_pred_train, vhm0_x_train_cluster, regions_train_cluster = self._train_per_point(cluster_id)
-            y_preds_train.append(vhm0_pred_train)
-            y_trues_train.append(vhm0_y_train)
-            vhm0_x_train.append(vhm0_x_train_cluster)
-            regions_train.append(regions_train_cluster)
-            # Evaluate on test set for this cluster
+            # Evaluate on test set
             vhm0_y_test, vhm0_pred_test, vhm0_x_test_cluster, regions_test_cluster = self.evaluate(cluster_id)
-            y_preds_test.append(vhm0_pred_test)
-            y_trues_test.append(vhm0_y_test)
-            vhm0_x_test.append(vhm0_x_test_cluster)
-            regions_test.append(regions_test_cluster)
+            return {
+                "cluster_id": cluster_id,
+                "train_true": vhm0_y_train,
+                "train_pred": vhm0_pred_train,
+                "train_x": vhm0_x_train_cluster,
+                "train_regions": regions_train_cluster,
+                "test_true": vhm0_y_test,
+                "test_pred": vhm0_pred_test,
+                "test_x": vhm0_x_test_cluster,
+                "test_regions": regions_test_cluster,
+            }
+
+        # y_preds_train = []
+        # y_trues_train = []
+        # vhm0_x_train = []
+        # regions_train = []
+
+        # y_preds_test = []
+        # y_trues_test = []
+        # vhm0_x_test = []
+        # regions_test = []
+        
+        # # Calculate training metrics
+        # for cluster_id in tqdm(self.unique_clusters[:2], desc="Training per cluster"):
+        #     # Train model for this cluster
+        #     vhm0_y_train, vhm0_pred_train, vhm0_x_train_cluster, regions_train_cluster = self._train_per_point(cluster_id)
+        #     y_preds_train.append(vhm0_pred_train)
+        #     y_trues_train.append(vhm0_y_train)
+        #     vhm0_x_train.append(vhm0_x_train_cluster)
+        #     regions_train.append(regions_train_cluster)
+        #     # Evaluate on test set for this cluster
+        #     vhm0_y_test, vhm0_pred_test, vhm0_x_test_cluster, regions_test_cluster = self.evaluate(cluster_id)
+        #     y_preds_test.append(vhm0_pred_test)
+        #     y_trues_test.append(vhm0_y_test)
+        #     vhm0_x_test.append(vhm0_x_test_cluster)
+        #     regions_test.append(regions_test_cluster)
+    
+        from joblib import Parallel, delayed
+
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_train_and_eval_cluster)(cid)
+            for cid in tqdm(self.unique_clusters, desc="Training per cluster")
+        )
+
+        # Aggregate across clusters
+        y_preds_train, y_trues_train, vhm0_x_train, regions_train = [], [], [], []
+        y_preds_test, y_trues_test, vhm0_x_test, regions_test = [], [], [], []
+
+        for r in results:
+            if r["train_true"].size > 0:
+                y_preds_train.append(r["train_pred"])
+                y_trues_train.append(r["train_true"])
+                vhm0_x_train.append(r["train_x"])
+                regions_train.append(r["train_regions"])
+            if r["test_true"].size > 0:
+                y_preds_test.append(r["test_pred"])
+                y_trues_test.append(r["test_true"])
+                vhm0_x_test.append(r["test_x"])
+                regions_test.append(r["test_regions"])
 
 
         vhm0_y_train = np.concatenate(y_trues_train)

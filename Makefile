@@ -10,7 +10,6 @@ install-poetry: ## Install Poetry package manager
 	curl -sSL https://install.python-poetry.org | python3 -
 	@echo "Poetry installed! Add /home/ubuntu/.local/bin to your PATH:"
 	@echo "export PATH=\"/home/ubuntu/.local/bin:\$$PATH\""
-	make setup-path
 setup-path: ## Add Poetry to PATH in current session
 	export PATH="/home/ubuntu/.local/bin:$PATH"
 	source ~/.bashrc

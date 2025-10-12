@@ -175,7 +175,8 @@ class DataLoader:
         self.logger.info(f"Combined dataframe shape: {combined_df.shape}")
         
         # Log total distribution across all files
-        self._log_total_distribution_summary(combined_df, successful_files)
+        # self._log_total_distribution_summary(combined_df, successful_files)
+        del all_dataframes
         
         return combined_df, successful_files
     

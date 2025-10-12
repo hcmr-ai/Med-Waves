@@ -24,6 +24,7 @@ model:
   gamma: 0.5
   max_bin: 256
   verbose: false
+  joblib_njobs: 64
 
 # Data configuration
 data:
@@ -42,7 +43,7 @@ data:
     n_bins: 10 # For stratified splitting
 
   # Data loading
-  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly" # Can be local path or S3 URI (s3://bucket/prefix)
+  data_path: "s3://medwav-dev-data/parquet/hourly/" # Can be local path or S3 URI (s3://bucket/prefix)
   file_pattern: "*.parquet"
   target_column: "vhm0_y"
 
@@ -53,8 +54,8 @@ data:
     max_retries: 10 # Max retries for S3 operations
 
   # Parallel loading configuration
-  parallel_loading: false # Enable parallel file loading for faster data loading
-  max_workers: 8
+  parallel_loading: true # Enable parallel file loading for faster data loading
+  max_workers: 64
 
 # Feature engineering configuration
 feature_block:
@@ -255,7 +256,7 @@ output:
 
   # S3 configuration for saving results
   s3:
-    enabled: false
+    enabled: true
     bucket: "medwav-dev-data"
     prefix: "experiments/full_dataset_experiment" # the code will add experiment_name + timestamp at the end
     region: "eu-central-1"
