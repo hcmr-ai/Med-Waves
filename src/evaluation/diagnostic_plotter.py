@@ -67,7 +67,7 @@ class DiagnosticPlotter:
         if self.diagnostics_config.get("create_regional_error_box_plots", True):
             self._create_regional_error_box_plots(trainer, test_predictions, plots_dir)
         if self.diagnostics_config.get("create_wave_height_performance_plots", True):
-            self._create_wave_height_performance_plots(trainer, test_predictions, plots_dir)
+            self._create_wave_height_performance_plots(trainer, plots_dir)
         # self._create_residual_geographic_analysis(trainer, test_predictions, plots_dir)
         # self._create_condition_performance_plots(trainer, test_predictions, plots_dir)
         
@@ -249,7 +249,7 @@ class DiagnosticPlotter:
         # self._create_regional_predictions_plots(trainer, test_predictions, plots_dir)
         
         # Create regional error analysis plots
-        self._create_regional_error_analysis(trainer, test_predictions, plots_dir)
+        # self._create_regional_error_analysis(trainer, test_predictions, plots_dir)
     
     def _create_regional_comparison_plot(self, trainer: Any, plots_dir: Path) -> None:
         """Create regional performance comparison plot with baseline comparison."""
@@ -414,7 +414,7 @@ class DiagnosticPlotter:
         
         colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
         
-        for i, region in enumerate(unique_regions[:3]):  # Limit to 3 regions for readability
+        for i, region in enumerate(unique_regions):  # Limit to 3 regions for readability
             mask = trainer.regions_test == region
             region_y_true = trainer.vhm0_y_test[mask]
             region_y_pred = test_predictions[mask]
@@ -851,7 +851,7 @@ class DiagnosticPlotter:
         plt.savefig(plots_dir / 'regional_error_box_plots.png', dpi=300, bbox_inches='tight')
         plt.close()
     
-    def _create_wave_height_performance_plots(self, trainer: Any, test_predictions: np.ndarray, plots_dir: Path) -> None:
+    def _create_wave_height_performance_plots(self, trainer: Any, plots_dir: Path) -> None:
         """Create performance vs wave height by region plots with baseline comparison."""
         logger.info("Creating wave height performance plots with baseline comparison...")
         

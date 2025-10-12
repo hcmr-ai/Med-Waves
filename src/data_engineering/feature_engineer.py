@@ -11,7 +11,7 @@ import polars as pl
 import numpy as np
 
 from src.commons.region_mapping import RegionMapper
-
+from src.classifiers.build_cluster_map import GridClusterMapper
 
 class FeatureEngineer:
     """Handles feature engineering operations including geographic context, lag features, and regional classification."""
@@ -22,7 +22,7 @@ class FeatureEngineer:
         self.logger = logging.getLogger(__name__)
         self.feature_names = None
     
-    def prepare_features(self, df: pl.DataFrame, target_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def prepare_features(self, df: pl.DataFrame, target_column: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,  List[str], np.ndarray]:
         """
         Prepare features, target, and regions from dataframe.
         
@@ -64,6 +64,9 @@ class FeatureEngineer:
         
         # Add basin feature if enabled
         df, feature_cols = self._add_basin_feature(df, feature_cols)
+
+        # add cluster_id feature if available
+        df, cluster_ids, unique_clusters_ids, feature_cols = self._add_cluster_id_feature(df, feature_cols)
         
         # Log regional scaling and weighting status
         self._log_regional_config()
@@ -108,7 +111,29 @@ class FeatureEngineer:
         
         self.logger.info(f"Final dataset - X: {X_raw.shape}, y: {y_raw.shape}, regions: {regions_filtered.shape}, coords: {coords_raw.shape}")
         
-        return X_raw, y_raw, regions_filtered, coords_raw
+        return X_raw, y_raw, regions_filtered, coords_raw, unique_clusters_ids, cluster_ids
+
+    def prepare_metadata(self, df: pl.DataFrame, target_column: str) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+        """Prepare metadata such as years, months, raw vhm0_x, and actual wave heights."""
+        # create years and months to use for year splitting
+        years, months = self._create_years_months(df)
+
+        # Extract raw input data for baseline metrics
+        if 'vhm0_x' in df.columns:
+            vhm0_x_raw = df['vhm0_x'].to_numpy()
+        else:
+            self.logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
+            vhm0_x_raw = None
+        
+        # Extract actual wave heights for proper binning (needed when predict_bias=True)
+        if target_column in df.columns:
+            actual_wave_heights = df[target_column].to_numpy()
+        else:
+            self.logger.warning(f"{target_column} column not found in data. Wave height binning may be incorrect.")
+            actual_wave_heights = None
+
+        return years, months, vhm0_x_raw, actual_wave_heights
+
     
     def _add_geographic_context(self, df: pl.DataFrame, feature_cols: List[str]) -> Tuple[pl.DataFrame, List[str]]:
         """Add geographic context features if enabled."""
@@ -238,6 +263,43 @@ class FeatureEngineer:
                 self.logger.info(f"  {basin_name} (ID: {basin_id}): {count:,} samples")
         
         return df, feature_cols
+
+    def _add_cluster_id_feature(self, df: pl.DataFrame, feature_cols: List[str]) -> Tuple[pl.DataFrame, np.ndarray, List[str], List[str]]:
+        add_cluster_ids = self.feature_config.get("cluster_training", {}).get("enabled", False)
+        lat_step = self.feature_config.get("cluster_training", {}).get("lat_step", 1.0)
+        lon_step = self.feature_config.get("cluster_training", {}).get("lon_step", 1.0)
+
+        if not add_cluster_ids:
+            self.logger.info("Cluster ID feature not added to model features")
+            return df, None, [], feature_cols
+
+        mapper = GridClusterMapper(lat_step=lat_step, lon_step=lon_step)
+        cluster_ids = mapper.get_cluster_id(df["lat"].to_numpy(), df["lon"].to_numpy())
+        
+        df = df.with_columns(pl.Series("cluster_id", cluster_ids))
+        feature_cols.append("cluster_id")
+
+        unique_cluster_ids = sorted(set(cluster_ids.tolist()))
+        self.logger.info(f"Added cluster_id feature. Found {len(unique_cluster_ids)} unique clusters")
+
+        return df, cluster_ids, unique_cluster_ids, feature_cols
+
+    def _create_years_months(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Create year and month features from time column."""
+        if "time" in df.columns:
+            self.logger.info("Creating year and month features from 'time' column")
+            df = df.with_columns([
+                pl.col("time").dt.year().alias("year"),
+                pl.col("time").dt.month().alias("month"),
+            ])
+            years = df["time"].dt.year().to_numpy()
+            months = df["time"].dt.month().to_numpy()
+        else:
+            self.logger.warning("'time' column not found - cannot create year and month features")
+            years = None
+            months = None
+        
+        return years, months
     
     def _log_regional_config(self):
         """Log regional scaling and weighting configuration."""

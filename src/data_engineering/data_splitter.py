@@ -26,7 +26,7 @@ class DataSplitter:
     def split_data(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None, 
                    coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
                    actual_wave_heights: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, 
-                   months: Optional[np.ndarray] = None
+                   months: Optional[np.ndarray] = None, cluster_ids: Optional[np.ndarray] = None
         ) -> Dict[str, Any]:
         """
         Split data into train/validation/test sets based on configuration.
@@ -51,7 +51,7 @@ class DataSplitter:
         self.logger.info(f"Splitting data using {split_type} strategy...")
         
         if split_type == "year_based":
-            return self._split_by_years(X, y, regions, coords, file_paths, split_config, actual_wave_heights, years, months)
+            return self._split_by_years(X, y, regions, coords, file_paths, split_config, actual_wave_heights, years, months, cluster_ids)
         elif split_type == "random":
             return self._split_random(X, y, regions, coords, test_size, val_size, random_state, actual_wave_heights)
         elif split_type == "temporal":
@@ -192,7 +192,9 @@ class DataSplitter:
     def _split_by_years(self, X: np.ndarray, y: np.ndarray, regions: Optional[np.ndarray] = None,
                        coords: Optional[np.ndarray] = None, file_paths: Optional[List[str]] = None,
                        split_config: Dict[str, Any] = None, actual_wave_heights: Optional[np.ndarray] = None, 
-                       years: Optional[np.ndarray] = None, months: Optional[np.ndarray] = None) -> Dict[str, Any]:
+                       years: Optional[np.ndarray] = None, months: Optional[np.ndarray] = None, 
+                       cluster_ids: Optional[np.ndarray] = None
+        ) -> Dict[str, Any]:
         """
         Split data by years: 2017-2022 for train/val, 2023 for test.
         
@@ -299,6 +301,9 @@ class DataSplitter:
         X_train = X[train_mask]
         X_val = X[val_mask]
         X_test = X[test_mask]
+        cluster_ids_train = cluster_ids[train_mask] if cluster_ids is not None else None
+        cluster_ids_val = cluster_ids[val_mask] if cluster_ids is not None else None
+        cluster_ids_test = cluster_ids[test_mask] if cluster_ids is not None else None
         
         y_train = y[train_mask]
         y_val = y[val_mask]
@@ -378,6 +383,9 @@ class DataSplitter:
             'train_indices': np.where(train_mask)[0],
             'val_indices': np.where(val_mask)[0],
             'test_indices': np.where(test_mask)[0],
+            'cluster_ids_train': cluster_ids_train, 
+            'cluster_ids_val': cluster_ids_val, 
+            'cluster_ids_test': cluster_ids_test
         }
     
     def get_split_info(self, split_data: Dict[str, Any]) -> Dict[str, Any]:

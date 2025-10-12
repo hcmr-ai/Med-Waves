@@ -314,7 +314,7 @@ class MetricsCalculator:
                 "baseline_abs_error_data_by_region_bin": baseline_abs_error_data_by_region_bin,
                 "baseline_rmse_data_by_region_bin": baseline_rmse_data_by_region_bin,
                 "baseline_count_data_by_region_bin" : baseline_count_data_by_region_bin,
-                "bins_with_data": bins_with_data
+                "bins_with_data": {int(b) for b in bins_with_data}
             }
         
         return region_sea_bin_metrics
