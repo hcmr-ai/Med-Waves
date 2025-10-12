@@ -1,0 +1,262 @@
+# Full Dataset Trainer Configuration
+# This configuration is optimized for loading all data into memory
+# and training models on the complete dataset for research purposes
+
+# Model configuration
+model:
+  type: "xgb" # Options: xgb, rf, elasticnet, lasso, ridge, eqm, delta
+  n_estimators: 2000
+  max_depth: 6
+  learning_rate: 0.08
+  subsample: 0.8
+  colsample_bytree: 0.8
+  reg_alpha: 0.01
+  reg_lambda: 1.0
+  min_child_weight: 2
+  random_state: 42
+  n_jobs: -1
+  early_stopping_rounds: null
+  eval_metric: ["rmse", "mae"]
+  # objective: "reg:squarederror"
+  objective: "reg:pseudohubererror"
+  huber_slope: 0.5
+  tree_method: hist
+  gamma: 0.5
+  max_bin: 256
+  verbose: false
+
+# Data configuration
+data:
+  # Data splitting strategy
+  split:
+    type: "year_based" # Options: random, temporal, stratified, year_based
+    # For year_based split:
+    train_end_year: 2021 # Train data up to this year (exclusive)
+    test_start_year: 2023 # Test data from this year onwards
+    val_months: [] # Months to use for validation
+    eval_months: [3, 6, 10, 11] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
+    # For other split types:
+    test_size: 0.2 # 20% for testing
+    val_size: 0.2 # 20% for validation
+    random_state: 42
+    n_bins: 10 # For stratified splitting
+
+  # Data loading
+  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly" # Can be local path or S3 URI (s3://bucket/prefix)
+  file_pattern: "*.parquet"
+  target_column: "vhm0_y"
+
+  # S3 configuration (only needed if using S3)
+  s3:
+    aws_profile: null # AWS profile name (optional)
+    region: "eu-central-1" # AWS region (optional)
+    max_retries: 10 # Max retries for S3 operations
+
+  # Parallel loading configuration
+  parallel_loading: false # Enable parallel file loading for faster data loading
+  max_workers: 8
+
+# Feature engineering configuration
+feature_block:
+  predict_bias: true # If true, the model will predict the bias instead of the vhm0_y
+  predict_bias_log_space: false # If true, use multiplicative log-space learning: z = log(y_obs) - log(max(vhm0_x, eps))
+  log_space_epsilon: 1e-6 # Small epsilon to prevent log(0) in log-space learning
+  features_to_exclude:
+    - "corrected_VTM02"
+    - "time"
+    - "lat"
+    - "lon"
+    - "VMDR"
+    - "WDIR"
+
+  cluster_training:
+    enabled: true
+    lat_step: 1.0
+    lon_step: 1.0
+
+  # Sampling (optional - can be disabled for full dataset)
+  max_samples_per_file: 1000000 # Set to null to use all data
+  sampling_strategy: null # Options: none, random, per_location, temporal, robust_stratified, per_point_stratified
+  # NOTE: robust_stratified is designed for multi-region balance and will be automatically
+  # switched to single_region_robust when regional_training is enabled
+  samples_per_location: 6
+  samples_per_hour: 100
+  sampling_seed: 42
+
+  # Per-point stratification with global quotas (reduced to 4 bins for better sample density)
+  per_point_stratification_bins:
+    calm: { "range": [0.0, 1.0], "global_target_percentage": 0.0 } # 15% (0-1m)
+    moderate: { "range": [1.0, 3.0], "global_target_percentage": 0.0 } # 25% (1-3m)
+    rough: { "range": [3.0, 5.0], "global_target_percentage": 0.0 } # 30% (3-6m)
+    high: {
+        "range": [5.0, 6.0],
+        "global_target_percentage": 0.0,
+        "keep_all": true,
+      } # 20% (6-9m)
+    extreme:
+      {
+        "range": [6.0, ".inf"],
+        "global_target_percentage": 0.30,
+        "keep_all": true,
+      }
+
+  # Preprocessing
+  scaler: "standard" # Options: standard, robust, minmax, null (no scaling)
+
+  # Regional scaling (applies different scaling to different geographic regions)
+  # NOTE: Requires a valid scaler (standard, robust, minmax) - cannot be used with scaler: "null"
+  regional_scaling:
+    enabled: false # Enable regional scaling for Atlantic vs Mediterranean
+
+  # Geographic context features (adds geographic features to the model)
+  use_geo_context:
+    enabled: false # Enable geographic context features (distances, fetch, bathymetry)
+    include_basin: false # Include basin categorical feature (0=Atlantic, 1=Mediterranean, 2=Eastern Med)
+
+  # Lag features (uses previous time steps of input variables)
+  lag_features:
+    enabled: false # Enable lag features for temporal patterns
+    lags:
+      U10: [6, 12, 24] # Previous degraded wave heights (hours ago)
+      V10: [6, 12, 24]
+  # Regional weighting (gives different importance to different regions during training)
+  regional_weighting:
+    enabled: false # Enable regional weighting for Atlantic vs Mediterranean
+    weights:
+      0: 3.0 # atlantic - 50% more weight for Atlantic data
+      1: 1.0 # mediterranean - Normal weight for Mediterranean data
+      2: 1.0 # eastern_med - Normal weight for Eastern Mediterranean data
+
+  # Wave height bin weighting (gives different importance to different wave height ranges)
+  # This helps the model focus more on extreme wave conditions
+  wave_height_weighting:
+    enabled: false # Enable wave height bin weighting
+    # Weighting formula:
+    # w(Hs) = 1                        if Hs ≤ 3
+    #       = 1 + 1.0*(Hs-3)           if 3 < Hs ≤ 4      → up to 2
+    #       = 2 + 1.5*(Hs-4)           if 4 < Hs ≤ 6      → up to 5
+    #       = 5 + 1.0*(Hs-6)           if 6 < Hs ≤ 8      → up to 7
+    #       = 8                        if Hs > 8
+
+  # Regional training (train only in specific regions)
+  # NOTE: When enabled, robust_stratified sampling will be automatically switched to single_region_robust
+  # which maintains wave height stratification and temporal coverage within the selected region(s)
+  regional_training:
+    enabled: false # Enable regional training (train only in specified regions)
+    training_regions: [0] # Options: [0] (atlantic), [1] (mediterranean), [2] (eastern_med), or combinations
+    # Alternative: use coordinate bounds instead of region names
+    # training_bounds:
+    #   lon_min: -10.0
+    #   lon_max: -5.0
+    #   lat_min: 35.0
+    #   lat_max: 45.0
+
+  # Sea-bin performance metrics (analyze performance across different wave height ranges)
+  sea_bin_metrics:
+    enabled: true # Set to true to enable sea-bin metrics
+    bins:
+      - name: "calm"
+        min: 0.0
+        max: 1.0
+        description: "Calm conditions"
+      - name: "light"
+        min: 1.0
+        max: 2.0
+        description: "Light seas"
+      - name: "moderate"
+        min: 2.0
+        max: 3.0
+        description: "Moderate seas"
+      - name: "rough"
+        min: 3.0
+        max: 4.0
+        description: "Rough seas"
+      - name: "very_rough"
+        min: 4.0
+        max: 5.0
+        description: "Very rough seas"
+      - name: "high"
+        min: 5.0
+        max: 6.0
+        description: "High seas"
+      - name: "very_high"
+        min: 6.0
+        max: 7.0
+        description: "Very high seas"
+      - name: "phenomenal_1"
+        min: 7.0
+        max: 8.0
+        description: "Phenomenal seas"
+      - name: "extreme_1"
+        min: 8.0
+        max: 9.0
+        description: "Extreme seas"
+      - name: "phenomenal_2"
+        min: 9.0
+        max: 10.0
+        description: "Phenomenal seas"
+      - name: "extreme_2"
+        min: 10.0
+        max: 11.0
+        description: "Extreme seas"
+      - name: "phenomenal_3"
+        min: 11.0
+        max: 12.0
+        description: "Phenomenal seas"
+      - name: "extreme_3"
+        min: 12.0
+        max: 13.0
+        description: "Extreme seas"
+      - name: "phenomenal_4"
+        min: 13.0
+        max: 14.0
+        description: "Phenomenal seas"
+      - name: "extreme_4"
+        min: 14.0
+        max: 15.0
+        description: "Extreme seas"
+
+# Evaluation configuration
+evaluation:
+  metrics: ["rmse", "mae", "bias", "pearson"]
+
+# Training diagnostics
+diagnostics:
+  enabled: true
+  plots_save_path: "diagnostic_plots"
+  save_training_history: true
+  create_learning_curves: true
+  create_residual_plots: false
+  create_prediction_plots: false
+  create_regional_analysis: true
+  create_sea_bin_analysis: true
+  create_spatial_maps: true
+  create_regional_error_box_plots: false
+  create_wave_height_performance_plots: true
+  create_data_distribution_plots: true
+
+# Logging configuration
+logging:
+  use_comet: false
+  comet_project: hcmr-ai
+  comet_workspace: ioannisgkinis
+
+# Memory monitoring configuration
+memory_monitoring:
+  enabled: true
+  log_detailed_memory: true
+  log_system_memory: true
+  log_to_comet: true
+
+# Output configuration
+output:
+  model_save_path: "trained_models"
+  experiment_name: "model_per_point_no_early_stopping_bias_huber"
+
+  # S3 configuration for saving results
+  s3:
+    enabled: false
+    bucket: "medwav-dev-data"
+    prefix: "experiments/full_dataset_experiment" # the code will add experiment_name + timestamp at the end
+    region: "eu-central-1"
+    aws_profile: null # Use default profile if null

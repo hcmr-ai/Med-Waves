@@ -46,6 +46,9 @@ shell: ## Activate Poetry shell
 train-ml: ## Run incremental training
 	poetry run python src/pipelines/training/train_full_dataset.py --config src/configs/config_full_dataset.yaml --output-dir results_test
 
+train-per-point: ## Run incremental training
+	poetry run python src/pipelines/training/train_model_per_point.py --config src/configs/config_model_per_point.yaml --output-dir results_test
+
 run-train-evaluator: ## Run training evaluator
 	poetry run python -m src.pipelines.training.train_evaluator
 
