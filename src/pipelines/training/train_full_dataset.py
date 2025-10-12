@@ -134,7 +134,7 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     
     # Load data
     logger.info("Loading data...")
-    X, y, regions, coords, successful_files, actual_wave_heights, years, months = trainer.load_data(data_files, config["data"]["target_column"])
+    X, y, regions, coords, successful_files, actual_wave_heights, years, months, _ = trainer.load_data(data_files, config["data"]["target_column"])
     x_shape = X.shape
     y_shape = y.shape
     

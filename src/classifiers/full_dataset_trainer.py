@@ -256,33 +256,10 @@ class FullDatasetTrainer:
         combined_df, successful_files = self.data_loader.load_data(data_paths)
         
         # Prepare features using FeatureEngineer
-        X, y, regions, coords = self.feature_engineer.prepare_features(combined_df, target_column)
+        X, y, regions, coords, self.unique_clusters, cluster_ids = self.feature_engineer.prepare_features(combined_df, target_column)
 
-        if "time" in combined_df.columns:
-            combined_df = combined_df.with_columns(
-                pl.col("time").cast(pl.Datetime).alias("time")
-            )
-
-            years = combined_df["time"].dt.year().to_numpy()
-            months = combined_df["time"].dt.month().to_numpy()
-        else:
-            logger.warning("No 'time' column in combined_df — year-based splitting may not work.")
-            years, months = None, None
-
-        
-        # Extract raw input data for baseline metrics
-        if 'vhm0_x' in combined_df.columns:
-            self.vhm0_x_raw = combined_df['vhm0_x'].to_numpy()
-        else:
-            logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
-            self.vhm0_x_raw = None
-        
-        # Extract actual wave heights for proper binning (needed when predict_bias=True)
-        if target_column in combined_df.columns:
-            actual_wave_heights = combined_df[target_column].to_numpy()
-        else:
-            logger.warning(f"{target_column} column not found in data. Wave height binning may be incorrect.")
-            actual_wave_heights = None
+        # Get metadata
+        years, months, self.vhm0_x_raw, actual_wave_heights = self.feature_engineer.prepare_metadata(combined_df, target_column)
         
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
@@ -292,7 +269,7 @@ class FullDatasetTrainer:
         self.experiment_logger.log_dataset_info(dataset_info)
         
         self._log_memory_usage("after loading data")
-        return X, y, regions, coords, successful_files, actual_wave_heights, years, months
+        return X, y, regions, coords, successful_files, actual_wave_heights, years, months, cluster_ids
     
     def _prepare_dataset_info(self, X: np.ndarray, y: np.ndarray, successful_files: List[str]) -> Dict[str, Any]:
         """Prepare dataset information for logging."""
@@ -557,7 +534,7 @@ class FullDatasetTrainer:
             predict_bias=self.predict_bias, 
             predict_bias_log_space=self.predict_bias_log_space, 
             vhm0_x=self.vhm0_x_train, 
-            y_true=self.y_train, 
+            y_true=self.y_train,
             y_pred=train_pred)
         
         self.vhm0_y_train = vhm0_y_train

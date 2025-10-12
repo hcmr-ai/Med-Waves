@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Tuple, Union
 from tqdm import tqdm
 import joblib
 import numpy as np
-import polars as pl
 import xgboost as xgb
 
 from src.commons.memory_monitor import MemoryMonitor
@@ -488,40 +487,10 @@ class ModelPerPointTrainer:
         self.vhm0_y_test = vhm0_y_test
 
         train_metrics = self._train_metrics_and_plots(vhm0_y_train, vhm0_pred_train, vhm0_x_train_cluster, regions_train_cluster)
-
-        # train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
-        # logger.info("Calculating regional training metrics...")
-        # regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, vhm0_pred_train, regions_train_cluster)
-        # if self.vhm0_x_train is not None:
-        #     logger.info("Calculating baseline regional training metrics...")
-        #     baseline_regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, vhm0_x_train_cluster, regions_train_cluster)
-        #     logger.info("Calculating baseline sea-bin training metrics...")
-        #     baseline_sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_x_train_cluster)
-        # else:
-        #     logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
-        #     baseline_regional_train_metrics = {}
-        #     baseline_sea_bin_train_metrics = {}
-        # logger.info("Calculating sea-bin model training metrics...")
-        # sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
-        # self.sea_bin_train_metrics = sea_bin_train_metrics
-        # self.baseline_sea_bin_train_metrics = baseline_sea_bin_train_metrics
         
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del y_preds_train, y_trues_train, vhm0_y_train, vhm0_pred_train, vhm0_x_train, regions_train
         import gc; gc.collect()
-
-        # val_metrics = {'rmse': 0.0, 'mae': 0.0, 'bias': 0.0, 'pearson': 0.0, 'snr': 0.0, 'snr_db': 0.0}
-        # regional_val_metrics = {}
-        
-        # # Store current metrics as class attributes
-        # self.current_train_metrics = train_metrics
-        # self.current_val_metrics = val_metrics
-        
-        # self.training_history['train_metrics'].append(train_metrics)
-        # self.training_history['val_metrics'].append(val_metrics)
-        
-        # logger.info(f"Training completed - Train RMSE: {self.train_metrics.get('rmse', 0):.4f}, Val RMSE: {self.val_metrics.get('rmse', 0):.4f}")
-        # logger.info(f"Training SNR - Train: {self.train_metrics.get('snr', 0):.1f} ({self.train_metrics.get('snr_db', 0):.1f} dB), Val: {self.val_metrics.get('snr', 0):.1f} ({self.val_metrics.get('snr_db', 0):.1f} dB)")
 
         # # Log training results to Comet
         # self.experiment_logger.log_training_results(train_metrics, val_metrics)
@@ -531,18 +500,6 @@ class ModelPerPointTrainer:
         )
         del y_trues_test, y_preds_test, vhm0_x_test, regions_test
         import gc; gc.collect()
-
-        # return {
-        #     'train_metrics': self.train_metrics,
-        #     'regional_train_metrics': regional_train_metrics,
-        #     'baseline_regional_train_metrics': baseline_regional_train_metrics,
-        #     'sea_bin_train_metrics': self.sea_bin_train_metrics,
-        #     'val_metrics': val_metrics,
-        #     'regional_val_metrics': regional_val_metrics,
-        #     'baseline_regional_val_metrics': {},
-        #     'sea_bin_val_metrics': {},
-        #     'training_history': self.training_history
-        # }, evaluation_results
     
         return train_metrics, evaluation_results
 

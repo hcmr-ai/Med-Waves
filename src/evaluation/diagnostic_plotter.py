@@ -105,8 +105,8 @@ class DiagnosticPlotter:
         # Training Predictions vs Actual (for comparison)
         train_predictions = trainer.model.predict(trainer.X_train)
         _, train_predictions = reconstruct_vhm0_values(
-            predict_bias=self.config.get("features_block", {}).get("predict_bias", {}), 
-            predict_bias_log_space=self.config.get("features_block", {}).get("predict_bias_log_space", {}), 
+            predict_bias=self.config.get("feature_block", {}).get("predict_bias", {}), 
+            predict_bias_log_space=self.config.get("feature_block", {}).get("predict_bias_log_space", {}), 
             vhm0_x=trainer.vhm0_x_train, 
             y_true=trainer.y_train, 
             y_pred=train_predictions)
