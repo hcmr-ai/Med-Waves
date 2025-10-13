@@ -5,24 +5,26 @@ Loads one Parquet file with grid points, assigns each to a cluster,
 and saves a mapping file (lat, lon, cluster_id).
 """
 
-import polars as pl
-import numpy as np
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-from matplotlib.patches import Rectangle
-import matplotlib.colors as mcolors
 import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+from matplotlib.patches import Rectangle
 
-def plot_cluster_rectangles(df: pl.DataFrame, lat_step=0.5, lon_step=0.5, plot_labels=False, plot_points=False):
+
+def plot_cluster_rectangles(
+    df: pl.DataFrame, lat_step=0.5, lon_step=0.5, plot_labels=False, plot_points=False
+):
     """
     Plot rectangular grid cells that actually appear in the dataset.
     Each cell is filled with a unique color and labeled with its cluster_id.
     """
-    fig = plt.figure(figsize=(14, 8))
+    _ = plt.figure(figsize=(14, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.set_title("Rectangular Cluster Grid", fontsize=14, fontweight="bold")
 
@@ -52,34 +54,53 @@ def plot_cluster_rectangles(df: pl.DataFrame, lat_step=0.5, lon_step=0.5, plot_l
         color = cmap(idx % cmap.N)
 
         # Draw rectangle
-        rect = Rectangle((lon0, lat0), lon_step, lat_step,
-                         linewidth=0.3, edgecolor="k", facecolor=color,
-                         alpha=0.5, transform=ccrs.PlateCarree())
+        rect = Rectangle(
+            (lon0, lat0),
+            lon_step,
+            lat_step,
+            linewidth=0.3,
+            edgecolor="k",
+            facecolor=color,
+            alpha=0.5,
+            transform=ccrs.PlateCarree(),
+        )
         ax.add_patch(rect)
 
         # add label
         if plot_labels:
-            ax.text(lon0 + lon_step/2, lat0 + lat_step/2,
-                    str(cluster_id), ha="center", va="center", fontsize=5,
-                    transform=ccrs.PlateCarree())
+            ax.text(
+                lon0 + lon_step / 2,
+                lat0 + lat_step / 2,
+                str(cluster_id),
+                ha="center",
+                va="center",
+                fontsize=5,
+                transform=ccrs.PlateCarree(),
+            )
 
         # Extract actual points belonging to this cluster
         if plot_points:
             cluster_points = df.filter(df["cluster_id"] == cluster_id)
-            ax.scatter(cluster_points["lon"], cluster_points["lat"],
-                    color="black", s=2, transform=ccrs.PlateCarree(), zorder=3)
+            ax.scatter(
+                cluster_points["lon"],
+                cluster_points["lat"],
+                color="black",
+                s=2,
+                transform=ccrs.PlateCarree(),
+                zorder=3,
+            )
 
     plt.tight_layout()
     plt.savefig("rectangular_clusters.png", dpi=300)
 
+
 class GridClusterMapper:
     def __init__(self, lat_step=1.0, lon_step=1.0):
-
         self.lat_step = lat_step
         self.lon_step = lon_step
         self.n_lat_bins = int(180 / self.lat_step)
         self.n_lon_bins = int(360 / self.lon_step)
-    
+
     def get_cluster_id(self, lat, lon):
         """
         Assign a cluster ID based on lat/lon grid cell using polars expressions.
@@ -96,10 +117,12 @@ class GridClusterMapper:
         """
         cluster_ids = self.get_cluster_id(df[lat_col], df[lon_col])
         norm_ids = self._normalize_cluster_ids(cluster_ids)
-        df_out = df.with_columns([
-            pl.Series("cluster_id", cluster_ids),
-            pl.Series("cluster_plot_id", norm_ids)
-        ])
+        df_out = df.with_columns(
+            [
+                pl.Series("cluster_id", cluster_ids),
+                pl.Series("cluster_plot_id", norm_ids),
+            ]
+        )
         # Rename columns and select only the required ones
         df_out = df_out.rename({lat_col: "lat", lon_col: "lon"})
         return df_out.select(["lat", "lon", "cluster_id", "cluster_plot_id"])
@@ -112,8 +135,7 @@ class GridClusterMapper:
         return inv
 
 
-def build_cluster_map(input_file: Path, output_file: Path,
-                      lat_step=1.0, lon_step=1.0):
+def build_cluster_map(input_file: Path, output_file: Path, lat_step=1.0, lon_step=1.0):
     print(f"📂 Loading {input_file} ...")
     df = pl.read_parquet(input_file)
     df = df.drop_nulls()
@@ -127,9 +149,7 @@ def build_cluster_map(input_file: Path, output_file: Path,
 
     # Assign clusters
     mapper = GridClusterMapper(lat_step=lat_step, lon_step=lon_step)
-    df_clusters = mapper.build_map(
-        df, lat_col="latitude", lon_col="longitude"
-    )
+    df_clusters = mapper.build_map(df, lat_col="latitude", lon_col="longitude")
 
     # Save mapping
     df_clusters.write_parquet(output_file)
@@ -137,18 +157,37 @@ def build_cluster_map(input_file: Path, output_file: Path,
     print(df_clusters.select("lat", "lon", "cluster_id").head(5))
     print("Unique clusters:", len(df_clusters["cluster_plot_id"].unique().to_numpy()))
     print("Unique clusters (raw):", len(df_clusters))
-    plot_cluster_rectangles(df_clusters, lat_step=lat_step, lon_step=lon_step, plot_points=False, plot_labels=False)
+    plot_cluster_rectangles(
+        df_clusters,
+        lat_step=lat_step,
+        lon_step=lon_step,
+        plot_points=False,
+        plot_labels=False,
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build Lat/Lon → Cluster map")
-    parser.add_argument("--input", type=Path, default=Path("~/Documents/projects/hcmr/data/hourly/WAVEAN20210101.parquet"),
-                        help="Path to input Parquet file")
-    parser.add_argument("--output", type=Path, default=Path("latlon_to_cluster.parquet"),
-                        help="Path to output mapping file")
-    parser.add_argument("--lat_step", type=float, default=0.5,
-                        help="Latitude bin size (deg)")
-    parser.add_argument("--lon_step", type=float, default=0.5,
-                        help="Longitude bin size (deg)")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=Path("~/Documents/projects/hcmr/data/hourly/WAVEAN20210101.parquet"),
+        help="Path to input Parquet file",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("latlon_to_cluster.parquet"),
+        help="Path to output mapping file",
+    )
+    parser.add_argument(
+        "--lat_step", type=float, default=0.5, help="Latitude bin size (deg)"
+    )
+    parser.add_argument(
+        "--lon_step", type=float, default=0.5, help="Longitude bin size (deg)"
+    )
     args = parser.parse_args()
 
-    build_cluster_map(args.input, args.output, lat_step=args.lat_step, lon_step=args.lon_step)
+    build_cluster_map(
+        args.input, args.output, lat_step=args.lat_step, lon_step=args.lon_step
+    )
