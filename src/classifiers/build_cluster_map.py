@@ -82,11 +82,10 @@ class GridClusterMapper:
     
     def get_cluster_id(self, lat, lon):
         """
-        Assign a cluster ID based on lat/lon grid cell.
+        Assign a cluster ID based on lat/lon grid cell using polars expressions.
         """
-        lat_idx = np.floor((np.asarray(lat) + 90.0) / self.lat_step).astype(int)
-        lon_idx = np.floor((np.asarray(lon) + 180.0) / self.lon_step).astype(int)
-
+        lat_idx = ((lat + 90.0) / self.lat_step).floor().cast(pl.Int32)
+        lon_idx = ((lon + 180.0) / self.lon_step).floor().cast(pl.Int32)
         cluster_id = lat_idx * self.n_lon_bins + lon_idx
         return cluster_id
 

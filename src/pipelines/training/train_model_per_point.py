@@ -143,7 +143,7 @@ def run_experiment(config: Dict[str, Any], data_files: List[str], save_path: str
     trainer.split_data(X, y, regions, coords, successful_files, trainer.vhm0_x_raw, actual_wave_heights, years, months, cluster_ids)
     
     # 🚀 MEMORY OPTIMIZATION: Delete original data after splitting
-    del X, y, regions, coords, successful_files, actual_wave_heights, years, months, cluster_ids
+    del X, y, regions, coords, actual_wave_heights, years, months, cluster_ids
     import gc; gc.collect()
     logger.info("Freed original data after splitting")
     

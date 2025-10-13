@@ -1238,9 +1238,6 @@ class DiagnosticPlotter:
                 train_bin_counts_non_zero = [count for count in train_bin_counts if count > 0]
                 train_bin_names_non_zero = [name for count, name in zip(train_bin_counts, bin_names) if count > 0]
                 colors_train = colors[:len(train_bin_counts_non_zero)]
-                logger.info(f"Training bin counts: {train_bin_counts_non_zero}")
-                logger.info(f"Training bin names (non-zero): {train_bin_names_non_zero}")
-                logger.info(f"Colors used for training bins: {colors_train}")
 
                 _, _, _ = ax1.pie(train_bin_counts_non_zero, labels=train_bin_names_non_zero, 
                                                   autopct='%1.1f%%', colors=colors_train, startangle=90)
@@ -1275,9 +1272,6 @@ class DiagnosticPlotter:
                 test_bin_counts_non_zero = [count for count in test_bin_counts if count > 0]
                 test_bin_names_non_zero = [name for count, name in zip(test_bin_counts, bin_names) if count > 0]
                 colors_test = colors[:len(test_bin_counts_non_zero)]
-                logger.info(f"Test bin counts: {test_bin_counts_non_zero}")
-                logger.info(f"Test bin names (non-zero): {test_bin_names_non_zero}")
-                logger.info(f"Colors used for test bins: {colors_test}")
 
                 _, _, _ = ax3.pie(test_bin_counts_non_zero, labels=test_bin_names_non_zero, 
                                                   autopct='%1.1f%%', colors=colors_test, startangle=90)
