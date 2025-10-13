@@ -150,6 +150,34 @@ class ModelPerPointTrainer:
         # Log initial memory info
         self.memory_monitor.log_comprehensive_memory("initialization")
 
+    def __getstate__(self):
+        """Remove unpicklable objects before sending to workers."""
+        state = self.__dict__.copy()
+
+        # Remove all unpicklable objects
+        unpicklable_attrs = [
+            'experiment_logger',
+            'memory_monitor',
+            'diagnostic_plotter',
+            's3_results_saver',
+            'data_loader',
+            'feature_engineer',
+            'metrics_calculator',
+            'data_splitter',
+            'sample_weighting',
+            'sampling_manager',
+        ]
+
+        for attr in unpicklable_attrs:
+            if attr in state:
+                state[attr] = None
+
+        return state
+
+    def __setstate__(self, state):
+        """Restore state after unpickling in worker."""
+        self.__dict__.update(state)
+
     def _log_memory_usage(self, stage: str):
         """Log current memory usage for monitoring."""
         self.memory_monitor.log_memory_usage(stage)
@@ -596,7 +624,8 @@ class ModelPerPointTrainer:
         gc.collect()
 
         self.save_model(
-            f"{self.config['output']['model_save_path']}/cluster_{cluster_id}"
+            f"{self.config['output']['model_save_path']}/cluster_{cluster_id}",
+            False
         )
 
         return (
@@ -965,7 +994,7 @@ class ModelPerPointTrainer:
             "sea_bin_test_metrics": self.sea_bin_test_metrics,
         }
 
-    def save_model(self, save_path: str) -> None:
+    def save_model(self, save_path: str, log_to_comet: bool = True) -> None:
         """Save the trained model and preprocessing components."""
         save_path = Path(save_path)
         save_path.mkdir(parents=True, exist_ok=True)
@@ -997,7 +1026,8 @@ class ModelPerPointTrainer:
         logger.info(f"Model and components saved to {save_path}")
 
         # Log model artifacts to Comet
-        self.experiment_logger.log_model_artifacts(save_path)
+        if log_to_comet:
+            self.experiment_logger.log_model_artifacts(save_path)
 
     def load_model(self, load_path: str) -> None:
         """Load a trained model and preprocessing components."""
