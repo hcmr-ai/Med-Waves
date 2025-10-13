@@ -102,7 +102,7 @@ class ModelPerPointTrainer:
         self.current_test_metrics = None
         
         # Initialize modular components
-        self.sampling_manager = SamplingManager(config) if config.get("features_block", {}).get("sampling_strategy", None) else None
+        self.sampling_manager = SamplingManager(config) if config.get("feature_block", {}).get("sampling_strategy", None) else None
         logger.info(f"Sampling Manager: {self.sampling_manager}")
         self.data_loader = DataLoader(config, self.sampling_manager)
         self.feature_engineer = FeatureEngineer(config)
@@ -450,6 +450,8 @@ class ModelPerPointTrainer:
         Returns:
             Dictionary containing training results and metrics
         """
+        print(list(locals().keys()))
+        print(list(globals().keys()))   
         n_jobs = self.model_config.get("joblib_njobs", 1)
         self._log_memory_usage("before training")
         logger.info(f"Starting per-cluster training with {n_jobs} parallel workers...")
@@ -499,7 +501,7 @@ class ModelPerPointTrainer:
     
         from joblib import Parallel, delayed
 
-        results = Parallel(n_jobs=n_jobs, backend="loky")(
+        results = Parallel(n_jobs=n_jobs, backend="threading")(
             delayed(_train_and_eval_cluster)(cid)
             for cid in tqdm(self.unique_clusters, desc="Training per cluster")
         )

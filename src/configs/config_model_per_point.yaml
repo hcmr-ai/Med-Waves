@@ -32,7 +32,7 @@ data:
   split:
     type: "year_based" # Options: random, temporal, stratified, year_based
     # For year_based split:
-    train_end_year: 2021 # Train data up to this year (exclusive)
+    train_end_year: 2022 # Train data up to this year (exclusive)
     test_start_year: 2023 # Test data from this year onwards
     val_months: [] # Months to use for validation
     eval_months: [3, 6, 10, 11] # Months to use for evaluation (December 2023) - only these months will be loaded from S3
@@ -76,8 +76,8 @@ feature_block:
     lon_step: 1.0
 
   # Sampling (optional - can be disabled for full dataset)
-  max_samples_per_file: 1000000 # Set to null to use all data
-  sampling_strategy: null # Options: none, random, per_location, temporal, robust_stratified, per_point_stratified
+  max_samples_per_file: 500000 # Set to null to use all data
+  sampling_strategy: per_point_stratified # Options: none, random, per_location, temporal, robust_stratified, per_point_stratified
   # NOTE: robust_stratified is designed for multi-region balance and will be automatically
   # switched to single_region_robust when regional_training is enabled
   samples_per_location: 6
@@ -86,17 +86,17 @@ feature_block:
 
   # Per-point stratification with global quotas (reduced to 4 bins for better sample density)
   per_point_stratification_bins:
-    calm: { "range": [0.0, 1.0], "global_target_percentage": 0.0 } # 15% (0-1m)
-    moderate: { "range": [1.0, 3.0], "global_target_percentage": 0.0 } # 25% (1-3m)
-    rough: { "range": [3.0, 5.0], "global_target_percentage": 0.0 } # 30% (3-6m)
+    calm: { "range": [0.0, 1.0], "global_target_percentage": 0.20 } # 15% (0-1m)
+    moderate: { "range": [1.0, 3.0], "global_target_percentage": 0.25 } # 25% (1-3m)
+    rough: { "range": [3.0, 6.0], "global_target_percentage": 0.30 } # 30% (3-6m)
     high: {
-        "range": [5.0, 6.0],
+        "range": [6.0, 9.0],
         "global_target_percentage": 0.0,
         "keep_all": true,
       } # 20% (6-9m)
     extreme:
       {
-        "range": [6.0, ".inf"],
+        "range": [9.0, ".inf"],
         "global_target_percentage": 0.30,
         "keep_all": true,
       }
