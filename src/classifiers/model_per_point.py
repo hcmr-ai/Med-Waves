@@ -13,6 +13,8 @@ import joblib
 import numpy as np
 import polars as pl
 import xgboost as xgb
+from dask import compute
+from dask.distributed import Client
 from tqdm import tqdm
 
 from src.classifiers.delta_corrector import DeltaCorrector
@@ -668,18 +670,24 @@ class ModelPerPointTrainer:
         self._log_memory_usage("before training")
         logger.info(f"Starting per-cluster training with {n_jobs} parallel workers...")
 
-        from joblib import Parallel, delayed
+        # from joblib import Parallel, delayed
 
-        results = Parallel(
-            n_jobs=n_jobs,
-            backend="loky",  # loky, multiprocessing
-            verbose=10,
-            batch_size="auto",
-            pre_dispatch="2*n_jobs",
-        )(
-            delayed(self._train_and_eval_cluster)(cid)
-            for cid in tqdm(self.unique_clusters, desc="Training per cluster")
-        )
+        # results = Parallel(
+        #     n_jobs=n_jobs,
+        #     backend="loky",  # loky, multiprocessing
+        #     verbose=10,
+        #     batch_size="auto",
+        #     pre_dispatch="2*n_jobs",
+        # )(
+        #     delayed(self._train_and_eval_cluster)(cid)
+        #     for cid in tqdm(self.unique_clusters, desc="Training per cluster")
+        # )
+        client = Client(n_workers=n_jobs, threads_per_worker=1, memory_limit="8GB")
+        logger.info(f"Dask dashboard available at: {client.dashboard_link}")
+        # Build computation graph
+        # tasks = [self.train_cluster(cid) for cid in self.unique_clusters]
+        tasks = [self.train_cluster(cid) for cid in tqdm(self.unique_clusters, desc="Building tasks")]
+        results = compute(*tasks)
 
         # Aggregate across clusters
         y_preds_train, y_trues_train, vhm0_x_train, regions_train = [], [], [], []
