@@ -238,7 +238,7 @@ diagnostics:
 
 # Logging configuration
 logging:
-  use_comet: false
+  use_comet: true
   comet_project: hcmr-ai
   comet_workspace: ioannisgkinis
 

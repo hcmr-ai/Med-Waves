@@ -13,8 +13,7 @@ import joblib
 import numpy as np
 import polars as pl
 import xgboost as xgb
-from dask import compute
-from dask.distributed import Client
+from dask.distributed import Client, as_completed
 from tqdm import tqdm
 
 from src.classifiers.delta_corrector import DeltaCorrector
@@ -36,6 +35,117 @@ from src.classifiers.helpers import reconstruct_vhm0_values
 from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
 from src.evaluation.metrics import evaluate_model
+
+
+# Add this at module level (outside the class)
+def train_single_cluster_dask(
+    cluster_id: int,
+    scattered_data: dict,
+    model_config: dict,
+    predict_bias: bool,
+    predict_bias_log_space: bool,
+    output_path: str
+):
+    """
+    Train a single cluster using scattered Dask data.
+    This function is picklable and doesn't require the entire class.
+    """
+    import xgboost as xgb
+
+    from src.classifiers.helpers import reconstruct_vhm0_values
+
+    # ✅ Extract data from scattered references
+    X_train = scattered_data['X_train']
+    X_val = scattered_data['X_val']
+    X_test = scattered_data['X_test']
+    y_train = scattered_data['y_train']
+    y_val = scattered_data['y_val']
+    y_test = scattered_data['y_test']
+    cluster_ids_train = scattered_data['cluster_ids_train']
+    cluster_ids_val = scattered_data['cluster_ids_val']
+    cluster_ids_test = scattered_data['cluster_ids_test']
+    regions_train = scattered_data['regions_train']
+    regions_test = scattered_data['regions_test']
+    vhm0_x_train = scattered_data['vhm0_x_train']
+    vhm0_x_test = scattered_data['vhm0_x_test']
+    sample_weights = scattered_data['sample_weights']
+
+    # Filter for this cluster
+    mask_train = cluster_ids_train == cluster_id
+    mask_val = (cluster_ids_val == cluster_id) if cluster_ids_val is not None else None
+    mask_test = cluster_ids_test == cluster_id
+
+    X_train_cluster = X_train[mask_train]
+    y_train_cluster = y_train.to_numpy()[mask_train].ravel()
+    regions_train_cluster = regions_train[mask_train]
+    vhm0_x_train_cluster = vhm0_x_train[mask_train] if vhm0_x_train is not None else None
+    sample_weights_cluster = sample_weights[mask_train] if sample_weights is not None else None
+
+    X_val_cluster = X_val[mask_val] if mask_val is not None and len(X_val) > 0 else None
+    y_val_cluster = y_val[mask_val] if mask_val is not None and len(y_val) > 0 else None
+
+    X_test_cluster = X_test[mask_test]
+    y_test_cluster = y_test.to_numpy()[mask_test].ravel()
+    regions_test_cluster = regions_test[mask_test]
+    vhm0_x_test_cluster = vhm0_x_test[mask_test] if vhm0_x_test is not None else None
+
+    # Initialize and train model
+    model = xgb.XGBRegressor(
+        n_estimators=model_config.get("n_estimators", 1000),
+        max_depth=model_config.get("max_depth", 6),
+        learning_rate=model_config.get("learning_rate", 0.1),
+        subsample=model_config.get("subsample", 0.8),
+        colsample_bytree=model_config.get("colsample_bytree", 0.8),
+        reg_alpha=model_config.get("reg_alpha", 0.01),
+        reg_lambda=model_config.get("reg_lambda", 1.0),
+        tree_method=model_config.get("tree_method", "hist"),
+        max_bin=model_config.get("max_bin", 256),
+        n_jobs=1,  # Each worker uses 1 core
+        random_state=42,
+        early_stopping_rounds=model_config.get("early_stopping_rounds", 50),
+    )
+
+    if X_val_cluster is not None and len(X_val_cluster) > 0:
+        model.fit(
+            X_train_cluster, y_train_cluster,
+            sample_weight=sample_weights_cluster,
+            eval_set=[(X_train_cluster, y_train_cluster), (X_val_cluster, y_val_cluster)],
+            verbose=False
+        )
+    else:
+        model.fit(
+            X_train_cluster, y_train_cluster,
+            sample_weight=sample_weights_cluster,
+            eval_set=[(X_train_cluster, y_train_cluster)],
+            verbose=False
+        )
+
+    # Predict train
+    train_pred = model.predict(X_train_cluster)
+    vhm0_y_train, vhm0_pred_train = reconstruct_vhm0_values(
+        predict_bias, predict_bias_log_space,
+        vhm0_x_train_cluster, y_train_cluster, train_pred
+    )
+
+    # Predict test
+    test_pred = model.predict(X_test_cluster)
+    vhm0_y_test, vhm0_pred_test = reconstruct_vhm0_values(
+        predict_bias, predict_bias_log_space,
+        vhm0_x_test_cluster, y_test_cluster, test_pred
+    )
+
+    return {
+        "cluster_id": cluster_id,
+        "model": model,
+        "train_true": vhm0_y_train,
+        "train_pred": vhm0_pred_train,
+        "train_x": vhm0_x_train_cluster,
+        "train_regions": regions_train_cluster,
+        "test_true": vhm0_y_test,
+        "test_pred": vhm0_pred_test,
+        "test_x": vhm0_x_test_cluster,
+        "test_regions": regions_test_cluster,
+    }
 
 
 class ModelPerPointTrainer:
@@ -682,12 +792,93 @@ class ModelPerPointTrainer:
         #     delayed(self._train_and_eval_cluster)(cid)
         #     for cid in tqdm(self.unique_clusters, desc="Training per cluster")
         # )
-        client = Client(n_workers=n_jobs, threads_per_worker=1, memory_limit="8GB")
+        # client = Client(n_workers=n_jobs, threads_per_worker=1, memory_limit="8GB")
+        # logger.info(f"Dask dashboard available at: {client.dashboard_link}")
+        # # Build computation graph
+        # # tasks = [self.train_cluster(cid) for cid in self.unique_clusters]
+        # tasks = [delayed(self._train_and_eval_cluster)(cid) for cid in self.unique_clusters]
+        # results = compute(*tasks)
+
+        # ✅ Start Dask client
+        client = Client(
+            n_workers=n_jobs,
+            threads_per_worker=1,
+            memory_limit="8GB",
+            silence_logs=logging.WARNING
+        )
         logger.info(f"Dask dashboard available at: {client.dashboard_link}")
-        # Build computation graph
-        # tasks = [self.train_cluster(cid) for cid in self.unique_clusters]
-        tasks = [self.train_cluster(cid) for cid in tqdm(self.unique_clusters, desc="Building tasks")]
-        results = compute(*tasks)
+
+        try:
+            # ✅ CRITICAL: Scatter data to workers ONCE instead of serializing per task
+            logger.info("Scattering data to Dask workers...")
+
+            # Convert to numpy if needed
+            X_train_np = self.X_train if isinstance(self.X_train, np.ndarray) else self.X_train.to_numpy()
+            X_test_np = self.X_test if isinstance(self.X_test, np.ndarray) else self.X_test.to_numpy()
+
+            scattered_data = client.scatter({
+                'X_train': X_train_np,
+                'X_val': self.X_val,
+                'X_test': X_test_np,
+                'y_train': self.y_train,
+                'y_val': self.y_val,
+                'y_test': self.y_test,
+                'cluster_ids_train': self.cluster_ids_train,
+                'cluster_ids_val': self.cluster_ids_val,
+                'cluster_ids_test': self.cluster_ids_test,
+                'regions_train': self.regions_train,
+                'regions_test': self.regions_test,
+                'vhm0_x_train': self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, 'to_numpy') else self.vhm0_x_train,
+                'vhm0_x_test': self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, 'to_numpy') else self.vhm0_x_test,
+                'sample_weights': self.sample_weights,
+            }, broadcast=True)  # ✅ broadcast=True means all workers get a copy
+
+            logger.info("Data scattered successfully")
+
+            # ✅ Submit tasks with scattered data references (not raw data)
+            futures = []
+            for cid in self.unique_clusters:
+                future = client.submit(
+                    train_single_cluster_dask,
+                    cid,
+                    scattered_data,  # ✅ Pass reference, not raw data
+                    self.model_config,
+                    self.predict_bias,
+                    self.predict_bias_log_space,
+                    self.config["output"]["model_save_path"]
+                )
+                futures.append(future)
+
+            # ✅ Gather results with progress bar
+            results = []
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Training clusters"):
+                results.append(future.result())
+
+            logger.info("All training complete, saving models...")
+
+            # ✅ Save models in main process
+            base_path = Path(self.config["output"]["model_save_path"])
+            for r in tqdm(results, desc="Saving models"):
+                cluster_id = r["cluster_id"]
+                model = r["model"]
+
+                cluster_path = base_path / f"cluster_{cluster_id}"
+                cluster_path.mkdir(parents=True, exist_ok=True)
+                joblib.dump(model, cluster_path / "model.pkl")
+
+                del r["model"]  # Free memory
+
+            # Save preprocessing once
+            self.preprocessing_manager.save_preprocessing(base_path)
+
+        finally:
+            logger.info("Shutting down Dask client...")
+            try:
+                client.close()
+            except Exception as e:
+                # ✅ Ignore shutdown errors - work is already done
+                logger.debug(f"Client shutdown warning (expected): {e}")
+            logger.info("Dask shutdown complete")
 
         # Aggregate across clusters
         y_preds_train, y_trues_train, vhm0_x_train, regions_train = [], [], [], []
