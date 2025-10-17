@@ -26,7 +26,7 @@ class PerPointStratification:
             "calm": {"range": [0.0, 1.0], "global_target_percentage": 0.15},      # 15% (0-1m) - reduced
             "moderate": {"range": [1.0, 3.0], "global_target_percentage": 0.25},  # 25% (1-3m) - reduced
             "rough": {"range": [3.0, 6.0], "global_target_percentage": 0.30},     # 30% (3-6m) - same
-            "high": {"range": [6.0, 9.0], "global_target_percentage": 0.20},      # 20% (6-9m) - new bin for high waves
+            "high": {"range": [6.0, 9.0], "global_target_percentage": 0.20, "keep_all": True},      # 20% (6-9m) - new bin for high waves
             "extreme": {"range": [9.0, ".inf"], "global_target_percentage": 0.02, "keep_all": True}, # 2% (>9m) - KEEP ALL SAMPLES
         })
         

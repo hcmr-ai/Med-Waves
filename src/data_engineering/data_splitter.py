@@ -389,7 +389,7 @@ class DataSplitter:
         # Create masks
         if years is not None and months is not None:
             train_mask = (years < train_end_year) | (
-                (years == train_end_year) & ~years.is_in(val_months).not_()
+                (years == train_end_year) & ~months.is_in(val_months)
             )
             val_mask = (years == train_end_year) & months.is_in(val_months)
             test_mask = (years >= test_start_year) & months.is_in(eval_months)
