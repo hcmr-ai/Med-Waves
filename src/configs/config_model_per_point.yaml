@@ -5,26 +5,27 @@
 # Model configuration
 model:
   type: "xgb" # Options: xgb, rf, elasticnet, lasso, ridge, eqm, delta
-  n_estimators: 2000
+  n_estimators: 200
   max_depth: 6
   learning_rate: 0.08
   subsample: 0.8
   colsample_bytree: 0.8
   reg_alpha: 0.01
   reg_lambda: 1.0
-  min_child_weight: 2
+  min_child_weight: null
   random_state: 42
   n_jobs: -1
-  early_stopping_rounds: null
-  eval_metric: ["rmse", "mae"]
-  # objective: "reg:squarederror"
-  objective: "reg:pseudohubererror"
-  huber_slope: 0.5
+  early_stopping_rounds: 50
+  eval_metric: null # Options: rmse, mae, logloss, error, auc
+  # eval_metric: ["rmse", "mae"]
+  objective: "reg:squarederror"
+  # objective: "reg:pseudohubererror"
+  # huber_slope: 0.5
   tree_method: hist
-  gamma: 0.5
+  gamma: null
   max_bin: 256
   verbose: false
-  joblib_njobs: 64
+  joblib_njobs: 1
 
 # Data configuration
 data:
@@ -72,11 +73,13 @@ feature_block:
 
   cluster_training:
     enabled: true
-    lat_step: 1.0
-    lon_step: 1.0
+    lat_step: 0.25
+    lon_step: 0.25
+    mode: "point" # Options: grid, point
+    precision: 4
 
   # Sampling (optional - can be disabled for full dataset)
-  max_samples_per_file: 500000 # Set to null to use all data
+  max_samples_per_file: 50000 # Set to null to use all data
   sampling_strategy: per_point_stratified # Options: none, random, per_location, temporal, robust_stratified, per_point_stratified
   # NOTE: robust_stratified is designed for multi-region balance and will be automatically
   # switched to single_region_robust when regional_training is enabled
@@ -252,7 +255,7 @@ memory_monitoring:
 # Output configuration
 output:
   model_save_path: "trained_models"
-  experiment_name: "model_per_point_no_early_stopping_bias_huber"
+  experiment_name: "model_per_point_no_early_stopping_bias_squared_points_200_50k_defaults"
 
   # S3 configuration for saving results
   s3:

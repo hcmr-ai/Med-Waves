@@ -6,7 +6,7 @@ including random, per-location, and temporal sampling operations.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import polars as pl
 
 from src.data_engineering.split import (

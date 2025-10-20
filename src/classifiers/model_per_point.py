@@ -123,7 +123,7 @@ def train_single_cluster_dask(
         gamma=model_config.get("gamma", 0.5),
         eval_metric=model_config.get("eval_metric", ["rmse", "mae"]),
         min_child_weight=model_config.get("min_child_weight", 1),
-        n_jobs=model_config.get("min_child_weight", 1),  # Each worker uses 1 core
+        n_jobs=model_config.get("n_jobs", 1),  # Each worker uses 1 core
         random_state=42,
         early_stopping_rounds=model_config.get("early_stopping_rounds", 50)
     )
@@ -904,23 +904,50 @@ class ModelPerPointTrainer:
             logger.info("Data scattered successfully")
 
             # ✅ Submit tasks with scattered data references (not raw data)
-            futures = []
-            for cid in self.unique_clusters:
-                future = client.submit(
-                    train_single_cluster_dask,
+            # futures = []
+            # for cid in self.unique_clusters:
+            #     future = client.submit(
+            #         train_single_cluster_dask,
+            #         cid,
+            #         scattered_data,  # ✅ Pass reference, not raw data
+            #         self.model_config,
+            #         self.predict_bias,
+            #         self.predict_bias_log_space,
+            #         self.config["output"]["model_save_path"]
+            #     )
+            #     futures.append(future)
+
+            # # ✅ Gather results with progress bar
+            # results = []
+            # for future in tqdm(as_completed(futures), total=len(futures), desc="Training clusters"):
+            #     results.append(future.result())
+            scattered_data = {
+                "X_train": X_train_np,
+                "X_val": self.X_val,
+                "X_test": X_test_np,
+                "y_train": self.y_train.to_numpy(),
+                "y_val": self.y_val.to_numpy(),
+                "y_test": self.y_test.to_numpy(),
+                "regions_train": self.regions_train,
+                "regions_test": self.regions_test,
+                "vhm0_x_train": self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, "to_numpy") else self.vhm0_x_train,
+                "vhm0_x_test": self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, "to_numpy") else self.vhm0_x_test,
+                "sample_weights": self.sample_weights,
+                "indices_train": cluster_indices_train,
+                "indices_val": cluster_indices_val,
+                "indices_test": cluster_indices_test,
+            }
+            results = []
+            for cid in tqdm(self.unique_clusters, desc="Training clusters"):
+                future = train_single_cluster_dask(
                     cid,
-                    scattered_data,  # ✅ Pass reference, not raw data
+                    scattered_data,
                     self.model_config,
                     self.predict_bias,
                     self.predict_bias_log_space,
                     self.config["output"]["model_save_path"]
                 )
-                futures.append(future)
-
-            # ✅ Gather results with progress bar
-            results = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Training clusters"):
-                results.append(future.result())
+                results.append(future)
 
             logger.info("All training complete, saving models...")
 
