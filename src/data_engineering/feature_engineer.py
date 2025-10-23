@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import polars as pl
 
-from src.classifiers.build_cluster_map import GridClusterMapper
+from src.classifiers.build_cluster_map import GridClusterMapper, PointClusterMapper
 from src.commons.region_mapping import RegionMapper
 
 
@@ -75,7 +75,7 @@ class FeatureEngineer:
 
         # add cluster_id feature if available
         df, cluster_ids, unique_clusters_ids, feature_cols = (
-            self._add_cluster_id_feature(df, feature_cols)
+            self._add_cluster_id_feature_extended(df, feature_cols)
         )
 
         # Log regional scaling and weighting status
@@ -344,6 +344,7 @@ class FeatureEngineer:
         )
         lat_step = self.feature_config.get("cluster_training", {}).get("lat_step", 1.0)
         lon_step = self.feature_config.get("cluster_training", {}).get("lon_step", 1.0)
+        self.logger.info(f"✅ Detected grid resolution: {lat_step}° × {lon_step}°")
 
         if not add_cluster_ids:
             self.logger.info("Cluster ID feature not added to model features")
@@ -361,6 +362,106 @@ class FeatureEngineer:
             f"Added cluster_id feature. Found {len(unique_cluster_ids)} unique clusters"
         )
 
+        return df, cluster_ids, unique_cluster_ids, feature_cols
+    
+    def _add_cluster_id_feature_extended(
+        self, df: pl.DataFrame, feature_cols: List[str]
+    ) -> Tuple[pl.DataFrame, np.ndarray, List[str], List[str]]:
+        """
+        Add cluster ID feature to dataframe.
+        
+        Supports two modes:
+        - grid: Groups points into rectangular cells (faster, fewer clusters)
+        - point: One cluster per unique point (more clusters, higher resolution)
+        
+        Config structure:
+            feature_block:
+            cluster_training:
+                enabled: true
+                mode: "grid"  # or "point"
+                
+                # Grid mode parameters:
+                lat_step: 0.5
+                lon_step: 0.5
+                
+                # Point mode parameters:
+                precision: 4  # decimal places
+        """
+        cluster_config = self.feature_config.get("cluster_training", {})
+        
+        # Check if enabled
+        if not cluster_config.get("enabled", False):
+            self.logger.info("Cluster ID feature not added to model features")
+            return df, None, [], feature_cols
+        
+        # Get mode (default to grid for backwards compatibility)
+        mode = cluster_config.get("mode", "grid")
+        
+        # Create appropriate mapper
+        if mode == "grid":
+            lat_step = cluster_config.get("lat_step", 1.0)
+            lon_step = cluster_config.get("lon_step", 1.0)
+            
+            self.logger.info(f"✅ Using GRID mode: {lat_step}° × {lon_step}° cells")
+            
+            mapper = GridClusterMapper(lat_step=lat_step, lon_step=lon_step)
+            cluster_ids = mapper.get_cluster_id(df["lat"], df["lon"])
+            
+        elif mode == "point":
+            precision = cluster_config.get("precision", 4)
+            
+            self.logger.info(f"✅ Using POINT mode: 1 cluster per unique point (precision={precision})")
+            
+            mapper = PointClusterMapper(precision=precision)
+            cluster_ids = mapper.get_cluster_id_np(df["lat"], df["lon"])
+            
+        else:
+            raise ValueError(f"Unknown cluster mode: {mode}. Use 'grid' or 'point'")
+        
+        # Add to dataframe
+        df = df.with_columns(cluster_ids.alias("cluster_id"))
+        feature_cols.append("cluster_id")
+        
+        # Get unique cluster IDs
+        unique_cluster_ids = cluster_ids.unique().to_list()
+        unique_cluster_ids.sort()
+        
+        # Log statistics
+        n_clusters = len(unique_cluster_ids)
+        n_samples = len(df)
+        samples_per_cluster = n_samples / n_clusters
+        
+        self.logger.info(f"Added cluster_id feature:")
+        self.logger.info(f"   Total clusters: {n_clusters:,}")
+        self.logger.info(f"   Total samples: {n_samples:,}")
+        self.logger.info(f"   Avg samples/cluster: {samples_per_cluster:.1f}")
+        
+        # Warn about small clusters
+        cluster_sizes = (
+            df.group_by("cluster_id")
+            .agg(pl.count().alias("n_samples"))
+            .sort("n_samples")
+        )
+        
+        min_samples = cluster_sizes["n_samples"].min()
+        max_samples = cluster_sizes["n_samples"].max()
+        median_samples = cluster_sizes["n_samples"].median()
+        
+        self.logger.info(f"   Sample distribution: min={min_samples}, median={median_samples:.0f}, max={max_samples}")
+        
+        # Warning for very small clusters
+        small_threshold = 100
+        n_small = (cluster_sizes["n_samples"] < small_threshold).sum()
+        if n_small > 0:
+            pct_small = n_small / n_clusters * 100
+            self.logger.warning(
+                f"   ⚠️  {n_small} clusters ({pct_small:.1f}%) have < {small_threshold} samples"
+            )
+            if mode == "point":
+                self.logger.warning(
+                    f"   Consider using grid mode or merging small clusters"
+                )
+        
         return df, cluster_ids, unique_cluster_ids, feature_cols
 
     def _create_years_months(self, df: pl.DataFrame) -> pl.DataFrame:

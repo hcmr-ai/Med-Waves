@@ -470,6 +470,94 @@ def plot_cluster_rectangles(
     plt.tight_layout()
     plt.savefig(f"rectangular_clusters_{lat}_{lon}.png", dpi=300)
 
+class PointClusterMapper:
+    """Point-based clustering: One cluster per unique point."""
+    
+    def __init__(self, precision: int = 4):
+        """
+        Args:
+            precision: Decimal places for lat/lon rounding
+                      2 = ~1km, 3 = ~100m, 4 = ~10m, 6 = ~0.1m
+        """
+        self.precision = precision
+        self.point_to_cluster = {}
+        self.cluster_to_point = {}
+        self.next_cluster_id = 0
+    
+    def _round_coords(self, lat: float, lon: float) -> tuple:
+        """Round coordinates to specified precision."""
+        return (round(lat, self.precision), round(lon, self.precision))
+    
+    def get_cluster_id_old(self, lat_series: pl.Series, lon_series: pl.Series) -> pl.Series:
+        """
+        Get cluster IDs for series of coordinates.
+        
+        Args:
+            lat_series: Polars series of latitudes
+            lon_series: Polars series of longitudes
+            
+        Returns:
+            Polars series of cluster IDs
+        """
+        # Convert to numpy for processing
+        lats = lat_series.to_numpy()
+        lons = lon_series.to_numpy()
+        
+        # Assign cluster IDs
+        cluster_ids = np.zeros(len(lats), dtype=np.int32)
+        
+        for i, (lat, lon) in enumerate(zip(lats, lons)):
+            point = self._round_coords(lat, lon)
+            
+            if point not in self.point_to_cluster:
+                self.point_to_cluster[point] = self.next_cluster_id
+                self.cluster_to_point[self.next_cluster_id] = point
+                self.next_cluster_id += 1
+            
+            cluster_ids[i] = self.point_to_cluster[point]
+        
+        return pl.Series(cluster_ids)
+    
+    def get_cluster_id_np(self, lat_series: pl.Series, lon_series: pl.Series) -> pl.Series:
+        """
+        Assign cluster IDs for rounded (lat, lon) pairs using vectorized NumPy.
+        """
+        # Convert to numpy
+        lats = lat_series.to_numpy()
+        lons = lon_series.to_numpy()
+
+        # Vectorized rounding
+        rounded_lats = np.round(lats, self.precision)
+        rounded_lons = np.round(lons, self.precision)
+
+        # Stack into pairs
+        coords = np.column_stack((rounded_lats, rounded_lons))
+
+        # Find unique pairs + inverse indices
+        unique_points, cluster_ids = np.unique(coords, axis=0, return_inverse=True)
+
+        # Update mappings if needed
+        self.point_to_cluster = {tuple(pt): i for i, pt in enumerate(unique_points)}
+        self.cluster_to_point = {i: tuple(pt) for i, pt in enumerate(unique_points)}
+        self.next_cluster_id = len(unique_points)
+
+        return pl.Series(cluster_ids.astype(np.int32))
+
+    def get_cluster_id(self, lat_series: pl.Series, lon_series: pl.Series) -> pl.Series:
+        df = pl.DataFrame({
+            "lat": lat_series.round(self.precision),
+            "lon": lon_series.round(self.precision),
+        })
+        # factorize gives unique IDs for each unique pair
+        keys = (df["lat"].cast(str) + "_" + df["lon"].cast(str))
+
+        # Factorize keys → cluster IDs
+        cluster_ids, _ = keys.factorize()
+        return cluster_ids.cast(pl.Int32)
+
+    def get_n_clusters(self) -> int:
+        """Get total number of clusters created."""
+        return self.next_cluster_id
 
 class GridClusterMapper:
     def __init__(self, lat_step=1.0, lon_step=1.0):

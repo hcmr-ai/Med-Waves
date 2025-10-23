@@ -55,39 +55,57 @@ def train_single_cluster_dask(
     from src.classifiers.helpers import reconstruct_vhm0_values
 
     # ✅ Extract data from scattered references
-    X_train = scattered_data['X_train']
-    X_val = scattered_data['X_val']
-    X_test = scattered_data['X_test']
-    y_train = scattered_data['y_train']
-    y_val = scattered_data['y_val']
-    y_test = scattered_data['y_test']
-    cluster_ids_train = scattered_data['cluster_ids_train']
-    cluster_ids_val = scattered_data['cluster_ids_val']
-    cluster_ids_test = scattered_data['cluster_ids_test']
-    regions_train = scattered_data['regions_train']
-    regions_test = scattered_data['regions_test']
-    vhm0_x_train = scattered_data['vhm0_x_train']
-    vhm0_x_test = scattered_data['vhm0_x_test']
-    sample_weights = scattered_data['sample_weights']
+    # X_train_cluster = scattered_data['X_train']
+    # X_val_cluster = scattered_data['X_val']
+    # X_test_cluster = scattered_data['X_test']
+    # y_train_cluster = scattered_data['y_train']
+    # y_val_cluster = scattered_data['y_val']
+    # y_test_cluster = scattered_data['y_test']
+    # cluster_ids_train = scattered_data['cluster_ids_train']
+    # cluster_ids_val = scattered_data['cluster_ids_val']
+    # cluster_ids_test = scattered_data['cluster_ids_test']
+    # regions_train_cluster = scattered_data['regions_train']
+    # regions_test_cluster = scattered_data['regions_test']
+    # vhm0_x_train_cluster = scattered_data['vhm0_x_train']
+    # vhm0_x_test_cluster = scattered_data['vhm0_x_test']
+    # sample_weights_cluster = scattered_data['sample_weights']
 
     # Filter for this cluster
-    mask_train = cluster_ids_train == cluster_id
-    mask_val = (cluster_ids_val == cluster_id) if cluster_ids_val is not None else None
-    mask_test = cluster_ids_test == cluster_id
+    # mask_train = cluster_ids_train == cluster_id
+    # mask_val = (cluster_ids_val == cluster_id) if cluster_ids_val is not None else None
+    # mask_test = cluster_ids_test == cluster_id
 
-    X_train_cluster = X_train[mask_train]
-    y_train_cluster = y_train.to_numpy()[mask_train].ravel()
-    regions_train_cluster = regions_train[mask_train]
-    vhm0_x_train_cluster = vhm0_x_train[mask_train] if vhm0_x_train is not None else None
-    sample_weights_cluster = sample_weights[mask_train] if sample_weights is not None else None
+    # X_train_cluster = X_train[mask_train]
+    # y_train_cluster = y_train.to_numpy()[mask_train].ravel()
+    # regions_train_cluster = regions_train[mask_train]
+    # vhm0_x_train_cluster = vhm0_x_train[mask_train] if vhm0_x_train is not None else None
+    # sample_weights_cluster = sample_weights[mask_train] if sample_weights is not None else None
 
-    X_val_cluster = X_val[mask_val] if mask_val is not None and len(X_val) > 0 else None
-    y_val_cluster = y_val[mask_val] if mask_val is not None and len(y_val) > 0 else None
+    # X_val_cluster = X_val[mask_val] if mask_val is not None and len(X_val) > 0 else None
+    # y_val_cluster = y_val[mask_val] if mask_val is not None and len(y_val) > 0 else None
 
-    X_test_cluster = X_test[mask_test]
-    y_test_cluster = y_test.to_numpy()[mask_test].ravel()
-    regions_test_cluster = regions_test[mask_test]
-    vhm0_x_test_cluster = vhm0_x_test[mask_test] if vhm0_x_test is not None else None
+    # X_test_cluster = X_test[mask_test]
+    # y_test_cluster = y_test.to_numpy()[mask_test].ravel()
+    # regions_test_cluster = regions_test[mask_test]
+    # vhm0_x_test_cluster = vhm0_x_test[mask_test] if vhm0_x_test is not None else None
+
+    idx_train = scattered_data["indices_train"].get(cluster_id, [])
+    idx_val   = scattered_data["indices_val"].get(cluster_id, [])
+    idx_test  = scattered_data["indices_test"].get(cluster_id, [])
+
+    X_train_cluster = scattered_data["X_train"][idx_train]
+    y_train_cluster = scattered_data["y_train"][idx_train].ravel()
+    X_val_cluster   = scattered_data["X_val"][idx_val] if len(idx_val) > 0 else None
+    y_val_cluster   = scattered_data["y_val"][idx_val].ravel() if len(idx_val) > 0 else None
+    X_test_cluster  = scattered_data["X_test"][idx_test]
+    y_test_cluster  = scattered_data["y_test"][idx_test].ravel()
+
+    regions_train_cluster = scattered_data["regions_train"][idx_train]
+    regions_test_cluster  = scattered_data["regions_test"][idx_test]
+    vhm0_x_train_cluster  = scattered_data["vhm0_x_train"][idx_train] if scattered_data["vhm0_x_train"] is not None else None
+    vhm0_x_test_cluster   = scattered_data["vhm0_x_test"][idx_test] if scattered_data["vhm0_x_test"] is not None else None
+    sample_weights_cluster = scattered_data["sample_weights"][idx_train] if scattered_data["sample_weights"] is not None else None
+
 
     # Initialize and train model
     model = xgb.XGBRegressor(
@@ -100,9 +118,14 @@ def train_single_cluster_dask(
         reg_lambda=model_config.get("reg_lambda", 1.0),
         tree_method=model_config.get("tree_method", "hist"),
         max_bin=model_config.get("max_bin", 256),
-        n_jobs=1,  # Each worker uses 1 core
+        objective=model_config.get("objective", "reg:pseudohubererror"),
+        huber_slope=model_config.get("huber_slope", 0.5),
+        gamma=model_config.get("gamma", 0.5),
+        eval_metric=model_config.get("eval_metric", ["rmse", "mae"]),
+        min_child_weight=model_config.get("min_child_weight", 1),
+        n_jobs=model_config.get("n_jobs", 1),  # Each worker uses 1 core
         random_state=42,
-        early_stopping_rounds=model_config.get("early_stopping_rounds", 50),
+        early_stopping_rounds=model_config.get("early_stopping_rounds", 50)
     )
 
     if X_val_cluster is not None and len(X_val_cluster) > 0:
@@ -803,7 +826,7 @@ class ModelPerPointTrainer:
         client = Client(
             n_workers=n_jobs,
             threads_per_worker=1,
-            memory_limit="8GB",
+            # memory_limit="8GB",
             silence_logs=logging.WARNING
         )
         logger.info(f"Dask dashboard available at: {client.dashboard_link}")
@@ -816,43 +839,115 @@ class ModelPerPointTrainer:
             X_train_np = self.X_train if isinstance(self.X_train, np.ndarray) else self.X_train.to_numpy()
             X_test_np = self.X_test if isinstance(self.X_test, np.ndarray) else self.X_test.to_numpy()
 
+            # scattered_data = client.scatter({
+            #     'X_train': X_train_np,
+            #     'X_val': self.X_val,
+            #     'X_test': X_test_np,
+            #     'y_train': self.y_train,
+            #     'y_val': self.y_val,
+            #     'y_test': self.y_test,
+            #     'cluster_ids_train': self.cluster_ids_train,
+            #     'cluster_ids_val': self.cluster_ids_val,
+            #     'cluster_ids_test': self.cluster_ids_test,
+            #     'regions_train': self.regions_train,
+            #     'regions_test': self.regions_test,
+            #     'vhm0_x_train': self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, 'to_numpy') else self.vhm0_x_train,
+            #     'vhm0_x_test': self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, 'to_numpy') else self.vhm0_x_test,
+            #     'sample_weights': self.sample_weights,
+            # }, broadcast=True)  # ✅ broadcast=True means all workers get a copy
+            from collections import defaultdict
+            def build_cluster_indices(cluster_ids, desc):
+                cluster_indices = defaultdict(list)
+                for i, cid in enumerate(tqdm(cluster_ids, desc=desc)):
+                    cluster_indices[cid].append(i)
+                return {cid: np.array(idx) for cid, idx in cluster_indices.items()}
+
+            cluster_indices_train = build_cluster_indices(self.cluster_ids_train, "Indexing train clusters")
+            cluster_indices_val = build_cluster_indices(self.cluster_ids_val, "Indexing val clusters")
+            cluster_indices_test = build_cluster_indices(self.cluster_ids_test, "Indexing test clusters")
+
             scattered_data = client.scatter({
-                'X_train': X_train_np,
-                'X_val': self.X_val,
-                'X_test': X_test_np,
-                'y_train': self.y_train,
-                'y_val': self.y_val,
-                'y_test': self.y_test,
-                'cluster_ids_train': self.cluster_ids_train,
-                'cluster_ids_val': self.cluster_ids_val,
-                'cluster_ids_test': self.cluster_ids_test,
-                'regions_train': self.regions_train,
-                'regions_test': self.regions_test,
-                'vhm0_x_train': self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, 'to_numpy') else self.vhm0_x_train,
-                'vhm0_x_test': self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, 'to_numpy') else self.vhm0_x_test,
-                'sample_weights': self.sample_weights,
-            }, broadcast=True)  # ✅ broadcast=True means all workers get a copy
+                "X_train": X_train_np,
+                "X_val": self.X_val,
+                "X_test": X_test_np,
+                "y_train": self.y_train.to_numpy(),
+                "y_val": self.y_val.to_numpy(),
+                "y_test": self.y_test.to_numpy(),
+                "regions_train": self.regions_train,
+                "regions_test": self.regions_test,
+                "vhm0_x_train": self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, "to_numpy") else self.vhm0_x_train,
+                "vhm0_x_test": self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, "to_numpy") else self.vhm0_x_test,
+                "sample_weights": self.sample_weights,
+                "indices_train": cluster_indices_train,
+                "indices_val": cluster_indices_val,
+                "indices_test": cluster_indices_test,
+            }, broadcast=False)
+
+            # cluster_data = {
+            #     cid: {
+            #         "X_train": X_train_np[self.cluster_ids_train == cid],
+            #         "y_train": self.y_train.to_numpy()[self.cluster_ids_train == cid].ravel(),
+            #         "X_val": self.X_val[self.cluster_ids_val == cid] if self.X_val is not None else None,
+            #         "y_val": self.y_val.to_numpy()[self.cluster_ids_val == cid].ravel() if self.y_val is not None else None,
+            #         "X_test": X_test_np[self.cluster_ids_test == cid],
+            #         "y_test": self.y_test.to_numpy()[self.cluster_ids_test == cid].ravel(),
+            #         "regions_train": self.regions_train[self.cluster_ids_train == cid],
+            #         "regions_test": self.regions_test[self.cluster_ids_test == cid],
+            #         "vhm0_x_train": self.vhm0_x_train.to_numpy()[self.cluster_ids_train == cid] if self.vhm0_x_train is not None else None,
+            #         "vhm0_x_test": self.vhm0_x_test.to_numpy()[self.cluster_ids_test == cid] if self.vhm0_x_test is not None else None,
+            #         "sample_weights": self.sample_weights[self.cluster_ids_train == cid] if self.sample_weights is not None else None,
+            #     }
+            #     for cid in self.unique_clusters
+            # }
+            # scattered_data = client.scatter(cluster_data, broadcast=False)
 
             logger.info("Data scattered successfully")
 
             # ✅ Submit tasks with scattered data references (not raw data)
-            futures = []
-            for cid in self.unique_clusters:
-                future = client.submit(
-                    train_single_cluster_dask,
+            # futures = []
+            # for cid in self.unique_clusters:
+            #     future = client.submit(
+            #         train_single_cluster_dask,
+            #         cid,
+            #         scattered_data,  # ✅ Pass reference, not raw data
+            #         self.model_config,
+            #         self.predict_bias,
+            #         self.predict_bias_log_space,
+            #         self.config["output"]["model_save_path"]
+            #     )
+            #     futures.append(future)
+
+            # # ✅ Gather results with progress bar
+            # results = []
+            # for future in tqdm(as_completed(futures), total=len(futures), desc="Training clusters"):
+            #     results.append(future.result())
+            scattered_data = {
+                "X_train": X_train_np,
+                "X_val": self.X_val,
+                "X_test": X_test_np,
+                "y_train": self.y_train.to_numpy(),
+                "y_val": self.y_val.to_numpy(),
+                "y_test": self.y_test.to_numpy(),
+                "regions_train": self.regions_train,
+                "regions_test": self.regions_test,
+                "vhm0_x_train": self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, "to_numpy") else self.vhm0_x_train,
+                "vhm0_x_test": self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, "to_numpy") else self.vhm0_x_test,
+                "sample_weights": self.sample_weights,
+                "indices_train": cluster_indices_train,
+                "indices_val": cluster_indices_val,
+                "indices_test": cluster_indices_test,
+            }
+            results = []
+            for cid in tqdm(self.unique_clusters, desc="Training clusters"):
+                future = train_single_cluster_dask(
                     cid,
-                    scattered_data,  # ✅ Pass reference, not raw data
+                    scattered_data,
                     self.model_config,
                     self.predict_bias,
                     self.predict_bias_log_space,
                     self.config["output"]["model_save_path"]
                 )
-                futures.append(future)
-
-            # ✅ Gather results with progress bar
-            results = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Training clusters"):
-                results.append(future.result())
+                results.append(future)
 
             logger.info("All training complete, saving models...")
 
