@@ -10,14 +10,13 @@ install-poetry: ## Install Poetry package manager
 	curl -sSL https://install.python-poetry.org | python3 -
 	@echo "Poetry installed! Add /home/ubuntu/.local/bin to your PATH:"
 	@echo "export PATH=\"/home/ubuntu/.local/bin:\$$PATH\""
-
 setup-path: ## Add Poetry to PATH in current session
 	export PATH="/home/ubuntu/.local/bin:$PATH"
-
 verify-poetry: ## Verify Poetry installation
 	poetry --version
 
 install: ## Install dependencies using Poetry
+	make setup-path
 	poetry install
 
 install-dev: ## Install dependencies including dev dependencies
@@ -42,14 +41,20 @@ shell: ## Activate Poetry shell
 	poetry shell
 
 # Training scripts
-run-train-incremental: ## Run incremental training
-	poetry run python -m src.pipelines.training.train_incremental
+train-ml: ## Run incremental training
+	poetry run python src/pipelines/training/train_full_dataset.py --config src/configs/config_full_dataset.yaml --output-dir results_test
+
+train-per-point: ## Run incremental training
+	poetry run python src/pipelines/training/train_model_per_point.py --config src/configs/config_model_per_point.yaml --output-dir results_test
 
 run-train-evaluator: ## Run training evaluator
 	poetry run python -m src.pipelines.training.train_evaluator
 
 run-train-random: ## Run random regressor training
 	poetry run python -m src.pipelines.training.train_random_regressor
+
+evaluation: ## Run evaluation
+	poetry run python src/pipelines/evaluation/evaluate_model_refactored.py --config src/configs/config_evaluation.yaml
 
 # Scripts
 run-manual-exp: ## Create manual experiment

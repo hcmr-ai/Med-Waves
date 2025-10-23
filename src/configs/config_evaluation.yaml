@@ -7,7 +7,7 @@ data:
   # Local model path example:
   # model_path: "/Users/deeplab/Documents/projects/hcmr/data/experiments/20250921_2203_xgb_500K_samples_basin/"
   # S3 model path example (when s3.enabled: true):
-  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_20251005_224846/model"
+  model_path: "s3://medwav-dev-data/experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias_20251006_222053/model"
 
   # Local data path example:
   # data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly"
@@ -18,6 +18,8 @@ data:
 # Feature configuration (synchronized with training pipeline)
 feature_block:
   predict_bias: true # Set to true to predict bias
+  predict_bias_log_space: false # If true, use multiplicative log-space learning: z = log(y_obs) - log(max(vhm0_x, eps))
+  log_space_epsilon: 1e-6 # Small epsilon to prevent log(0) in log-space learning
   # Features to exclude from the feature set
   features_to_exclude:
     - "corrected_VTM02"
@@ -149,7 +151,7 @@ output:
   s3:
     enabled: true # Set to true to enable S3 saving
     bucket: "medwav-dev-data" # S3 bucket name
-    prefix: "experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_20251005_224846/evaluation_results" # S3 prefix for organizing results
+    prefix: "experiments/full_dataset_experiment/xgb_1000K_samples_per_point_stratified_no_early_stopping_all_extremes_bias_20251006_222053/evaluation_results" # S3 prefix for organizing results
     region: "eu-central-1" # AWS region
     aws_profile: null # AWS profile name (optional, uses default if null)
 

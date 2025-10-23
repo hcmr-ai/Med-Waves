@@ -67,7 +67,7 @@ def _load_single_file_worker_for_dataloader(args):
                 logger.warning("Lag features enabled but no time column found. Skipping lag features.")
         
         # Apply per-file sampling using SamplingManager
-        if sampling_manager is not None:
+        if sampling_manager is not None and "2023" not in file_path:
             df = sampling_manager.apply_sampling(df)
         
         return (file_path, df, True)
@@ -158,7 +158,7 @@ class DataLoader:
             for file_path in tqdm(all_files, desc="Loading files"):
                 file_path, df, success = _load_single_file_worker_for_dataloader((file_path, self.feature_config, self.sampling_manager))
                 
-                if success and df is not None:
+                if success and len(df) > 0 and df is not None:
                     successful_files.append(file_path)
                     all_dataframes.append(df)
                 else:
@@ -174,7 +174,130 @@ class DataLoader:
         combined_df = pl.concat(all_dataframes)
         self.logger.info(f"Combined dataframe shape: {combined_df.shape}")
         
+        # Log total distribution across all files
+        # self._log_total_distribution_summary(combined_df, successful_files)
+        del all_dataframes
+        
         return combined_df, successful_files
+    
+    def _log_total_distribution_summary(self, combined_df: pl.DataFrame, successful_files: List[str]) -> None:
+        """Log the total wave height distribution across all training files."""
+        if len(combined_df) == 0:
+            return
+        
+        # Check if we have wave height data
+        wave_height_col = None
+        for col_name in ["vhm0_y", "VHM0", "corrected_VHM0", "vhm0", "wave_height", "hs"]:
+            if col_name in combined_df.columns:
+                wave_height_col = col_name
+                break
+        
+        if wave_height_col is None:
+            self.logger.warning("No wave height column found for distribution summary")
+            return
+        
+        # Get wave height bins from configuration
+        wave_bins = self._get_wave_height_bins_from_config()
+        
+        # Count samples in each bin
+        total_samples = len(combined_df)
+        self.logger.info("=" * 80)
+        self.logger.info("TOTAL WAVE HEIGHT DISTRIBUTION")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Total samples across {len(successful_files)} files: {total_samples:,}")
+        self.logger.info("")
+        
+        bin_counts = {}
+        for bin_name, (min_val, max_val) in wave_bins.items():
+            if max_val == float('inf'):
+                bin_df = combined_df.filter(pl.col(wave_height_col) >= min_val)
+            else:
+                bin_df = combined_df.filter(
+                    (pl.col(wave_height_col) >= min_val) & (pl.col(wave_height_col) < max_val)
+                )
+            
+            count = len(bin_df)
+            percentage = (count / total_samples) * 100
+            bin_counts[bin_name] = count
+            
+            if max_val == float('inf'):
+                range_str = f"{min_val}+m"
+            else:
+                range_str = f"{min_val}-{max_val}m"
+            
+            self.logger.info(f"  {bin_name:12} ({range_str:>8}): {count:8,} samples ({percentage:5.1f}%)")
+        
+        # Log extreme wave statistics
+        extreme_count = bin_counts.get("extreme", 0)
+        if extreme_count > 0:
+            extreme_df = combined_df.filter(pl.col(wave_height_col) >= wave_bins["extreme"][0])
+            max_wave = float(extreme_df.select(pl.col(wave_height_col).max()).item())
+            mean_extreme = float(extreme_df.select(pl.col(wave_height_col).mean()).item())
+            
+            self.logger.info("")
+            self.logger.info(f"  Extreme wave statistics:")
+            self.logger.info(f"    Maximum wave height: {max_wave:.2f}m")
+            self.logger.info(f"    Mean extreme wave: {mean_extreme:.2f}m")
+        
+        # Log regional distribution if coordinates available
+        lat_col = None
+        lon_col = None
+        for col_name in ["lat", "latitude", "LAT", "LATITUDE"]:
+            if col_name in combined_df.columns:
+                lat_col = col_name
+                break
+        for col_name in ["lon", "longitude", "LON", "LONGITUDE"]:
+            if col_name in combined_df.columns:
+                lon_col = col_name
+                break
+        
+        if lat_col and lon_col:
+            self.logger.info("")
+            self.logger.info("  Regional distribution:")
+            
+            # Simple regional classification
+            atlantic = combined_df.filter(pl.col(lon_col) < -6.0)
+            mediterranean = combined_df.filter((pl.col(lon_col) >= -6.0) & (pl.col(lon_col) <= 25.0))
+            eastern_med = combined_df.filter(pl.col(lon_col) > 25.0)
+            
+            for region_name, region_df in [("Atlantic", atlantic), ("Mediterranean", mediterranean), ("Eastern Med", eastern_med)]:
+                count = len(region_df)
+                percentage = (count / total_samples) * 100
+                self.logger.info(f"    {region_name:15}: {count:8,} samples ({percentage:5.1f}%)")
+        
+        self.logger.info("=" * 80)
+    
+    def _get_wave_height_bins_from_config(self) -> Dict[str, Tuple[float, float]]:
+        """Get wave height bins from configuration."""
+        # Get stratification bins from feature config
+        stratification_bins = self.feature_config.get("per_point_stratification_bins", {})
+        
+        if not stratification_bins:
+            # Fallback to default bins if not configured
+            self.logger.warning("No per_point_stratification_bins found in config, using default bins")
+            return {
+                "calm": (0.0, 1.0),
+                "moderate": (1.0, 3.0), 
+                "rough": (3.0, 6.0),
+                "high": (6.0, 9.0),
+                "extreme": (9.0, float('inf'))
+            }
+        
+        # Convert config bins to the format expected by logging
+        wave_bins = {}
+        for bin_name, bin_config in stratification_bins.items():
+            min_val, max_val = bin_config["range"]
+            
+            # Convert to float in case they come from YAML as strings
+            min_val = float(min_val)
+            if str(max_val) in [".inf", "float('inf')"] or max_val == float('inf'):
+                max_val = float('inf')
+            else:
+                max_val = float(max_val)
+            
+            wave_bins[bin_name] = (min_val, max_val)
+        
+        return wave_bins
     
     def _expand_data_path(self, path: str) -> List[str]:
         """Expand data paths (S3, local, glob patterns)."""

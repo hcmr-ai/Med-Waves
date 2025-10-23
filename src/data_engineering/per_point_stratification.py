@@ -26,7 +26,7 @@ class PerPointStratification:
             "calm": {"range": [0.0, 1.0], "global_target_percentage": 0.15},      # 15% (0-1m) - reduced
             "moderate": {"range": [1.0, 3.0], "global_target_percentage": 0.25},  # 25% (1-3m) - reduced
             "rough": {"range": [3.0, 6.0], "global_target_percentage": 0.30},     # 30% (3-6m) - same
-            "high": {"range": [6.0, 9.0], "global_target_percentage": 0.20},      # 20% (6-9m) - new bin for high waves
+            "high": {"range": [6.0, 9.0], "global_target_percentage": 0.20, "keep_all": True},      # 20% (6-9m) - new bin for high waves
             "extreme": {"range": [9.0, ".inf"], "global_target_percentage": 0.02, "keep_all": True}, # 2% (>9m) - KEEP ALL SAMPLES
         })
         
@@ -198,7 +198,7 @@ class PerPointStratification:
         
         # First, identify and preserve ALL extreme waves - they should never be dropped
         # Get extreme threshold from configuration
-        extreme_min = float(self.wave_bins["extreme"][0])
+        extreme_min = float(self.wave_bins["high"][0])
         extreme_waves = df.filter(pl.col("vhm0_y") >= extreme_min)
         non_extreme_waves = df.filter(pl.col("vhm0_y") < extreme_min)
         
@@ -209,7 +209,7 @@ class PerPointStratification:
         self.logger.info(f"  - Balancing {non_extreme_count:,} non-extreme waves across regions")
         
         # Calculate remaining quota for non-extreme waves
-        remaining_quota = self.max_samples_per_file - extreme_count
+        remaining_quota = self.max_samples_per_file
         samples_per_region = remaining_quota // len(unique_regions)
         
         self.logger.info(f"  - Geographic balance: {samples_per_region:,} non-extreme samples per region")

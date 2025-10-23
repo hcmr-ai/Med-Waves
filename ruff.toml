@@ -8,7 +8,7 @@ exclude = [
 
 [lint]
 select = ["E", "F", "B", "I", "W"]
-ignore = ["E501"]
+ignore = ["E501", "E402"]
 
 [format]
 quote-style = "double"

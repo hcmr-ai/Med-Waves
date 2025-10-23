@@ -11,10 +11,8 @@ from typing import Any, Dict, List, Tuple, Union
 
 import joblib
 import numpy as np
-import pandas as pd
 import polars as pl
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import ElasticNet, Lasso, Ridge
 import xgboost as xgb
 
 from src.commons.memory_monitor import MemoryMonitor
@@ -35,6 +33,7 @@ logger = logging.getLogger(__name__)
 from src.evaluation.metrics import evaluate_model
 from src.evaluation.diagnostic_plotter import DiagnosticPlotter
 from src.evaluation.experiment_logger import ExperimentLogger
+from src.classifiers.helpers import reconstruct_vhm0_values
 
 class FullDatasetTrainer:
     """
@@ -61,7 +60,7 @@ class FullDatasetTrainer:
         self.data_config = config.get("data", {})
         self.feature_config = config.get("feature_block", {})
         self.evaluation_config = config.get("evaluation", {})
-        self.diagnostics_config = config.get("training_diagnostics", {})
+        self.diagnostics_config = config.get("diagnostics", {})
         
         # Initialize components
         self.model = None
@@ -179,6 +178,11 @@ class FullDatasetTrainer:
         """Check if we're predicting bias instead of vhm0_y directly."""
         return self.feature_config.get("predict_bias", False)
     
+    @property
+    def predict_bias_log_space(self) -> bool:
+        """Check if we're using log-space bias prediction."""
+        return self.feature_config.get("predict_bias_log_space", False)
+    
     def _initialize_model(self):
         """Initialize the model based on configuration."""
         model_type = self.model_config.get("type", "xgb")
@@ -210,25 +214,6 @@ class FullDatasetTrainer:
                 min_samples_leaf=self.model_config.get("min_samples_leaf", 1),
                 random_state=self.model_config.get("random_state", 42),
                 n_jobs=self.model_config.get("n_jobs", -1)
-            )
-        elif model_type == "elasticnet":
-            self.model = ElasticNet(
-                alpha=self.model_config.get("alpha", 1.0),
-                l1_ratio=self.model_config.get("l1_ratio", 0.5),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
-            )
-        elif model_type == "lasso":
-            self.model = Lasso(
-                alpha=self.model_config.get("alpha", 1.0),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
-            )
-        elif model_type == "ridge":
-            self.model = Ridge(
-                alpha=self.model_config.get("alpha", 1.0),
-                max_iter=self.model_config.get("max_iter", 1000),
-                random_state=self.model_config.get("random_state", 42)
             )
         elif model_type == "eqm":
             # EQM is not a traditional ML model, so we'll handle it differently
@@ -263,7 +248,7 @@ class FullDatasetTrainer:
             logger.warning("  - Set scaler to 'standard', 'robust', or 'minmax' for regional scaling")
             logger.warning("  - Set regional_scaling.enabled to false for no scaling")
     
-    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    def load_data(self, data_paths: Union[str, List[str]], target_column: str = "vhm0_y") -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], np.ndarray]:
         """Load data using the DataLoader."""
         self._log_memory_usage("before loading data")
         
@@ -271,14 +256,10 @@ class FullDatasetTrainer:
         combined_df, successful_files = self.data_loader.load_data(data_paths)
         
         # Prepare features using FeatureEngineer
-        X, y, regions, coords = self.feature_engineer.prepare_features(combined_df, target_column)
-        
-        # Extract raw input data for baseline metrics
-        if 'vhm0_x' in combined_df.columns:
-            self.vhm0_x_raw = combined_df['vhm0_x'].to_numpy()
-        else:
-            logger.warning("vhm0_x column not found in data. Baseline metrics will be empty.")
-            self.vhm0_x_raw = None
+        X, y, regions, coords, self.unique_clusters, cluster_ids = self.feature_engineer.prepare_features(combined_df, target_column)
+
+        # Get metadata
+        years, months, self.vhm0_x_raw, actual_wave_heights = self.feature_engineer.prepare_metadata(combined_df, target_column)
         
         # Get feature names from FeatureEngineer
         self.feature_names = self.feature_engineer.get_feature_names()
@@ -288,7 +269,7 @@ class FullDatasetTrainer:
         self.experiment_logger.log_dataset_info(dataset_info)
         
         self._log_memory_usage("after loading data")
-        return X, y, regions, coords, successful_files
+        return X, y, regions, coords, successful_files, actual_wave_heights, years, months, cluster_ids
     
     def _prepare_dataset_info(self, X: np.ndarray, y: np.ndarray, successful_files: List[str]) -> Dict[str, Any]:
         """Prepare dataset information for logging."""
@@ -319,21 +300,33 @@ class FullDatasetTrainer:
         """Calculate metrics for different sea state bins using MetricsCalculator."""
         return self.metrics_calculator.calculate_sea_bin_metrics(y_true, y_pred, enable_logging=True)
 
-    def split_data(self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None) -> None:
+    def _calculate_region_sea_bin_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, regions: np.ndarray, vhm0_x_test:np.ndarray = None) -> Dict[str, Dict[str, float]]:
+        """Calculate metrics for different sea state bins using MetricsCalculator."""
+        return self.metrics_calculator.calculate_region_sea_bin_metrics(y_true, y_pred, regions, vhm0_x_test)
+
+    def split_data(
+        self, X: np.ndarray, y: np.ndarray, regions: np.ndarray = None, 
+        coords: np.ndarray = None, file_paths: List[str] = None, vhm0_x: np.ndarray = None, 
+        actual_wave_heights: np.ndarray = None, years: np.ndarray = None, months: np.ndarray = None
+        ) -> None:
         """
         Split data into train/validation/test sets using DataSplitter.
         
         Args:
             X: Feature matrix
-            y: Target vector
+            y: Target vector (may be bias values if predict_bias=true)
             regions: Regional classification array (optional)
             coords: Coordinate array (lat, lon) (optional)
             file_paths: List of file paths (required for year-based splitting)
+            vhm0_x: Raw input wave heights for baseline metrics (optional)
+            actual_wave_heights: Actual wave heights for proper binning (optional)
+            years: Years for year-based splitting (optional)
+            months: Months for year-based splitting (optional)
         """
         self._log_memory_usage("before splitting data")
         
         # Use DataSplitter to perform the split
-        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths)
+        split_data = self.data_splitter.split_data(X, y, regions, coords, file_paths, actual_wave_heights, years, months)
         
         # Store splits as instance variables
         self.X_train = split_data['X_train']
@@ -375,13 +368,31 @@ class FullDatasetTrainer:
             self.vhm0_x_val = None
             self.vhm0_x_test = None
         
-        # Log split information
+        # Log split information (includes stratified distribution logging)
         self.data_splitter.log_split_info(split_data)
         
         # Apply sample weighting (regional and/or wave height bin weighting)
-        self.sample_weights = self.sample_weighting.apply_weights(
-            self.y_train, self.regions_train
-        )
+        if self.predict_bias and actual_wave_heights is not None:
+            # Use actual wave heights for weighting when predicting bias
+            # The data splitter already provides the properly split actual wave heights
+            actual_wave_heights_train = split_data.get('actual_wave_heights_train', None)
+            if actual_wave_heights_train is not None:
+                self.sample_weights = self.sample_weighting.apply_weights(
+                    actual_wave_heights_train, self.regions_train
+                )
+                logger.info("Applied sample weights based on actual wave heights (bias prediction mode)")
+            else:
+                # Fallback to y_train if actual_wave_heights_train is not available
+                self.sample_weights = self.sample_weighting.apply_weights(
+                    self.y_train, self.regions_train
+                )
+                logger.warning("actual_wave_heights_train not found in split_data, using y_train for weighting")
+        else:
+            # Use y_train for weighting (standard mode)
+            self.sample_weights = self.sample_weighting.apply_weights(
+                self.y_train, self.regions_train
+            )
+            logger.info("Applied sample weights based on target values (standard mode)")
         
         self._log_memory_usage("after splitting data")
     
@@ -519,116 +530,69 @@ class FullDatasetTrainer:
         # Calculate training metrics
         train_pred = self.model.predict(self.X_train)
         
-        if self.predict_bias:
-            # For bias prediction, convert back to vhm0 level for metrics
-            # train_pred is bias, self.y_train is bias_true, we need vhm0_x and vhm0_y
-            vhm0_y_train = self.vhm0_x_train - self.y_train  # Reconstruct vhm0_y from bias
-            vhm0_pred_train = self.vhm0_x_train - train_pred  # Apply bias correction
-            train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
-        else:
-            # Standard vhm0 prediction
-            train_metrics = evaluate_model(train_pred, self.y_train)
+        vhm0_y_train, vhm0_pred_train = reconstruct_vhm0_values(
+            predict_bias=self.predict_bias, 
+            predict_bias_log_space=self.predict_bias_log_space, 
+            vhm0_x=self.vhm0_x_train, 
+            y_true=self.y_train,
+            y_pred=train_pred)
         
-        # Calculate regional training metrics (always available now)
+        self.vhm0_y_train = vhm0_y_train
+
+        train_metrics = evaluate_model(vhm0_pred_train, vhm0_y_train)
         logger.info("Calculating regional training metrics...")
-        if self.predict_bias:
-            # For bias prediction, convert to vhm0 level for regional metrics
-            vhm0_y_train = self.vhm0_x_train - self.y_train
-            vhm0_pred_train = self.vhm0_x_train - train_pred
-            regional_train_metrics = self._calculate_regional_metrics(
-                vhm0_y_train, vhm0_pred_train, self.regions_train
-            )
-        else:
-            regional_train_metrics = self._calculate_regional_metrics(
-                self.y_train, train_pred, self.regions_train
-            )
-        
-        # Calculate baseline regional training metrics
-        logger.info("Calculating baseline regional training metrics...")
+        regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, vhm0_pred_train, self.regions_train)
         if self.vhm0_x_train is not None:
-            if self.predict_bias:
-                # For bias prediction, baseline is zero bias (no correction)
-                vhm0_y_train = self.vhm0_x_train - self.y_train
-                baseline_regional_train_metrics = self._calculate_regional_metrics(
-                    vhm0_y_train, self.vhm0_x_train, self.regions_train  # No correction = vhm0_x
-                )
-            else:
-                # Standard approach: vhm0_x vs vhm0_y
-                baseline_regional_train_metrics = self._calculate_regional_metrics(
-                    self.y_train, self.vhm0_x_train, self.regions_train
-                )
+            logger.info("Calculating baseline regional training metrics...")
+            baseline_regional_train_metrics = self._calculate_regional_metrics(vhm0_y_train, self.vhm0_x_train, self.regions_train)
+            logger.info("Calculating baseline sea-bin training metrics...")
+            baseline_sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, self.vhm0_x_train)
         else:
             logger.warning("vhm0_x_train not available. Skipping baseline regional training metrics.")
             baseline_regional_train_metrics = {}
-        
-        # Calculate sea-bin training metrics
-        if self.predict_bias:
-            # For bias prediction, convert to vhm0 level for sea-bin metrics
-            vhm0_y_train = self.vhm0_x_train - self.y_train
-            vhm0_pred_train = self.vhm0_x_train - train_pred
-            sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
-        else:
-            sea_bin_train_metrics = self._calculate_sea_bin_metrics(self.y_train, train_pred)
+            baseline_sea_bin_train_metrics = {}
+        logger.info("Calculating sea-bin model training metrics...")
+        sea_bin_train_metrics = self._calculate_sea_bin_metrics(vhm0_y_train, vhm0_pred_train)
+        self.sea_bin_train_metrics = sea_bin_train_metrics
+        self.baseline_sea_bin_train_metrics = baseline_sea_bin_train_metrics
         
         # 🚀 MEMORY OPTIMIZATION: Delete train predictions immediately
         del train_pred
         import gc; gc.collect()
-        
-        # Calculate validation metrics if validation set exists
+
+        # Calculate validation metrics
         if len(self.X_val) > 0:
             val_pred = self.model.predict(self.X_val)
-            
-            if self.predict_bias:
-                vhm0_y_val = self.vhm0_x_val - self.y_val
-                vhm0_pred_val = self.vhm0_x_val - val_pred  # Apply bias correction
-                val_metrics = evaluate_model(vhm0_pred_val, vhm0_y_val)
-            else:
-                val_metrics = evaluate_model(val_pred, self.y_val)
-            
-            # Calculate regional validation metrics (always available now)
+
+            vhm0_y_val, vhm0_pred_val = reconstruct_vhm0_values(
+                predict_bias=self.predict_bias,
+                predict_bias_log_space=self.predict_bias_log_space,
+                vhm0_x=self.vhm0_x_val,
+                y_true=self.y_val,
+                y_pred=val_pred,
+            )
+            self.vhm0_y_val = vhm0_y_val
+
+            val_metrics = evaluate_model(vhm0_pred_val, vhm0_y_val)
+
             logger.info("Calculating regional validation metrics...")
-            if self.predict_bias:
-                # For bias prediction, convert to vhm0 level for regional metrics
-                vhm0_y_val = self.vhm0_x_val - self.y_val
-                vhm0_pred_val = self.vhm0_x_val - val_pred
-                regional_val_metrics = self._calculate_regional_metrics(
-                    vhm0_y_val, vhm0_pred_val, self.regions_val
-                )
-            else:
-                regional_val_metrics = self._calculate_regional_metrics(
-                    self.y_val, val_pred, self.regions_val
-                )
-            
-            # Calculate baseline regional validation metrics
+            regional_val_metrics = self._calculate_regional_metrics(
+                vhm0_y_val, vhm0_pred_val, self.regions_val
+            )
+
             logger.info("Calculating baseline regional validation metrics...")
             if self.vhm0_x_val is not None and len(self.vhm0_x_val) > 0:
-                if self.predict_bias:
-                    # For bias prediction, baseline is zero bias (no correction)
-                    vhm0_y_val = self.vhm0_x_val - self.y_val
-                    baseline_regional_val_metrics = self._calculate_regional_metrics(
-                        vhm0_y_val, self.vhm0_x_val, self.regions_val  # No correction = vhm0_x
-                    )
-                else:
-                    # Standard approach: vhm0_x vs vhm0_y
-                    baseline_regional_val_metrics = self._calculate_regional_metrics(
-                        self.y_val, self.vhm0_x_val, self.regions_val
-                    )
+                baseline_regional_val_metrics = self._calculate_regional_metrics(vhm0_y_val, self.vhm0_x_val, self.regions_val)
             else:
                 logger.warning("vhm0_x_val not available. Skipping baseline regional validation metrics.")
                 baseline_regional_val_metrics = {}
-            
-            # Calculate sea-bin validation metrics
-            if self.predict_bias:
-                # For bias prediction, convert to vhm0 level for sea-bin metrics
-                vhm0_y_val = self.vhm0_x_val - self.y_val
-                vhm0_pred_val = self.vhm0_x_val - val_pred
-                sea_bin_val_metrics = self._calculate_sea_bin_metrics(vhm0_y_val, vhm0_pred_val)
-            else:
-                sea_bin_val_metrics = self._calculate_sea_bin_metrics(self.y_val, val_pred)
-            
-            # 🚀 MEMORY OPTIMIZATION: Delete val predictions immediately
+
+            sea_bin_val_metrics = self._calculate_sea_bin_metrics(vhm0_y_val, vhm0_pred_val)
+
+            # Memory optimization
             del val_pred
             gc.collect()
+
         else:
             val_metrics = {'rmse': 0.0, 'mae': 0.0, 'bias': 0.0, 'pearson': 0.0, 'snr': 0.0, 'snr_db': 0.0}
             regional_val_metrics = {}
@@ -703,56 +667,47 @@ class FullDatasetTrainer:
         else:
             test_pred = self.model.predict(self.X_test)
         
-        if self.predict_bias:
-            vhm0_y_test = self.vhm0_x_test - self.y_test
-            vhm0_pred_test = self.vhm0_x_test - test_pred  # Apply bias correction
+        if len(self.X_test) > 0:
+            vhm0_y_test, vhm0_pred_test = reconstruct_vhm0_values(
+                predict_bias=self.predict_bias,
+                predict_bias_log_space=self.predict_bias_log_space,
+                vhm0_x=self.vhm0_x_test,
+                y_true=self.y_test,
+                y_pred=test_pred,
+            )
+            self.vhm0_y_test = vhm0_y_test
+
             test_metrics = evaluate_model(vhm0_pred_test, vhm0_y_test)
-        else:
-            test_metrics = evaluate_model(test_pred, self.y_test)
-        
-        # Calculate regional test metrics (always available now)
-        logger.info("Calculating regional test metrics...")
-        if self.predict_bias:
-            # For bias prediction, convert to vhm0 level for regional metrics
-            vhm0_y_test = self.vhm0_x_test - self.y_test
-            vhm0_pred_test = self.vhm0_x_test - test_pred
+
+            logger.info("Calculating regional test metrics...")
             regional_test_metrics = self._calculate_regional_metrics(
                 vhm0_y_test, vhm0_pred_test, self.regions_test
             )
-        else:
-            regional_test_metrics = self._calculate_regional_metrics(
-                self.y_test, test_pred, self.regions_test
-            )
-        
-        # Calculate baseline regional test metrics
-        logger.info("Calculating baseline regional test metrics...")
-        if self.vhm0_x_test is not None and len(self.vhm0_x_test) > 0:
-            if self.predict_bias:
-                # For bias prediction, baseline is zero bias (no correction)
-                vhm0_y_test = self.vhm0_x_test - self.y_test
+
+            logger.info("Calculating baseline regional test metrics...")
+            if self.vhm0_x_test is not None and len(self.vhm0_x_test) > 0:
                 baseline_regional_test_metrics = self._calculate_regional_metrics(
-                    vhm0_y_test, self.vhm0_x_test, self.regions_test  # No correction = vhm0_x
+                    vhm0_y_test, self.vhm0_x_test, self.regions_test
                 )
-                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, self.vhm0_x_test)
+                logger.info("Calculating baseline sea-bin test metrics...")
+                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(
+                    vhm0_y_test, self.vhm0_x_test
+                )
             else:
-                # Standard approach: vhm0_x vs vhm0_y
-                baseline_regional_test_metrics = self._calculate_regional_metrics(
-                    self.y_test, self.vhm0_x_test, self.regions_test
-                )
-                baseline_sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, self.vhm0_x_test)
-        else:
-            logger.warning("vhm0_x_test not available. Skipping baseline regional test metrics.")
-            baseline_regional_test_metrics = {}
-            baseline_sea_bin_test_metrics = {}
-        
-        # Calculate sea-bin test metrics
-        if self.predict_bias:
-            # For bias prediction, convert to vhm0 level for sea-bin metrics
-            vhm0_y_test = self.vhm0_x_test - self.y_test
-            vhm0_pred_test = self.vhm0_x_test - test_pred
+                logger.warning("vhm0_x_test not available. Skipping baseline regional test metrics.")
+                baseline_regional_test_metrics = {}
+                baseline_sea_bin_test_metrics = {}
+
+            logger.info("Calculating sea-bin model test metrics...")
             sea_bin_test_metrics = self._calculate_sea_bin_metrics(vhm0_y_test, vhm0_pred_test)
         else:
-            sea_bin_test_metrics = self._calculate_sea_bin_metrics(self.y_test, test_pred)
+            test_metrics = {'rmse': 0.0, 'mae': 0.0, 'bias': 0.0, 'pearson': 0.0, 'snr': 0.0, 'snr_db': 0.0}
+            regional_test_metrics = {}
+            baseline_regional_test_metrics = {}
+            baseline_sea_bin_test_metrics = {}
+            sea_bin_test_metrics = {}
+        
+        self.region_sea_bin_metrics = self._calculate_region_sea_bin_metrics(vhm0_y_test, vhm0_pred_test, self.regions_test, self.vhm0_x_test)
         
         # Store current test metrics as class attribute
         self.current_test_metrics = test_metrics
@@ -765,13 +720,14 @@ class FullDatasetTrainer:
         
         # Create diagnostic plots
         if self.diagnostics_config.get("enabled", False):
-            self.diagnostic_plotter.create_diagnostic_plots(self, test_pred)
+            self.diagnostic_plotter.create_diagnostic_plots(self, vhm0_pred_test)
             # Log diagnostic plots to Comet
             plots_dir = Path(self.diagnostics_config.get("plots_save_path", "diagnostic_plots"))
             self.experiment_logger.log_diagnostic_plots(plots_dir)
         
         # 🚀 MEMORY OPTIMIZATION: Delete test predictions after plotting
         del test_pred
+        del vhm0_pred_test
         import gc; gc.collect()
         
         logger.info(f"Test evaluation - RMSE: {self.test_metrics.get('rmse', 0):.4f}, MAE: {self.test_metrics.get('mae', 0):.4f}, Pearson: {self.test_metrics.get('pearson', 0):.4f}")
