@@ -8,16 +8,17 @@ from botocore.config import Config
 from tqdm import tqdm
 
 # --- config you change ---
-SRC_DIR = Path("/data/tsolis/AI_project/parquet/augmented_with_labels/hourly")
+SRC_DIR = Path("/Users/deeplab/Documents/projects/hcmr/data/ocean2/without_reduced")
 BUCKET  = "medwav-dev-data"
-PREFIX  = "parquet/hourly"   # base prefix in S3
+PREFIX  = "raw/without_reduced"   # base prefix in S3
 PARTITION_BY_YEAR = True     # put files under year=YYYY/
 SKIP_IF_SAME_SIZE = True     # fast resume: skip if object exists with same size
 MAX_CONCURRENCY = 16         # threads for multipart uploads
-CHUNK_MB = 64                # multipart chunk size
+CHUNK_MB = 64
+file_suffix = "nc"               # multipart chunk size
 # -------------------------
 
-date_rx = re.compile(r"WAVEAN(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})\.parquet$")
+date_rx = re.compile(r"WAVEAN(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})\.nc$")
 
 def s3_key_for(path: Path) -> str:
     m = date_rx.search(path.name)
@@ -36,11 +37,10 @@ def object_exists_with_size(s3, bucket: str, key: str, size: int) -> bool:
         return False
 
 def main() -> int:
-    files = sorted(SRC_DIR.glob("WAVEAN2021*.parquet"))
+    files = sorted(SRC_DIR.glob(f"WAVEAN202011*.{file_suffix}"))
     if not files:
         print(f"No files found under {SRC_DIR}")
         return 1
-
     session = boto3.session.Session()
     s3_client = session.client(
         "s3",
