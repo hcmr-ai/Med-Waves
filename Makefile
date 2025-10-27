@@ -47,6 +47,9 @@ train-ml: ## Run incremental training
 train-per-point: ## Run incremental training
 	poetry run python src/pipelines/training/train_model_per_point.py --config src/configs/config_model_per_point.yaml --output-dir results_test
 
+train-bunet: ## Run incremental training
+	poetry run python src/pipelines/training/dnn_trainer.py --config src/configs/config_dnn.yaml
+
 run-train-evaluator: ## Run training evaluator
 	poetry run python -m src.pipelines.training.train_evaluator
 

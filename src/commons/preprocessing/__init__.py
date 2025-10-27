@@ -7,4 +7,4 @@ scaling, and feature engineering.
 
 from .regional_scaler import RegionalScaler
 
-__all__ = ['RegionalScaler']
+__all__ = ["RegionalScaler"]

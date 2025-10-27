@@ -1,0 +1,84 @@
+# DNN Training Configuration
+# Configuration for training the U-Net based wave height correction model
+
+# Data configuration
+data:
+  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*.parquet"
+  train_year: 2021
+  val_year: 2023
+  test_year: 2023
+  patch_size: null #[256, 256] # Random crop size for training (256x256 for proper U-Net bottleneck)
+  max_files: null # Limit number of files for testing, null = use all
+  random_seed: 42
+  subsample_step: 5
+
+  # Data preprocessing
+  target_column: "corrected_VHM0" # Target variable
+  predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
+  excluded_columns: [
+      "time",
+      "latitude",
+      "longitude",
+      "timestamp",
+      "corrected_VTM02",
+      "WDIR",
+      "VMDR",
+    ] # Columns to exclude from input
+  handle_nan: true # Handle NaN values with masking
+  normalizer_path: "s3://medwav-dev-data/scalers/BU24h_zscore.pkl"
+
+# Model configuration
+model:
+  in_channels: 16 # Number of input channels (all features except excluded)
+  learning_rate: 1e-4
+  loss_type: "weighted_mse" # Options: "mse", "weighted_mse"
+  filters: [64, 128, 256, 512, 1024] # U-Net encoder/decoder filters
+
+  # Learning rate scheduler configuration
+  lr_scheduler:
+    type: "ReduceLROnPlateau" # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none"
+    monitor: "val_loss" # Metric to monitor for ReduceLROnPlateau
+    mode: "min" # "min" for loss, "max" for accuracy
+    factor: 0.5 # Factor to reduce LR by
+    patience: 5 # Epochs to wait before reducing LR
+    min_lr: 1e-7 # Minimum learning rate
+    verbose: true # Print LR changes
+
+    # Additional scheduler parameters
+    T_max: 50 # For CosineAnnealingLR: max epochs
+    step_size: 10 # For StepLR: epochs between LR reductions
+    gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
+
+# Training configuration
+training:
+  batch_size: 8
+  max_epochs: 100
+  num_workers: 1
+  pin_memory: true
+  accelerator: "auto" # Options: "gpu", "cpu", "auto"
+  devices: 1 # Number of GPUs to use
+  precision: 32 # Full precision training (16 or 32)
+  log_every_n_steps: 1
+  early_stopping_patience: 10
+  save_top_k: 3
+  monitor: "val_loss"
+  mode: "min"
+  fast_dev_run: false
+  check_val_every_n_epoch: 1
+
+# Checkpoint configuration
+checkpoint:
+  resume_from_checkpoint: null # Path to checkpoint file to resume from
+  checkpoint_dir: "checkpoints" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5" # S3 backup for spot instances
+  save_last: true
+  sync_frequency: 5 # Sync to S3 every N epochs
+
+# Logging configuration
+logging:
+  log_dir: "logs"
+  experiment_name: "dnn_wave_correction_subsample_step_5"
+  use_comet: true
+  comet_tags: ["wave_height", "bu_net", "bias_correction"]
+  comet_notes: "DNN training for wave height correction using U-Net architecture"
