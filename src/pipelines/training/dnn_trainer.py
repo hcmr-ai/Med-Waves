@@ -255,7 +255,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     predict_bias = data_config.get("predict_bias", False)
     subsample_step = data_config.get("subsample_step", None)
 
-    normalizer = WaveNormalizer.load_from_s3(data_config["normalizer_path"])
+    normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
     train_dataset = WaveDataset(
         train_files,

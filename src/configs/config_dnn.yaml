@@ -3,7 +3,7 @@
 
 # Data configuration
 data:
-  data_path: "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  data_path: "s3://medwav-dev-data/parquet/hourly/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.parquet"
   train_year: 2021
   val_year: 2023
