@@ -241,6 +241,17 @@ class WaveBiasCorrector(pl.LightningModule):
             
             # Log sea-bin metrics for training
             self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
+            
+            # Log baseline sea-bin metrics (uncorrected VHM0 vs ground truth)
+            # Extract uncorrected VHM0 from input features (assuming it's the first channel)
+            vhm0_uncorrected = X[:, 0:1, :min_h, :min_w]  # Extract VHM0 channel
+            vhm0_uncorrected_masked = vhm0_uncorrected[mask]
+            
+            # Calculate ground truth wave heights (y_true + vhm0_uncorrected)
+            y_true_wave_heights = y[mask] + vhm0_uncorrected_masked
+            
+            # Log baseline sea-bin metrics
+            self._log_sea_bin_metrics(y_true_wave_heights, vhm0_uncorrected_masked, "train_baseline")
 
         return loss
 
@@ -278,6 +289,17 @@ class WaveBiasCorrector(pl.LightningModule):
             
             # Log sea-bin metrics for validation
             self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
+            
+            # Log baseline sea-bin metrics for validation (uncorrected VHM0 vs ground truth)
+            # Extract uncorrected VHM0 from input features (assuming it's the first channel)
+            vhm0_uncorrected = X[:, 0:1, :min_h, :min_w]  # Extract VHM0 channel
+            vhm0_uncorrected_masked = vhm0_uncorrected[mask]
+            
+            # Calculate ground truth wave heights (y_true + vhm0_uncorrected)
+            y_true_wave_heights = y[mask] + vhm0_uncorrected_masked
+            
+            # Log baseline sea-bin metrics
+            self._log_sea_bin_metrics(y_true_wave_heights, vhm0_uncorrected_masked, "val_baseline")
 
             # Store results for callback (only on first batch of epoch)
             if batch_idx == 0:
