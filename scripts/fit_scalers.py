@@ -18,30 +18,36 @@ DATA_PATH = "s3://medwav-dev-data/parquet/hourly/year=2021"# "/Users/deeplab/Doc
 FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos']
 def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
     """Load and stack all parquet files into numpy"""
-    lf = pl.scan_parquet(parquet_dir + "/WAVEAN20210101*.parquet", storage_options={
-        "AWS_REGION": "eu-central-1",
-        "AWS_ACCESS_KEY_ID": os.environ["AWS_ACCESS_KEY_ID"],
-        "AWS_SECRET_ACCESS_KEY": os.environ["AWS_SECRET_ACCESS_KEY"],
-    })
-    if features:
-        lf = lf.select(features)
-    df = lf.collect()
-    arr = df.to_numpy()
-    return arr
-    # fs = s3fs.S3FileSystem()
-    # files = fs.glob(f"{parquet_dir}/WAVEAN20210101*.parquet")
-    # print(f"Found {len(files)} parquet files")
+    # lf = pl.scan_parquet(parquet_dir + "/*.parquet", storage_options={
+    #     "AWS_REGION": "eu-central-1",
+    #     "AWS_ACCESS_KEY_ID": os.environ["AWS_ACCESS_KEY_ID"],
+    #     "AWS_SECRET_ACCESS_KEY": os.environ["AWS_SECRET_ACCESS_KEY"],
+    # })
+    # if features:
+    #     lf = lf.select(features)
+    # df = lf.collect()
+    # arr = df.to_numpy()
+    # return arr
+    fs = s3fs.S3FileSystem()
+    files = fs.glob(f"{parquet_dir}/*.parquet")
+    print(f"Found {len(files)} parquet files")
 
-    # dfs = []
-    # for f in files:
-    #     with fs.open(f, "rb") as fh:
-    #         df = pl.read_parquet(fh)
-    #         if features:
-    #             df = df.select(features)
-    #         dfs.append(df)
+    dfs = []
+    for f in tqdm(files, desc="Loading parquet files"):
+        with fs.open(f, "rb") as fh:
+            df = pl.read_parquet(fh)
+            print(f"\nFile: {f}")
+            print(f"  Shape: {df.shape}")
+            df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
+            if features:
+                df = df.select(features)
+            dfs.append(df)
+            print(f"  After drop nulls: {df.shape}")
 
-    # full_df = pl.concat(dfs, how="vertical")
-    # return full_df.to_numpy()
+    # Concatenate vertically
+    full_df = pl.concat(dfs, how="vertical")
+
+    return full_df.to_numpy().astype(np.float32)
 
 def save_to_s3(local_path, bucket, key):
     s3 = boto3.client("s3")
