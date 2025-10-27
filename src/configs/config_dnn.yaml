@@ -4,9 +4,9 @@
 # Data configuration
 data:
   data_path: "s3://medwav-dev-data/parquet/hourly/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*.parquet"
+  file_pattern: "WAVEAN*11*.parquet"
   train_year: 2021
-  val_year: 2023
+  val_year: 2022
   test_year: 2023
   patch_size: null #[256, 256] # Random crop size for training (256x256 for proper U-Net bottleneck)
   max_files: null # Limit number of files for testing, null = use all
@@ -21,16 +21,17 @@ data:
       "latitude",
       "longitude",
       "timestamp",
+      "VTM02",
       "corrected_VTM02",
       "WDIR",
       "VMDR",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "s3://medwav-dev-data/scalers/BU24h_zscore.pkl"
+  normalizer_path: "scalers/BU24h_zscore.pkl"
 
 # Model configuration
 model:
-  in_channels: 16 # Number of input channels (all features except excluded)
+  in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4
   loss_type: "weighted_mse" # Options: "mse", "weighted_mse"
   filters: [64, 128, 256, 512, 1024] # U-Net encoder/decoder filters
@@ -54,7 +55,7 @@ model:
 training:
   batch_size: 8
   max_epochs: 100
-  num_workers: 1
+  num_workers: 0
   pin_memory: true
   accelerator: "auto" # Options: "gpu", "cpu", "auto"
   devices: 1 # Number of GPUs to use

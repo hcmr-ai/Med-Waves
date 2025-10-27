@@ -51,8 +51,16 @@ class WaveNormalizer:
         for c in range(n_channels):
             data_c = X[..., c]
             if self.mode == "zscore":
-                mean, std = self.stats_[c]
-                X_out[..., c] = (data_c - mean) / (std + 1e-6)
+                if isinstance(self.stats_[c], tuple):
+                    # Handle tuple format (mean, std)
+                    mean, std = self.stats_[c]
+                    X_out[..., c] = (data_c - mean) / (std + 1e-6)
+                else:
+                    # Handle StandardScaler object
+                    scaler = self.stats_[c]
+                    flat = data_c.reshape(-1, 1)
+                    trans = scaler.transform(flat)
+                    X_out[..., c] = trans.reshape(data_c.shape)
             else:  # quantile
                 qt = self.stats_[c]
                 flat = data_c.reshape(-1, 1)
@@ -67,8 +75,16 @@ class WaveNormalizer:
         for c in range(n_channels):
             data_c = X[..., c]
             if self.mode == "zscore":
-                mean, std = self.stats_[c]
-                X_out[..., c] = data_c * std + mean
+                if isinstance(self.stats_[c], tuple):
+                    # Handle tuple format (mean, std)
+                    mean, std = self.stats_[c]
+                    X_out[..., c] = data_c * std + mean
+                else:
+                    # Handle StandardScaler object
+                    scaler = self.stats_[c]
+                    flat = data_c.reshape(-1, 1)
+                    inv = scaler.inverse_transform(flat)
+                    X_out[..., c] = inv.reshape(data_c.shape)
             else:  # quantile
                 qt = self.stats_[c]
                 flat = data_c.reshape(-1, 1)

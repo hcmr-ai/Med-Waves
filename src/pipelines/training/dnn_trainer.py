@@ -179,9 +179,10 @@ def get_file_list(
     """Get list of files from S3 or local path"""
     if data_path.startswith("s3://"):
         fs = s3fs.S3FileSystem()
-        files = fs.glob(f"{data_path}{file_pattern}")
+        # Use recursive glob to search in subdirectories
+        files = fs.glob(f"{data_path}**/{file_pattern}")
     else:
-        files = list(Path(data_path).glob(file_pattern))
+        files = list(Path(data_path).glob(f"**/{file_pattern}"))
         files = [str(f) for f in files]
 
     if max_files:
@@ -256,6 +257,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     subsample_step = data_config.get("subsample_step", None)
 
     normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
+    logger.info(f"Normalizer: {normalizer.mode}")
+    logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
     train_dataset = WaveDataset(
         train_files,

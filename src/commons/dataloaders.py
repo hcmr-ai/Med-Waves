@@ -59,15 +59,16 @@ class WaveDataset(Dataset):
             # Local file
             table = pq.read_table(path)
         else:
-            # S3 file
-            with self.fs.open(path, "rb") as f:
+            # S3 file - create new filesystem instance to avoid fork-safety issues
+            fs = s3fs.S3FileSystem()
+            with fs.open(path, "rb") as f:
                 table = pq.read_table(f)
 
         # Get column names
         column_names = [field.name for field in table.schema]
-        # Don't filter excluded columns yet - we need VHM0 for bias calculation
+        # Filter out excluded columns (but keep VHM0 for bias calculation if needed)
         feature_cols = [
-            col for col in column_names if col not in ["time", "latitude", "longitude"]
+            col for col in column_names if col not in self.excluded_columns
         ]
 
         # Convert to numpy arrays directly from PyArrow
