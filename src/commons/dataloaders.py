@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-class WaveDatasetDNN(Dataset):
+class WaveDataset(Dataset):
     def __init__(
         self,
         file_paths,
