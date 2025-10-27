@@ -16,7 +16,8 @@ def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
         return torch.tensor(0.0, device=y_true.device)
 
     y_clean = torch.nan_to_num(y_true, nan=0.0)
-    diff = (y_pred - y_clean) ** 2
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
+    diff = (y_pred_clean - y_clean) ** 2
     loss = diff[combined_mask].mean()
 
     # Check for NaN in loss
@@ -43,11 +44,12 @@ def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=3.0, ep
         return torch.tensor(0.0, device=y_true.device)
 
     y_clean = torch.nan_to_num(y_true, nan=0.0)
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
 
     weights = torch.ones_like(y_clean)
     weights = torch.where(y_clean >= threshold, high_weight, weights)
 
-    diff = (y_pred - y_clean) ** 2 * weights
+    diff = (y_pred_clean - y_clean) ** 2 * weights
     weight_sum = weights[combined_mask].sum()
 
     if weight_sum == 0:
