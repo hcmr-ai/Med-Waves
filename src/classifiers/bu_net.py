@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -192,7 +193,9 @@ class WaveBiasCorrector(pl.LightningModule):
         self.lr_scheduler_config = lr_scheduler_config or {}
 
     def forward(self, x):
-        return self.model(x)
+        # Handle NaN values in input by replacing with zeros
+        x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        return self.model(x_clean)
 
     def compute_loss(self, y_pred, y_true, mask):
         if self.loss_type == "mse":
@@ -211,7 +214,7 @@ class WaveBiasCorrector(pl.LightningModule):
             # Calculate additional metrics
             min_h = min(y_pred.shape[2], y.shape[2])
             min_w = min(y_pred.shape[3], y.shape[3])
-            y_pred = y[:, :, :min_h, :min_w]
+            y_pred = y_pred[:, :, :min_h, :min_w]
             y = y[:, :, :min_h, :min_w]
             mask = mask[:, :, :min_h, :min_w]
 
@@ -235,6 +238,9 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log(
                 "train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True
             )
+            
+            # Log sea-bin metrics for training
+            self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
 
         return loss
 
@@ -269,12 +275,65 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("val_pred_mean", y_pred[mask].mean(), on_epoch=True)
             self.log("val_pred_std", y_pred[mask].std(), on_epoch=True)
             self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
+            
+            # Log sea-bin metrics for validation
+            self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
 
             # Store results for callback (only on first batch of epoch)
             if batch_idx == 0:
                 self.last_val_batch = (y, y_pred, mask)
 
         return loss
+
+    def _log_sea_bin_metrics(self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str):
+        """Log sea-bin metrics for different wave height ranges."""
+        # Convert to numpy for sea-bin calculation
+        y_true_np = y_true.cpu().numpy()
+        y_pred_np = y_pred.cpu().numpy()
+        
+        # Define sea-bin ranges (same as in config)
+        sea_bins = [
+            {"name": "calm", "min": 0.0, "max": 1.0},
+            {"name": "light", "min": 1.0, "max": 2.0},
+            {"name": "moderate", "min": 2.0, "max": 3.0},
+            {"name": "rough", "min": 3.0, "max": 4.0},
+            {"name": "very_rough", "min": 4.0, "max": 5.0},
+            {"name": "extreme_5_6", "min": 5.0, "max": 6.0},
+            {"name": "extreme_6_7", "min": 6.0, "max": 7.0},
+            {"name": "extreme_7_8", "min": 7.0, "max": 8.0},
+            {"name": "extreme_8_9", "min": 8.0, "max": 9.0},
+            {"name": "extreme_9_10", "min": 9.0, "max": 10.0},
+            {"name": "extreme_10_11", "min": 10.0, "max": 11.0},
+            {"name": "extreme_11_12", "min": 11.0, "max": 12.0},
+            {"name": "extreme_12_13", "min": 12.0, "max": 13.0},
+            {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
+            {"name": "extreme_14_15", "min": 14.0, "max": 15.0}
+        ]
+        
+        for bin_config in sea_bins:
+            bin_name = bin_config["name"]
+            bin_min = bin_config["min"]
+            bin_max = bin_config["max"]
+            
+            # Filter data for this sea state bin
+            mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
+            bin_count = np.sum(mask)
+            
+            if bin_count > 0:
+                bin_y_true = y_true_np[mask]
+                bin_y_pred = y_pred_np[mask]
+                
+                # Calculate metrics for this bin
+                mae = np.mean(np.abs(bin_y_pred - bin_y_true))
+                mse = np.mean((bin_y_pred - bin_y_true) ** 2)
+                rmse = np.sqrt(mse)
+                bias = np.mean(bin_y_pred - bin_y_true)
+                
+                # Log metrics with bin-specific names
+                self.log(f"{prefix}_{bin_name}_mae", mae, on_epoch=True)
+                self.log(f"{prefix}_{bin_name}_rmse", rmse, on_epoch=True)
+                self.log(f"{prefix}_{bin_name}_bias", bias, on_epoch=True)
+                self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr)
