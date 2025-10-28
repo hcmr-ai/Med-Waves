@@ -45,6 +45,7 @@ class WaveDataset(Dataset):
         self.target_column = target_column
         self.predict_bias = predict_bias
         self.subsample_step = subsample_step
+        self._feature_names_logged = False  # Flag to log channel order only once
         # Index map: (file_idx, hour_idx)
         self.index_map = [
             (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
@@ -117,6 +118,18 @@ class WaveDataset(Dataset):
         ]
 
         X = hour_data[..., input_col_indices]  # shape (H, W, C_in)
+        
+        # Log channel order information only once
+        if not self._feature_names_logged:
+            import logging
+            logger = logging.getLogger(__name__)
+            input_feature_names = [feature_cols[i] for i in input_col_indices]
+            logger.info("=" * 80)
+            logger.info("CHANNEL ORDER IN INPUT TENSOR X:")
+            for ch_idx, feat_name in enumerate(input_feature_names):
+                logger.info(f"  Channel {ch_idx}: {feat_name}")
+            logger.info("=" * 80)
+            self._feature_names_logged = True
 
         if self.predict_bias:
             # Calculate bias on-the-fly: corrected_VHM0 - VHM0

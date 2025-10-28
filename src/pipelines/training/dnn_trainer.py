@@ -410,11 +410,13 @@ def main():
     else:
         logger.info("LR Scheduler: None")
 
+    local_predict_bias = config.config.get("data", {}).get("predict_bias", False)
     model = WaveBiasCorrector(
         in_channels=model_config["in_channels"],
         lr=float(model_config["learning_rate"]),
         loss_type=model_config["loss_type"],
         lr_scheduler_config=model_config.get("lr_scheduler", {}),
+        predict_bias=local_predict_bias,
     )
 
     # Create callbacks
