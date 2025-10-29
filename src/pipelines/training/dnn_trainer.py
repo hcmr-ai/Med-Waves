@@ -348,6 +348,9 @@ def create_callbacks(config: DNNConfig) -> list:
 
 
 def main():
+    # Optimize for Tensor Cores on modern GPUs (fixes the warning)
+    torch.set_float32_matmul_precision('medium')
+    
     parser = argparse.ArgumentParser(description="Train DNN for wave height correction")
     parser.add_argument("--config", type=str, help="Path to configuration YAML file")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
@@ -382,6 +385,12 @@ def main():
 
     # Create data loaders
     logger.info("Creating data loaders...")
+    
+    # Check if we should pre-download data for multiprocessing
+    if config.config["training"]["num_workers"] > 0 and config.config["data"]["data_path"].startswith("s3://"):
+        logger.warning("S3FS detected with num_workers > 0. This may cause issues.")
+        logger.warning("Consider setting num_workers=0 or pre-downloading data locally.")
+    
     train_loader, val_loader = create_data_loaders(config, fs)
 
     # Test one batch
