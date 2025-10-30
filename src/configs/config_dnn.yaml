@@ -34,7 +34,7 @@ model:
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4
   loss_type: "weighted_mse" # Options: "mse", "weighted_mse"
-  filters: [64, 128, 256, 512, 1024] # U-Net encoder/decoder filters
+  filters: [64, 128, 256, 512] # U-Net encoder/decoder filters
 
   # Learning rate scheduler configuration
   lr_scheduler:
@@ -55,7 +55,7 @@ model:
 training:
   batch_size: 16
   max_epochs: 100
-  num_workers: 0 # Number of workers for data loading
+  num_workers: 6 # Number of workers for data loading
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1 # Number of GPUs to use
@@ -67,6 +67,7 @@ training:
   mode: "min"
   fast_dev_run: false
   check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
 
 # Checkpoint configuration
 checkpoint:

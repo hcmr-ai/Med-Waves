@@ -206,7 +206,7 @@ def split_files_by_year(
         # Try to extract year from filename
         year = None
         for y in [train_year, val_year, test_year]:
-            if str(y) in filename:
+            if f"WAVEAN{y}" in filename:
                 year = y
                 break
 
@@ -289,7 +289,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=True,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config["num_workers"] > 0
+        # prefetch_factor=1
     )
 
     val_loader = DataLoader(
@@ -298,7 +299,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=False,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config["num_workers"] > 0
+        # prefetch_factor=
     )
 
     return train_loader, val_loader
@@ -350,6 +352,10 @@ def create_callbacks(config: DNNConfig) -> list:
 def main():
     # Optimize for Tensor Cores on modern GPUs (fixes the warning)
     torch.set_float32_matmul_precision('medium')
+    
+    # Use new API to avoid deprecation warnings
+    torch.backends.cudnn.conv.fp32_precision = 'tf32'
+    torch.backends.cuda.matmul.fp32_precision = 'ieee'
     
     parser = argparse.ArgumentParser(description="Train DNN for wave height correction")
     parser.add_argument("--config", type=str, help="Path to configuration YAML file")
@@ -500,6 +506,7 @@ def main():
         check_val_every_n_epoch=training_config["check_val_every_n_epoch"],
         gradient_clip_val=1.0,  # Add gradient clipping
         gradient_clip_algorithm="norm",
+        num_sanity_val_steps=training_config["num_sanity_val_steps"],
     )
 
     # Handle checkpoint resuming (local or S3)

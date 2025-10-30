@@ -45,7 +45,7 @@ class WaveDataset(Dataset):
         self.target_column = target_column
         self.predict_bias = predict_bias
         self.subsample_step = subsample_step
-        self._feature_names_logged = False  # Flag to log channel order only once
+        self._feature_names_logged = True  # Flag to log channel order only once
         # Index map: (file_idx, hour_idx)
         self.index_map = [
             (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
