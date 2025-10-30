@@ -112,9 +112,11 @@ class WaveDataset(Dataset):
         # Get the specific hour data
         hour_data = arr[hour_idx]  # shape (H, W, C)
 
-        # Get input columns (all features except excluded columns)
+        # Get input columns (exclude metadata and the target column)
         input_col_indices = [
-            i for i, col in enumerate(feature_cols) if col not in self.excluded_columns
+            i
+            for i, col in enumerate(feature_cols)
+            if (col not in self.excluded_columns) and (col != self.target_column)
         ]
 
         X = hour_data[..., input_col_indices]  # shape (H, W, C_in)
@@ -147,6 +149,7 @@ class WaveDataset(Dataset):
             y = hour_data[
                 ..., target_col_index : target_col_index + 1
             ]  # shape (H, W, 1)
+
 
         # Optional patch sampling
         if self.patch_size is not None:

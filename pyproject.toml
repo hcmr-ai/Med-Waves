@@ -46,3 +46,9 @@ matplotlib = "^3.10.7"
 ruff = "^0.12.1"
 pre-commit = "^4.2.0"
 
+
+[[tool.poetry.source]]
+name = "torch-stable"
+url = "https://download.pytorch.org/whl/torch_stable.html"
+priority = "explicit"
+

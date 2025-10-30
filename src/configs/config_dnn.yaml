@@ -3,8 +3,8 @@
 
 # Data configuration
 data:
-  data_path: "s3://medwav-dev-data/parquet/hourly/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*11*.parquet"
+  data_path: "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*.parquet"
   train_year: 2021
   val_year: 2022
   test_year: 2023
@@ -53,13 +53,13 @@ model:
 
 # Training configuration
 training:
-  batch_size: 8
+  batch_size: 16
   max_epochs: 100
-  num_workers: 0
+  num_workers: 0 # Number of workers for data loading
   pin_memory: true
-  accelerator: "auto" # Options: "gpu", "cpu", "auto"
+  accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1 # Number of GPUs to use
-  precision: 32 # Full precision training (16 or 32)
+  precision: 16 # Full precision training (16 or 32)
   log_every_n_steps: 1
   early_stopping_patience: 10
   save_top_k: 3
