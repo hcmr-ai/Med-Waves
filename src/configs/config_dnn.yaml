@@ -3,8 +3,8 @@
 
 # Data configuration
 data:
-  data_path: "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*.parquet"
+  data_path: "/opt/dlami/nvme/preprocessed" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*.pt"
   train_year: 2021
   val_year: 2022
   test_year: 2023
@@ -53,14 +53,14 @@ model:
 
 # Training configuration
 training:
-  batch_size: 16
-  max_epochs: 100
-  num_workers: 6 # Number of workers for data loading
+  batch_size: 64
+  max_epochs: 20
+  num_workers: 8
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
-  devices: 1 # Number of GPUs to use
-  precision: 16 # Full precision training (16 or 32)
-  log_every_n_steps: 1
+  devices: 1
+  precision: "16-mixed" # Full precision training (16 or 32)
+  log_every_n_steps: 20
   early_stopping_patience: 10
   save_top_k: 3
   monitor: "val_loss"
@@ -68,18 +68,19 @@ training:
   fast_dev_run: false
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 0
-
+  benchmark: true
+  prefetch_factor: 2
 # Checkpoint configuration
 checkpoint:
   resume_from_checkpoint: null # Path to checkpoint file to resume from
-  checkpoint_dir: "checkpoints" # Local directory for fast access
+  checkpoint_dir: "/opt/dlami/nvme/preprocessed/checkpoints" # Local directory for fast access
   s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5" # S3 backup for spot instances
   save_last: true
   sync_frequency: 5 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "logs"
+  log_dir: "/opt/dlami/nvme/preprocessed/logs"
   experiment_name: "dnn_wave_correction_subsample_step_5"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
