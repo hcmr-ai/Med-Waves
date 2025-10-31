@@ -67,6 +67,76 @@ class WaveNormalizer:
                 trans = qt.transform(flat)
                 X_out[..., c] = trans.reshape(data_c.shape)
         return X_out
+    
+    def transform_torch(self, X):
+        """
+        PyTorch-optimized transform that avoids numpy conversions.
+        X shape: (H, W, C) or (C, H, W) - torch tensor
+        Returns: torch tensor of same shape
+        """
+        import torch
+        
+        # Handle different input shapes
+        if X.dim() == 4:  # (N, H, W, C) or (N, C, H, W)
+            if X.shape[1] == self.stats_.__len__():  # (N, C, H, W)
+                needs_permute = True
+                X = X.permute(0, 2, 3, 1)  # (N, H, W, C)
+            else:  # (N, H, W, C)
+                needs_permute = False
+            batch_size = X.shape[0]
+        elif X.dim() == 3:
+            if X.shape[0] == self.stats_.__len__():  # (C, H, W)
+                needs_permute = True
+                X = X.permute(1, 2, 0).unsqueeze(0)  # (1, H, W, C)
+                batch_size = 1
+            else:  # (H, W, C)
+                X = X.unsqueeze(0)  # (1, H, W, C)
+                needs_permute = False
+                batch_size = 1
+        else:
+            raise ValueError(f"Unsupported tensor shape: {X.shape}")
+        
+        X_out = X.clone()
+        n_channels = X.shape[-1]
+        
+        for c in range(n_channels):
+            data_c = X[..., c]  # (N, H, W) or (H, W)
+            
+            if self.mode == "zscore":
+                if isinstance(self.stats_[c], tuple):
+                    # Fast path: direct computation
+                    mean, std = self.stats_[c]
+                    X_out[..., c] = (data_c - mean) / (std + 1e-6)
+                else:
+                    # Fallback: convert to numpy, transform, convert back
+                    data_np = data_c.detach().cpu().numpy()
+                    flat = data_np.reshape(-1, 1)
+                    scaler = self.stats_[c]
+                    trans = scaler.transform(flat)
+                    X_out[..., c] = torch.from_numpy(
+                        trans.reshape(data_np.shape)
+                    ).to(X.device).type_as(X)
+            else:  # quantile - must use numpy
+                data_np = data_c.detach().cpu().numpy()
+                flat = data_np.reshape(-1, 1)
+                qt = self.stats_[c]
+                trans = qt.transform(flat)
+                X_out[..., c] = torch.from_numpy(
+                    trans.reshape(data_np.shape)
+                ).to(X.device).type_as(X)
+        
+        # Remove batch dimension if it was added
+        if batch_size == 1:
+            X_out = X_out.squeeze(0)
+        
+        # Permute back if needed
+        if needs_permute:
+            if X_out.dim() == 4:  # (N, H, W, C)
+                X_out = X_out.permute(0, 3, 1, 2)  # (N, C, H, W)
+            else:  # (H, W, C)
+                X_out = X_out.permute(2, 0, 1)  # (C, H, W)
+        
+        return X_out
 
     def inverse_transform(self, X):
         """Undo normalization (useful for predictions)"""

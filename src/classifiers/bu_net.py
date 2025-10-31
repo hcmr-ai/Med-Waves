@@ -213,7 +213,7 @@ class WaveBiasCorrector(pl.LightningModule):
             return masked_weighted_mse(y_pred, y_true, mask)
 
     def training_step(self, batch, batch_idx):
-        X, y, mask = batch
+        X, y, mask, vhm0_for_reconstruction = batch
 
         y_pred = self(X)
         loss = self.compute_loss(y_pred, y, mask)
@@ -249,28 +249,20 @@ class WaveBiasCorrector(pl.LightningModule):
             )
             
             # Log sea-bin metrics for training
-            self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
-            
-            # Log baseline sea-bin metrics (uncorrected VHM0 vs ground truth)
-            # Extract uncorrected VHM0 from input features
-            vhm0_uncorrected = X[:, 1:2, :min_h, :min_w]
-            vhm0_uncorrected_masked = vhm0_uncorrected[mask]
-            
-            # Calculate ground truth wave heights depending on target type
-            # If predicting bias, y = corrected - uncorrected, so y_true = y + uncorrected
-            # If predicting corrected directly, y is already the ground truth wave heights
-            if hasattr(self.hparams, "predict_bias") and bool(self.hparams.predict_bias):
-                y_true_wave_heights = y[mask] + vhm0_uncorrected_masked
+            if self.predict_bias and vhm0_for_reconstruction is not None:
+                vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
+                y_true_wave_heights = vhm0_for_reconstruction + y[mask]  # matches: corrected = vhm0 + bias
+                y_pred_wave_heights = vhm0_for_reconstruction + y_pred[mask]
+                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "train")
+                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "train_baseline")
             else:
-                y_true_wave_heights = y[mask]
+                self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
+                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction, "train_baseline")
             
-            # Log baseline sea-bin metrics
-            self._log_sea_bin_metrics(y_true_wave_heights, vhm0_uncorrected_masked, "train_baseline")
-
         return loss
 
     def validation_step(self, batch, batch_idx):
-        X, y, mask = batch
+        X, y, mask, vhm0_for_reconstruction = batch
 
         y_pred = self(X)
         loss = self.compute_loss(y_pred, y, mask)
@@ -307,25 +299,15 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
             
             # Log sea-bin metrics for validation
-            self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
-            
-            # Log baseline sea-bin metrics for validation (uncorrected VHM0 vs ground truth)
-            # Extract uncorrected VHM0 from input features
-            vhm0_uncorrected = X[:, 1:2, :min_h, :min_w]  # Extract VHM0 channel (index 1)
-            vhm0_uncorrected_masked = vhm0_uncorrected[mask]
-            
-            # Calculate ground truth wave heights depending on target type
-            if hasattr(self.hparams, "predict_bias") and bool(self.hparams.predict_bias):
-                y_true_wave_heights = y[mask] + vhm0_uncorrected_masked
+            if self.predict_bias and vhm0_for_reconstruction is not None:
+                vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
+                y_true_wave_heights = vhm0_for_reconstruction + y[mask]
+                y_pred_wave_heights = vhm0_for_reconstruction + y_pred[mask]
+                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "val")
+                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "val_baseline")
             else:
-                y_true_wave_heights = y[mask]
-            
-            # Log baseline sea-bin metrics
-            self._log_sea_bin_metrics(y_true_wave_heights, vhm0_uncorrected_masked, "val_baseline")
-
-            # Store results for callback (only on first batch of epoch)
-            if batch_idx == 0:
-                self.last_val_batch = (y, y_pred, mask)
+                self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
+                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction, "val_baseline")
 
         return loss
     

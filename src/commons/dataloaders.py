@@ -142,6 +142,11 @@ class WaveDataset(Dataset):
             corrected = hour_data[
                 ..., corrected_index : corrected_index + 1
             ]  # shape (H, W, 1)
+            logger.debug(f"VHM0 shape: {vhm0.shape}, stats: mean={vhm0[~np.isnan(vhm0)].mean():.3f}, "
+                        f"std={vhm0[~np.isnan(vhm0)].std():.3f}, NaN count: {np.isnan(vhm0).sum()}")
+            logger.debug(f"Corrected shape: {corrected.shape}, stats: mean={corrected[~np.isnan(corrected)].mean():.3f}, "
+                        f"std={corrected[~np.isnan(corrected)].std():.3f}, NaN count: {np.isnan(corrected).sum()}")
+            
             y = corrected - vhm0  # Target is the bias (correction field)
         else:
             # Use target column directly
@@ -248,7 +253,7 @@ class CachedWaveDataset(Dataset):
             self._cache[path] = (tensor, feature_cols)
             return tensor, feature_cols
         else:
-            tensor, feature_cols = self._load_file(path)
+            tensor, feature_cols = self._load_file_pt(path)
             return tensor, feature_cols
 
     def __getitem__(self, idx):
@@ -312,8 +317,12 @@ class CachedWaveDataset(Dataset):
 
         # Mask for NaNs
         mask = ~torch.isnan(y)
-
-        return X, y, mask
+        if self.predict_bias:
+            # Also return VHM0 for baseline metrics calculation
+            vhm0_for_batch = vhm0.permute(2, 0, 1).contiguous()  # Convert to (C, H, W) like y
+            return X, y, mask, vhm0_for_batch
+        else:
+            return X, y, mask, None
 
     def __len__(self):
         return len(self.index_map)

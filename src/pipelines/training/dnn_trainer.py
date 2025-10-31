@@ -41,6 +41,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
+from pytorch_lightning.callbacks import LearningRateMonitor
 
 
 def _log_training_artifacts(comet_logger, config_file):
@@ -270,6 +271,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         predict_bias=predict_bias,
         subsample_step=subsample_step,
         normalizer=normalizer,
+        enable_profiler=True,
+        use_cache=True,
     )
 
     val_dataset = CachedWaveDataset(
@@ -281,6 +284,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         predict_bias=predict_bias,
         subsample_step=subsample_step,
         normalizer=normalizer,
+        enable_profiler=True,
+        use_cache=False,
     )
 
     # Create data loaders
@@ -291,7 +296,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
-        prefetch_factor=training_config["prefetch_factor"]
+        prefetch_factor=training_config["prefetch_factor"],
     )
 
     val_loader = DataLoader(
@@ -341,6 +346,9 @@ def create_callbacks(config: DNNConfig) -> list:
         mode=training_config["mode"],
     )
     callbacks.append(early_stopping)
+
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+    callbacks.append(lr_monitor)
 
     # Add Comet visualization callback if using Comet
     if config.config["logging"]["use_comet"]:
@@ -434,6 +442,7 @@ def main():
         lr_scheduler_config=model_config.get("lr_scheduler", {}),
         predict_bias=local_predict_bias,
         filters=model_config["filters"],
+        dropout=model_config.get("dropout", 0.2),
     )
 
     # Create callbacks
@@ -509,7 +518,8 @@ def main():
         gradient_clip_val=1.0,  # Add gradient clipping
         gradient_clip_algorithm="norm",
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
-        benchmark=training_config["benchmark"]
+        benchmark=training_config["benchmark"],
+        val_check_interval=training_config["val_check_interval"],
     )
 
     # Handle checkpoint resuming (local or S3)
