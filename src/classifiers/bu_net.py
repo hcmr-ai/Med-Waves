@@ -55,7 +55,7 @@ class BU_Net_Geo(nn.Module):
         """
         super().__init__()
         if filters is None:
-            filters = [64, 128, 256, 512, 1024]
+            filters = [64, 128, 256, 512]
         # Encoder
         self.encoders = nn.ModuleList()
         self.pools = nn.ModuleList()
@@ -184,11 +184,12 @@ class BU_Net(nn.Module):
 
 class WaveBiasCorrector(pl.LightningModule):
     def __init__(
-        self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False
+        self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False,
+        filters=None,
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = BU_Net_Geo(in_channels=in_channels)
+        self.model = BU_Net_Geo(in_channels=in_channels, filters=filters)
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias

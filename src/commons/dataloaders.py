@@ -177,3 +177,123 @@ class WaveDataset(Dataset):
         mask = ~torch.isnan(y)
 
         return X, y, mask
+
+
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+import random
+
+class CachedWaveDataset(Dataset):
+    def __init__(self, file_paths, target_column="corrected_VHM0",
+                 excluded_columns=None, normalizer=None,
+                 patch_size=None, subsample_step=None, predict_bias=False):
+        self.file_paths = file_paths
+        # self.index_map = index_map   # list of (file_idx, hour_idx)
+        self.target_column = target_column
+        self.excluded_columns = excluded_columns or []
+        self.normalizer = normalizer
+        self.patch_size = patch_size
+        self.subsample_step = subsample_step
+        self.predict_bias = predict_bias
+        self.index_map = [
+            (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
+        ]
+        self.H, self.W = 380, 1307
+        self.C_in = len(self.excluded_columns) + 1  # +1 for target column
+        # worker-local cache
+        self._cache = {}
+
+    def _load_file(self, path):
+        table = pq.read_table(path)
+
+        column_names = [field.name for field in table.schema]
+        feature_cols = [col for col in column_names if col not in self.excluded_columns]
+
+        # Extract coords
+        time_data = table.column("time").to_numpy()
+        lat_data = table.column("latitude").to_numpy()
+        lon_data = table.column("longitude").to_numpy()
+
+        unique_times = np.unique(time_data)
+        unique_lats = np.unique(lat_data)
+        unique_lons = np.unique(lon_data)
+
+        T, H, W = len(unique_times), len(unique_lats), len(unique_lons)
+
+        time_idx = np.searchsorted(unique_times, time_data)
+        lat_idx = np.searchsorted(unique_lats, lat_data)
+        lon_idx = np.searchsorted(unique_lons, lon_data)
+
+        arr = np.full((T, H, W, len(feature_cols)), np.nan, dtype=np.float32)
+
+        for j, col in enumerate(feature_cols):
+            arr[time_idx, lat_idx, lon_idx, j] = table.column(col).to_numpy()
+
+        tensor = torch.from_numpy(arr)  # shape (T,H,W,C)
+        return tensor, feature_cols
+    
+    def _load_file_pt(self, path):
+        data = torch.load(path, map_location="cpu")   # {"tensor": (T,H,W,C), "feature_cols": [...]}
+        return data["tensor"], data["feature_cols"]
+
+    def _get_file_tensor(self, path):
+        if path not in self._cache:
+            # Drop any previously cached file (keep only 1 in memory)
+            self._cache.clear()
+            tensor, feature_cols = self._load_file_pt(path)
+            self._cache[path] = (tensor, feature_cols)
+        return self._cache[path]
+
+    def __getitem__(self, idx):
+        file_idx, hour_idx = self.index_map[idx]
+        path = self.file_paths[file_idx]
+
+        arr, feature_cols = self._get_file_tensor(path)
+
+        hour_data = arr[hour_idx]
+        # Select input cols
+        input_col_indices = [
+            i for i, col in enumerate(feature_cols)
+            if (col not in self.excluded_columns) and (col != self.target_column)
+        ]
+        X = hour_data[..., input_col_indices]  # (H, W, C_in)
+
+        if self.predict_bias:
+            vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+            corrected = hour_data[..., feature_cols.index("corrected_VHM0"):feature_cols.index("corrected_VHM0")+1]
+            y = corrected - vhm0
+        else:
+            y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
+
+        # Patch sampling
+        if self.patch_size is not None:
+            H, W, _ = X.shape
+            ph, pw = self.patch_size
+            if H > ph and W > pw:
+                i = random.randint(0, H - ph)
+                j = random.randint(0, W - pw)
+                X = X[i:i+ph, j:j+pw, :]
+                y = y[i:i+ph, j:j+pw, :]
+
+        # Normalization
+        if self.normalizer is not None:
+            X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
+            X = torch.from_numpy(X).float()
+
+        # Subsample
+        if self.subsample_step is not None:
+            X = X[::self.subsample_step, ::self.subsample_step, :]
+            y = y[::self.subsample_step, ::self.subsample_step, :]
+
+        # Convert to (C, H, W)
+        X = X.permute(2, 0, 1).contiguous()
+        y = y.permute(2, 0, 1).contiguous()
+
+        # Mask for NaNs
+        mask = ~torch.isnan(y)
+
+        return X, y, mask
+
+    def __len__(self):
+        return len(self.index_map)

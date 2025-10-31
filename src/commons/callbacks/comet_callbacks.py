@@ -230,7 +230,7 @@ Training Summary:
         self.val_epochs.append(trainer.current_epoch)
             
         # Debug: Print available metrics
-        logger.info(f"Available logged metrics: {list(logged_metrics.keys())}")
+        # logger.info(f"Available logged metrics: {list(logged_metrics.keys())}")
 
         # Extract epoch-level metrics
         # train_loss = logged_metrics.get('train_loss_step', None)

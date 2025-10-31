@@ -35,7 +35,7 @@ from classifiers.bu_net import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
-from commons.dataloaders import WaveDataset
+from commons.dataloaders import WaveDataset, CachedWaveDataset
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -260,9 +260,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    train_dataset = WaveDataset(
+    train_dataset = CachedWaveDataset(
         train_files,
-        fs=fs,
+        # index_map=train_index_map,
+        # fs=fs,
         patch_size=patch_size,
         excluded_columns=excluded_columns,
         target_column=target_column,
@@ -271,9 +272,9 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         normalizer=normalizer,
     )
 
-    val_dataset = WaveDataset(
+    val_dataset = CachedWaveDataset(
         val_files,
-        fs=fs,
+        # fs=fs,
         patch_size=patch_size,
         excluded_columns=excluded_columns,
         target_column=target_column,
@@ -289,8 +290,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=True,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0
-        # prefetch_factor=1
+        persistent_workers=training_config["num_workers"] > 0,
+        prefetch_factor=training_config["prefetch_factor"]
     )
 
     val_loader = DataLoader(
@@ -299,8 +300,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=False,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0
-        # prefetch_factor=
+        persistent_workers=training_config["num_workers"] > 0,
+        prefetch_factor=training_config["prefetch_factor"]
     )
 
     return train_loader, val_loader
@@ -432,6 +433,7 @@ def main():
         loss_type=model_config["loss_type"],
         lr_scheduler_config=model_config.get("lr_scheduler", {}),
         predict_bias=local_predict_bias,
+        filters=model_config["filters"],
     )
 
     # Create callbacks
@@ -507,6 +509,7 @@ def main():
         gradient_clip_val=1.0,  # Add gradient clipping
         gradient_clip_algorithm="norm",
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
+        benchmark=training_config["benchmark"]
     )
 
     # Handle checkpoint resuming (local or S3)
