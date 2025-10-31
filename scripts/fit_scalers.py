@@ -72,13 +72,59 @@ if __name__ == "__main__":
     for name, cfg in tqdm(configs.items(), desc="Fitting scalers"):
         # Fit normalizer
         normalizer = WaveNormalizer(**cfg)
-        normalizer.fit(X)
+        
+        # Validation: Check feature order matches data shape
+        print(f"\n{'='*80}")
+        print(f"Fitting normalizer: {name}")
+        print(f"{'='*80}")
+        print(f"Data shape: {X.shape}")
+        print(f"Number of features: {len(FEATURES)}")
+        print(f"Number of channels in data: {X.shape[-1]}")
+        
+        if len(FEATURES) != X.shape[-1]:
+            raise ValueError(
+                f"Mismatch: FEATURES has {len(FEATURES)} items but data has {X.shape[-1]} channels"
+            )
+        
+        # Fit the normalizer
+        normalizer.fit(X, feature_order=FEATURES, target_feature_name="corrected_VHM0")
+        
+        # Validation: Verify target feature name was stored correctly
+        print(f"\nNormalizer metadata:")
+        print(f"  Feature order length: {len(normalizer.feature_order_) if normalizer.feature_order_ else 'None'}")
+        print(f"  Target feature name: {normalizer.target_feature_name_}")
+        print(f"  Number of stats channels: {len(normalizer.stats_)}")
+        
+        # Validate target feature lookup
+        if normalizer.feature_order_ and normalizer.target_feature_name_:
+            try:
+                target_idx = normalizer.feature_order_.index(normalizer.target_feature_name_)
+                print(f"  Target '{normalizer.target_feature_name_}' found at index: {target_idx}")
+                print(f"  Stats available at index {target_idx}: {target_idx in normalizer.stats_}")
+                if target_idx in normalizer.stats_:
+                    target_stats = normalizer.stats_[target_idx]
+                    if isinstance(target_stats, tuple):
+                        mean, std = target_stats
+                        print(f"  Target stats (tuple): mean={mean:.6f}, std={std:.6f}")
+                    else:
+                        print(f"  Target stats type: {type(target_stats)}")
+            except ValueError:
+                print(f"  WARNING: Target '{normalizer.target_feature_name_}' not found in feature_order!")
+        
+        # Print first and last few features for verification
+        if normalizer.feature_order_:
+            print(f"\n  First 3 features: {normalizer.feature_order_[:3]}")
+            print(f"  Last 3 features: {normalizer.feature_order_[-3:]}")
+        
+        print(f"{'='*80}\n")
 
         # Save locally
         local_path = os.path.join(LOCAL_TMP, f"{name}_with_corrected.pkl")
         os.makedirs(LOCAL_TMP, exist_ok=True)
         normalizer.save(local_path)
+        print(f"✓ Saved normalizer to {local_path}")
 
         # Upload to S3
         s3_key = f"{S3_PREFIX}{name}_with_corrected.pkl"
         normalizer.save_to_s3(local_path, S3_BUCKET, s3_key)
+        print(f"✓ Uploaded to s3://{S3_BUCKET}/{s3_key}")

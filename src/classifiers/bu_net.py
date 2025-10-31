@@ -9,9 +9,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 # Add src to path for imports
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root / "src"))
-from commons.losses import masked_mse_loss, masked_weighted_mse
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+from src.commons.losses import masked_mse_loss, masked_weighted_mse
 
 
 def conv_block(in_channels, out_channels):

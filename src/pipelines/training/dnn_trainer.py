@@ -273,6 +273,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         normalizer=normalizer,
         enable_profiler=True,
         use_cache=True,
+        normalize_target=config.data.normalize_target
     )
 
     val_dataset = CachedWaveDataset(
@@ -286,6 +287,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         normalizer=normalizer,
         enable_profiler=True,
         use_cache=False,
+        normalize_target=config.data.normalize_target
     )
 
     # Create data loaders

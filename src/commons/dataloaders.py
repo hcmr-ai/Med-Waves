@@ -193,7 +193,7 @@ class CachedWaveDataset(Dataset):
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True):
+                 enable_profiler=False, use_cache=True, normalise_target=False):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -211,6 +211,7 @@ class CachedWaveDataset(Dataset):
         # worker-local cache
         self._cache = {}
         self.use_cache = use_cache
+        self.normalise_target = normalise_target
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -272,7 +273,7 @@ class CachedWaveDataset(Dataset):
 
         if self.predict_bias:
             vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
-            corrected = hour_data[..., feature_cols.index("corrected_VHM0"):feature_cols.index("corrected_VHM0")+1]
+            corrected = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
             y = corrected - vhm0
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
@@ -298,7 +299,11 @@ class CachedWaveDataset(Dataset):
                 if self.normalizer is not None:
                     # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
                     # X = torch.from_numpy(X).float()
-                    X = self.normalizer.transform_torch(X)
+                    # X = self.normalizer.transform_torch(X)
+                    if self.normalise_target:
+                        X, y = self.normalizer.transform_torch(X, normalise_target=True, target=y)
+                    else:
+                        X = self.normalizer.transform_torch(X, normalise_target=False)
         else:
             # Without profiler
              # Subsample
@@ -309,7 +314,11 @@ class CachedWaveDataset(Dataset):
             if self.normalizer is not None:
                 # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
                 # X = torch.from_numpy(X).float()
-                X = self.normalizer.transform_torch(X)
+                # X = self.normalizer.transform_torch(X)
+                if self.normalise_target:
+                    X, y = self.normalizer.transform_torch(X, normalise_target=True, target=y)
+                else:
+                    X = self.normalizer.transform_torch(X, normalise_target=False)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
