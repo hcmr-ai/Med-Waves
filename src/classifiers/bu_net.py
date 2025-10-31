@@ -46,7 +46,7 @@ class GeoConv(nn.Module):
 
 class BU_Net_Geo(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2
     ):
         """
         BU-Net with geophysical padding.
@@ -56,6 +56,9 @@ class BU_Net_Geo(nn.Module):
         super().__init__()
         if filters is None:
             filters = [64, 128, 256, 512]
+        self.dropout = dropout
+        self.encoder_dropouts = nn.ModuleList()
+        self.decoder_dropouts = nn.ModuleList()
         # Encoder
         self.encoders = nn.ModuleList()
         self.pools = nn.ModuleList()
@@ -63,12 +66,14 @@ class BU_Net_Geo(nn.Module):
         for f in filters:
             self.encoders.append(nn.Sequential(GeoConv(prev_c, f), GeoConv(f, f)))
             self.pools.append(nn.MaxPool2d(2))
+            self.encoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
 
         # Bottleneck
         self.bottleneck = nn.Sequential(
             GeoConv(filters[-1], filters[-1] * 2),
             GeoConv(filters[-1] * 2, filters[-1] * 2),
+            nn.Dropout2d(dropout),
         )
 
         # Decoder
@@ -79,6 +84,7 @@ class BU_Net_Geo(nn.Module):
         for f in rev_filters:
             self.upconvs.append(nn.ConvTranspose2d(prev_c, f, kernel_size=2, stride=2))
             self.decoders.append(nn.Sequential(GeoConv(prev_c, f), GeoConv(f, f)))
+            self.decoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
 
         # Final 1×1 conv to SWH correction
@@ -186,10 +192,11 @@ class WaveBiasCorrector(pl.LightningModule):
     def __init__(
         self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False,
         filters=None,
+        dropout=0.2,
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = BU_Net_Geo(in_channels=in_channels, filters=filters)
+        self.model = BU_Net_Geo(in_channels=in_channels, filters=filters, dropout=dropout)
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
@@ -280,12 +287,17 @@ class WaveBiasCorrector(pl.LightningModule):
             mae = torch.abs(y_pred - y)[mask].mean()
             mse = ((y_pred - y) ** 2)[mask].mean()
             rmse = torch.sqrt(mse)
+            log_on_step = False
+            # if self.trainer is not None and hasattr(self.trainer, 'val_check_interval'):
+            #     # val_check_interval can be None, int (steps), or float (fraction of epoch)
+            #     log_on_step = self.trainer.val_check_interval is not None
+            # print(f"log_on_step: {log_on_step}")
 
             # Log validation metrics
-            self.log("val_loss", loss, prog_bar=True, on_epoch=True)
-            self.log("val_mae", mae, on_epoch=True)
-            self.log("val_mse", mse, on_epoch=True)
-            self.log("val_rmse", rmse, on_epoch=True)
+            self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+            self.log("val_mae", mae, on_step=log_on_step, on_epoch=True)
+            self.log("val_mse", mse, on_step=log_on_step, on_epoch=True)
+            self.log("val_rmse", rmse, on_step=log_on_step, on_epoch=True)
 
             # Log validation data statistics
             self.log("val_y_mean", y[mask].mean(), on_epoch=True)
@@ -316,6 +328,14 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.last_val_batch = (y, y_pred, mask)
 
         return loss
+    
+    def on_train_epoch_end(self) -> None:
+        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
+    
+    def on_after_backward(self):
+        total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        self.log("grad_norm_clipped", total_norm, on_step=True, on_epoch=True, prog_bar=True)
 
     def _log_sea_bin_metrics(self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str):
         """Log sea-bin metrics for different wave height ranges."""
@@ -368,7 +388,14 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
 
     def configure_optimizers(self):
+        lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
         optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr)
+        def get_float(key, default):
+            val = scheduler_config.get(key, default)
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return default
 
         # Configure learning rate scheduler
         scheduler_config = self.lr_scheduler_config
@@ -381,9 +408,10 @@ class WaveBiasCorrector(pl.LightningModule):
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
                 mode=scheduler_config.get("mode", "min"),
-                factor=scheduler_config.get("factor", 0.5),
-                patience=scheduler_config.get("patience", 5),
-                min_lr=scheduler_config.get("min_lr", 1e-7),
+                factor=get_float("factor", 0.5),
+                patience=int(scheduler_config.get("patience", 5)),
+                min_lr=get_float("min_lr", 1e-7),
+                # verbose=scheduler_config.get("verbose", True),
             )
             return {
                 "optimizer": optimizer,
@@ -395,21 +423,21 @@ class WaveBiasCorrector(pl.LightningModule):
 
         elif scheduler_type == "CosineAnnealingLR":
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=scheduler_config.get("T_max", 50)
+                optimizer, T_max=int(scheduler_config.get("T_max", 50))
             )
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
         elif scheduler_type == "StepLR":
             scheduler = optim.lr_scheduler.StepLR(
                 optimizer,
-                step_size=scheduler_config.get("step_size", 10),
-                gamma=scheduler_config.get("gamma", 0.1),
+                step_size=int(scheduler_config.get("step_size", 10)),
+                gamma=get_float("gamma", 0.1),
             )
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
         elif scheduler_type == "ExponentialLR":
             scheduler = optim.lr_scheduler.ExponentialLR(
-                optimizer, gamma=scheduler_config.get("gamma", 0.1)
+                optimizer, gamma=get_float("gamma", 0.1)
             )
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 

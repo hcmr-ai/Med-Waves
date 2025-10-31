@@ -15,7 +15,7 @@ S3_PREFIX = "scalers/"
 LOCAL_TMP = "data/scalers/"
 DATA_PATH = "s3://medwav-dev-data/parquet/hourly/year=2021"# "/Users/deeplab/Documents/projects/hcmr/data/hourly/"
 
-FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos']
+FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
 def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
     """Load and stack all parquet files into numpy"""
     # lf = pl.scan_parquet(parquet_dir + "/*.parquet", storage_options={
@@ -65,8 +65,8 @@ if __name__ == "__main__":
     # Define configs
     configs = {
         "BU24h_zscore": dict(mode="zscore"),
-        "BU48h_quantile": dict(mode="quantile"),
-        "BU72h_quantile": dict(mode="quantile"),
+        # "BU48h_quantile": dict(mode="quantile"),
+        # "BU72h_quantile": dict(mode="quantile"),
     }
 
     for name, cfg in tqdm(configs.items(), desc="Fitting scalers"):
@@ -75,10 +75,10 @@ if __name__ == "__main__":
         normalizer.fit(X)
 
         # Save locally
-        local_path = os.path.join(LOCAL_TMP, f"{name}.pkl")
+        local_path = os.path.join(LOCAL_TMP, f"{name}_with_corrected.pkl")
         os.makedirs(LOCAL_TMP, exist_ok=True)
         normalizer.save(local_path)
 
         # Upload to S3
-        s3_key = f"{S3_PREFIX}{name}.pkl"
+        s3_key = f"{S3_PREFIX}{name}_with_corrected.pkl"
         normalizer.save_to_s3(local_path, S3_BUCKET, s3_key)

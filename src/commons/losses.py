@@ -29,7 +29,7 @@ def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
 
     return loss
 
-def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=3.0, epsilon=1e-6):
+def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, epsilon=1e-6):
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]

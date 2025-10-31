@@ -6,11 +6,11 @@ import numpy as np
 
 # 📂 Input/output paths
 INPUT_DIR = "/mnt/ebs/year=2021"   # folder with WAVEAN*.parquet
-OUTPUT_DIR = "/opt/dlami/nvme/preprocessed"
+OUTPUT_DIR = "/opt/dlami/nvme/preprocessed_subsampled_step_5"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 🛠️ Helper to load parquet into dense tensor (T,H,W,C)
-def load_parquet_as_tensor(path, excluded_columns=None):
+def load_parquet_as_tensor(path, excluded_columns=None, subsample_step=5):
     excluded_columns = excluded_columns or []
     table = pq.read_table(path)
 
@@ -37,38 +37,18 @@ def load_parquet_as_tensor(path, excluded_columns=None):
         arr[time_idx, lat_idx, lon_idx, j] = table.column(col).to_numpy()
 
     tensor = torch.from_numpy(arr)  # (T,H,W,C)
+
+    if subsample_step > 1:
+        tensor = tensor[:, ::subsample_step, ::subsample_step, :].clone()
+
     return tensor, feature_cols
-
-def main():
-    files = sorted(glob.glob(os.path.join(INPUT_DIR, "WAVEAN2022*.parquet")))
-    print(f"Found {len(files)} parquet files")
-
-    for i, f in enumerate(files):
-        base = os.path.basename(f).replace(".parquet", ".pt")
-        out_path = os.path.join(OUTPUT_DIR, base)
-
-        if os.path.exists(out_path):
-            print(f"[{i+1}/{len(files)}] Skipping {base} (already exists)")
-            continue
-
-        print(f"[{i+1}/{len(files)}] Processing {base}...")
-        tensor, feature_cols = load_parquet_as_tensor(f)
-
-        torch.save(
-            {
-                "tensor": tensor,           # (T,H,W,C)
-                "feature_cols": feature_cols
-            },
-            out_path
-        )
-
-    print("✅ Preprocessing done.")
 
 
 from multiprocessing import Pool, cpu_count
 
 def process_file(path):
     base = os.path.basename(path).replace(".parquet", ".pt")
+    # base = "subsampled_step_5_" + base
     out_path = os.path.join(OUTPUT_DIR, base)
     if os.path.exists(out_path):
         return f"Skipping {base}"
@@ -78,7 +58,7 @@ def process_file(path):
 
 if __name__ == "__main__":
     files = sorted(glob.glob(os.path.join(INPUT_DIR, "WAVEAN2021*.parquet")))
-    with Pool(processes=8) as pool:  # half CPU cores
+    with Pool(processes=cpu_count()//2) as pool:  # half CPU cores
         for msg in pool.imap_unordered(process_file, files):
             print(msg)
 
