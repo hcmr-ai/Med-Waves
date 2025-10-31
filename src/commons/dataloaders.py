@@ -187,7 +187,8 @@ import random
 class CachedWaveDataset(Dataset):
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
-                 patch_size=None, subsample_step=None, predict_bias=False):
+                 patch_size=None, subsample_step=None, predict_bias=False,
+                 enable_profiler=False, use_cache=True):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -196,6 +197,7 @@ class CachedWaveDataset(Dataset):
         self.patch_size = patch_size
         self.subsample_step = subsample_step
         self.predict_bias = predict_bias
+        self.enable_profiler = enable_profiler
         self.index_map = [
             (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
         ]
@@ -203,6 +205,7 @@ class CachedWaveDataset(Dataset):
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
         # worker-local cache
         self._cache = {}
+        self.use_cache = use_cache
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -238,20 +241,23 @@ class CachedWaveDataset(Dataset):
         return data["tensor"], data["feature_cols"]
 
     def _get_file_tensor(self, path):
-        if path not in self._cache:
+        if self.use_cache and path not in self._cache:
             # Drop any previously cached file (keep only 1 in memory)
-            self._cache.clear()
+            # self._cache.clear()
             tensor, feature_cols = self._load_file_pt(path)
             self._cache[path] = (tensor, feature_cols)
-        return self._cache[path]
+            return tensor, feature_cols
+        else:
+            tensor, feature_cols = self._load_file(path)
+            return tensor, feature_cols
 
     def __getitem__(self, idx):
         file_idx, hour_idx = self.index_map[idx]
         path = self.file_paths[file_idx]
 
-        arr, feature_cols = self._get_file_tensor(path)
+        tensor, feature_cols = self._get_file_tensor(path)
 
-        hour_data = arr[hour_idx]
+        hour_data = tensor[hour_idx]
         # Select input cols
         input_col_indices = [
             i for i, col in enumerate(feature_cols)
@@ -276,15 +282,29 @@ class CachedWaveDataset(Dataset):
                 X = X[i:i+ph, j:j+pw, :]
                 y = y[i:i+ph, j:j+pw, :]
 
-        # Normalization
-        if self.normalizer is not None:
-            X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
-            X = torch.from_numpy(X).float()
+        
+        if self.enable_profiler:
+            with torch.profiler.record_function("normalize_and_subsample"):
+                # Subsample
+                if self.subsample_step is not None:
+                    X = X[::self.subsample_step, ::self.subsample_step, :]
+                    y = y[::self.subsample_step, ::self.subsample_step, :]
 
-        # Subsample
-        if self.subsample_step is not None:
-            X = X[::self.subsample_step, ::self.subsample_step, :]
-            y = y[::self.subsample_step, ::self.subsample_step, :]
+                if self.normalizer is not None:
+                    # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
+                    # X = torch.from_numpy(X).float()
+                    X = self.normalizer.transform_torch(X)
+        else:
+            # Without profiler
+             # Subsample
+            if self.subsample_step is not None:
+                X = X[::self.subsample_step, ::self.subsample_step, :]
+                y = y[::self.subsample_step, ::self.subsample_step, :]
+
+            if self.normalizer is not None:
+                # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
+                # X = torch.from_numpy(X).float()
+                X = self.normalizer.transform_torch(X)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
