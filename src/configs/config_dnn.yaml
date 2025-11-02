@@ -5,9 +5,11 @@
 data:
   data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.pt"
-  train_year: 2021
-  val_year: 2022
+  train_year: [2021, 2022]
+  val_year: [2023]
+  val_months: [1, 4, 6, 7, 9, 10]
   test_year: 2023
+  test_months: [2, 5, 8, 11]
   patch_size: null #[256, 256] # Random crop size for training (256x256 for proper U-Net bottleneck)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42

@@ -35,13 +35,16 @@ from classifiers.bu_net import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
-from commons.dataloaders import WaveDataset, CachedWaveDataset
+from commons.dataloaders import CachedWaveDataset
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
-from pytorch_lightning.callbacks import LearningRateMonitor
 
 
 def _log_training_artifacts(comet_logger, config_file):
@@ -193,33 +196,95 @@ def get_file_list(
 
 
 def split_files_by_year(
-    files: list, train_year: int = 2021, val_year: int = 2022, test_year: int = 2023
+    files: list,
+    train_year: int | list = 2021,
+    val_year: int | list = 2022,
+    test_year: int | list = 2023,
+    val_months: list = None,
+    test_months: list = None,
 ) -> tuple:
-    """Split files by year for temporal validation"""
+    """Split files into train/val/test based on year lists and validation months.
+
+    Assumptions:
+    - `train_year`, `val_year`, `test_year` are lists of years.
+    - A file goes to validation only if (year in `val_year`) AND (month in `val_months`).
+    - Otherwise it goes to train/test based on year membership.
+    """
     train_files = []
     val_files = []
     test_files = []
 
+    # Normalize inputs to sets of years for easy membership checks
+    def _to_year_set(y):
+        if isinstance(y, (list, tuple, set)):
+            return set(int(v) for v in y)
+        return {int(y)}
+
+    train_years = _to_year_set(train_year)
+    val_years = _to_year_set(val_year)
+    test_years = _to_year_set(test_year)
+    test_months_set = set(int(m) for m in test_months) if test_months else set()
+    val_months_set = set(int(m) for m in val_months) if val_months else set()
+
+    def _parse_year_month(name: str) -> tuple[int | None, int | None]:
+        """Parse year and month from filename assuming pattern like WAVEANYYYYMM...
+        Returns (year, month) where either can be None if not parsed.
+        """
+        try:
+            marker = "WAVEAN"
+            idx = name.find(marker)
+            if idx != -1 and len(name) >= idx + 6 + 6:  # WAVEAN + YYYYMM
+                year_str = name[idx + 6 : idx + 10]
+                month_str = name[idx + 10 : idx + 12]
+                year_val = int(year_str)
+                month_val = int(month_str)
+                if 1 <= month_val <= 12:
+                    return year_val, month_val
+                return year_val, None
+        except Exception:
+            pass
+
+        # Fallback: find first 4-digit year and optional following month
+        import re
+
+        match = re.search(r"(20\d{2})(?:[^\d]?([01]?\d))?", name)
+        if match:
+            try:
+                y = int(match.group(1))
+                m = match.group(2)
+                m_val = int(m) if m is not None else None
+                if m_val is not None and not (1 <= m_val <= 12):
+                    m_val = None
+                return y, m_val
+            except Exception:
+                return None, None
+        return None, None
+
     for file_path in files:
-        # Extract year from filename (assuming format like "2021-01-01.parquet" or similar)
         filename = Path(file_path).name
+        year, month = _parse_year_month(filename)
 
-        # Try to extract year from filename
-        year = None
-        for y in [train_year, val_year, test_year]:
-            if f"WAVEAN{y}" in filename:
-                year = y
-                break
+        if year is None:
+            logger.warning(f"Skipping file {filename} - could not parse year")
+            continue
 
-        if year == train_year:
-            train_files.append(file_path)
-        elif year == val_year:
+        # Validation: require both year and month match (simple rule)
+        if year in val_years and month in val_months_set:
             val_files.append(file_path)
-        elif year == test_year:
+            continue
+
+        # Test split
+        if year in test_years and month in test_months_set:
             test_files.append(file_path)
-        else:
-            # Skip files that don't match the target years
-            logger.warning(f"Skipping file {filename} - year not in target years")
+            continue
+
+        # Train split
+        if year in train_years:
+            train_files.append(file_path)
+            continue
+
+        # Not in any target years
+        logger.warning(f"Skipping file {filename} - year {year} not in target years")
 
     return train_files, val_files, test_files
 
@@ -242,6 +307,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         train_year=data_config.get("train_year", 2021),
         val_year=data_config.get("val_year", 2022),
         test_year=data_config.get("test_year", 2023),
+        val_months=data_config.get("val_months", []),
+        test_months=data_config.get("test_months", []),
     )
 
     logger.info(f"Train files: {len(train_files)}")
@@ -273,7 +340,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         normalizer=normalizer,
         enable_profiler=True,
         use_cache=True,
-        normalize_target=config.data.normalize_target
+        normalize_target=data_config.get("normalize_target")
     )
 
     val_dataset = CachedWaveDataset(
@@ -287,7 +354,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         normalizer=normalizer,
         enable_profiler=True,
         use_cache=False,
-        normalize_target=config.data.normalize_target
+        normalize_target=data_config.get("normalize_target", False)
     )
 
     # Create data loaders
@@ -363,11 +430,11 @@ def create_callbacks(config: DNNConfig) -> list:
 def main():
     # Optimize for Tensor Cores on modern GPUs (fixes the warning)
     torch.set_float32_matmul_precision('medium')
-    
+
     # Use new API to avoid deprecation warnings
     torch.backends.cudnn.conv.fp32_precision = 'tf32'
     torch.backends.cuda.matmul.fp32_precision = 'ieee'
-    
+
     parser = argparse.ArgumentParser(description="Train DNN for wave height correction")
     parser.add_argument("--config", type=str, help="Path to configuration YAML file")
     parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
@@ -402,13 +469,14 @@ def main():
 
     # Create data loaders
     logger.info("Creating data loaders...")
-    
+
     # Check if we should pre-download data for multiprocessing
     if config.config["training"]["num_workers"] > 0 and config.config["data"]["data_path"].startswith("s3://"):
         logger.warning("S3FS detected with num_workers > 0. This may cause issues.")
         logger.warning("Consider setting num_workers=0 or pre-downloading data locally.")
-    
+
     train_loader, val_loader = create_data_loaders(config, fs)
+    exit()
 
     # Test one batch
     # logger.info("Testing data loading...")

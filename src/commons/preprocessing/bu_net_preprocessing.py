@@ -1,8 +1,11 @@
+import logging
+
 import boto3
 import joblib
 import numpy as np
 from sklearn.preprocessing import QuantileTransformer, StandardScaler
 
+logger = logging.getLogger(__name__)
 
 class WaveNormalizer:
     def __init__(self, mode="zscore", n_quantiles=1000, random_state=42):
@@ -22,7 +25,7 @@ class WaveNormalizer:
         """
         Fit normalizer on training data.
         X shape: (N, H, W, C) or (N, C) flattened per channel
-        
+
         Args:
             X: Training data with shape (N, H, W, C) or (N, C)
             feature_order: Optional list of feature names in the order they appear in X
@@ -31,7 +34,7 @@ class WaveNormalizer:
                                 If provided along with feature_order, enables automatic target stats lookup.
         """
         n_channels = X.shape[-1]
-        
+
         # Store feature order and target name if provided
         if feature_order is not None:
             if len(feature_order) != n_channels:
@@ -42,12 +45,11 @@ class WaveNormalizer:
             self.target_feature_name_ = target_feature_name
         elif target_feature_name is not None:
             # Warn if target_feature_name is provided but feature_order is not
-            import warnings
-            warnings.warn(
+            logger.warning(
                 "target_feature_name provided without feature_order. "
                 "Target lookup by name will not work. Please provide feature_order or set it manually."
             )
-        
+
         for c in range(n_channels):
             data_c = X[..., c].ravel()
             data_c = data_c[~np.isnan(data_c)]  # drop NaNs
@@ -94,8 +96,8 @@ class WaveNormalizer:
                 trans = qt.transform(flat)
                 X_out[..., c] = trans.reshape(data_c.shape)
         return X_out
-    
-    def transform_torch(self, X, normalise_target=False, target=None, target_channel_index=0):
+
+    def transform_torch(self, X, normalize_target=False, target=None, target_channel_index=0):
         """
         PyTorch-optimized transform that avoids numpy conversions.
         X shape: (H, W, C) or (C, H, W) - torch tensor
@@ -104,7 +106,7 @@ class WaveNormalizer:
         Returns: torch tensor of same shape as X, and optionally normalized target if provided
         """
         import torch
-        
+
         # Handle different input shapes
         if X.dim() == 4:  # (N, H, W, C) or (N, C, H, W)
             if X.shape[1] == self.stats_.__len__():  # (N, C, H, W)
@@ -124,13 +126,13 @@ class WaveNormalizer:
                 batch_size = 1
         else:
             raise ValueError(f"Unsupported tensor shape: {X.shape}")
-        
+
         X_out = X.clone()
         n_channels = X.shape[-1]
-        
+
         for c in range(n_channels):
             data_c = X[..., c]  # (N, H, W) or (H, W)
-            
+
             if self.mode == "zscore":
                 if isinstance(self.stats_[c], tuple):
                     # Fast path: direct computation
@@ -153,28 +155,28 @@ class WaveNormalizer:
                 X_out[..., c] = torch.from_numpy(
                     trans.reshape(data_np.shape)
                 ).to(X.device).type_as(X)
-        
+
         # Remove batch dimension if it was added
         if batch_size == 1:
             X_out = X_out.squeeze(0)
-        
+
         # Permute back if needed
         if needs_permute:
             if X_out.dim() == 4:  # (N, H, W, C)
                 X_out = X_out.permute(0, 3, 1, 2)  # (N, C, H, W)
             else:  # (H, W, C)
                 X_out = X_out.permute(2, 0, 1)  # (C, H, W)
-        
+
         # Normalize target if requested
         target_out = None
-        if normalise_target and target is not None:
+        if normalize_target and target is not None:
             # Determine target stats to use
             target_stats = None
-            
+
             # Priority 1: Use explicitly set target_stats_
             if self.target_stats_ is not None:
                 target_stats = self.target_stats_
-            
+
             # Priority 2: Look up by feature name if feature_order_ is available
             elif self.feature_order_ is not None and self.target_feature_name_ is not None:
                 try:
@@ -183,24 +185,24 @@ class WaveNormalizer:
                         target_stats = self.stats_[target_idx]
                 except ValueError:
                     pass
-            
+
             # Priority 3: Use explicitly provided channel index
             elif target_channel_index in self.stats_:
                 target_stats = self.stats_[target_channel_index]
-            
+
             # Priority 4: Fallback to last channel (common case where corrected_VHM0 is last in fit_scalers.py)
             elif len(self.stats_) > 0:
                 target_stats = self.stats_[len(self.stats_) - 1]
-            
+
             if target_stats is None:
                 raise ValueError(
-                    f"Target stats not found. Options:\n"
-                    f"  1. Set target_stats_ attribute\n"
-                    f"  2. Set feature_order_ and target_feature_name_ attributes\n"
-                    f"  3. Pass target_channel_index that exists in stats_\n"
-                    f"  4. Ensure stats_ is populated (will default to last channel)"
+                    "Target stats not found. Options:\n"
+                    "  1. Set target_stats_ attribute\n"
+                    "  2. Set feature_order_ and target_feature_name_ attributes\n"
+                    "  3. Pass target_channel_index that exists in stats_\n"
+                    "  4. Ensure stats_ is populated (will default to last channel)"
                 )
-            
+
             # Handle target shape - ensure it's (H, W) for normalization
             target_shape = target.shape
             if target.dim() == 3:
@@ -217,11 +219,11 @@ class WaveNormalizer:
                 needs_target_unsqueeze = False
             else:
                 raise ValueError(f"Unsupported target shape: {target.shape}")
-            
+
             # Normalize target
             target_2d_np = target_2d.detach().cpu().numpy()
             flat_target = target_2d_np.reshape(-1, 1)
-            
+
             if self.mode == "zscore":
                 if isinstance(target_stats, tuple):
                     # Fast path: direct computation
@@ -234,7 +236,7 @@ class WaveNormalizer:
             else:  # quantile
                 trans = target_stats.transform(flat_target)
                 target_normalized = trans.reshape(target_2d_np.shape)
-            
+
             # Convert back to torch and restore original shape
             target_out = torch.from_numpy(target_normalized).to(target.device).type_as(target)
             if needs_target_unsqueeze:
@@ -242,12 +244,12 @@ class WaveNormalizer:
                     target_out = target_out.unsqueeze(0)  # (1, H, W)
                 elif target_shape[-1] == 1:  # Was (H, W, 1)
                     target_out = target_out.unsqueeze(-1)  # (H, W, 1)
-        
+
         if target_out is not None:
             return X_out, target_out
         else:
             return X_out
-        
+
     def inverse_transform_torch(self, target, target_channel_index=0):
         """
         PyTorch-optimized inverse transform for targets.
@@ -256,14 +258,14 @@ class WaveNormalizer:
         Returns: denormalized target tensor of same shape
         """
         import torch
-        
+
         # Find target stats
         target_stats = None
-        
+
         # Priority 1: Use explicitly set target_stats_
         if self.target_stats_ is not None:
             target_stats = self.target_stats_
-        
+
         # Priority 2: Look up by feature name if feature_order_ is available
         elif self.feature_order_ is not None and self.target_feature_name_ is not None:
             try:
@@ -272,24 +274,24 @@ class WaveNormalizer:
                     target_stats = self.stats_[target_idx]
             except ValueError:
                 pass
-        
+
         # Priority 3: Use explicitly provided channel index
         elif target_channel_index in self.stats_:
             target_stats = self.stats_[target_channel_index]
-        
+
         # Priority 4: Fallback to last channel
         elif len(self.stats_) > 0:
             target_stats = self.stats_[len(self.stats_) - 1]
-        
+
         if target_stats is None:
             raise ValueError(
-                f"Target stats not found for inverse transform. Options:\n"
-                f"  1. Set target_stats_ attribute\n"
-                f"  2. Set feature_order_ and target_feature_name_ attributes\n"
-                f"  3. Pass target_channel_index that exists in stats_\n"
-                f"  4. Ensure stats_ is populated (will default to last channel)"
+                "Target stats not found for inverse transform. Options:\n"
+                "  1. Set target_stats_ attribute\n"
+                "  2. Set feature_order_ and target_feature_name_ attributes\n"
+                "  3. Pass target_channel_index that exists in stats_\n"
+                "  4. Ensure stats_ is populated (will default to last channel)"
             )
-        
+
         # Handle target shape - ensure it's (H, W) for normalization
         target_shape = target.shape
         if target.dim() == 3:
@@ -306,11 +308,11 @@ class WaveNormalizer:
             needs_target_unsqueeze = False
         else:
             raise ValueError(f"Unsupported target shape: {target.shape}")
-        
+
         # Denormalize target
         target_2d_np = target_2d.detach().cpu().numpy()
         flat_target = target_2d_np.reshape(-1, 1)
-        
+
         if self.mode == "zscore":
             if isinstance(target_stats, tuple):
                 # Fast path: direct computation
@@ -323,7 +325,7 @@ class WaveNormalizer:
         else:  # quantile
             inv = target_stats.inverse_transform(flat_target)
             target_denormalized = inv.reshape(target_2d_np.shape)
-        
+
         # Convert back to torch and restore original shape
         target_out = torch.from_numpy(target_denormalized).to(target.device).type_as(target)
         if needs_target_unsqueeze:
@@ -331,7 +333,7 @@ class WaveNormalizer:
                 target_out = target_out.unsqueeze(0)  # (1, H, W)
             elif target_shape[-1] == 1:  # Was (H, W, 1)
                 target_out = target_out.unsqueeze(-1)  # (H, W, 1)
-        
+
         return target_out
 
     def inverse_transform(self, X):

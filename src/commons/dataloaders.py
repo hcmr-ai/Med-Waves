@@ -120,7 +120,7 @@ class WaveDataset(Dataset):
         ]
 
         X = hour_data[..., input_col_indices]  # shape (H, W, C_in)
-        
+
         # Log channel order information only once
         if not self._feature_names_logged:
             import logging
@@ -146,7 +146,7 @@ class WaveDataset(Dataset):
                         f"std={vhm0[~np.isnan(vhm0)].std():.3f}, NaN count: {np.isnan(vhm0).sum()}")
             logger.debug(f"Corrected shape: {corrected.shape}, stats: mean={corrected[~np.isnan(corrected)].mean():.3f}, "
                         f"std={corrected[~np.isnan(corrected)].std():.3f}, NaN count: {np.isnan(corrected).sum()}")
-            
+
             y = corrected - vhm0  # Target is the bias (correction field)
         else:
             # Use target column directly
@@ -184,16 +184,15 @@ class WaveDataset(Dataset):
         return X, y, mask
 
 
-import torch
+
 from torch.utils.data import Dataset
-import numpy as np
-import random
+
 
 class CachedWaveDataset(Dataset):
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True, normalise_target=False):
+                 enable_profiler=False, use_cache=True, normalize_target=False):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -211,7 +210,7 @@ class CachedWaveDataset(Dataset):
         # worker-local cache
         self._cache = {}
         self.use_cache = use_cache
-        self.normalise_target = normalise_target
+        self.normalize_target = normalize_target
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -241,7 +240,7 @@ class CachedWaveDataset(Dataset):
 
         tensor = torch.from_numpy(arr)  # shape (T,H,W,C)
         return tensor, feature_cols
-    
+
     def _load_file_pt(self, path):
         data = torch.load(path, map_location="cpu")   # {"tensor": (T,H,W,C), "feature_cols": [...]}
         return data["tensor"], data["feature_cols"]
@@ -288,7 +287,7 @@ class CachedWaveDataset(Dataset):
                 X = X[i:i+ph, j:j+pw, :]
                 y = y[i:i+ph, j:j+pw, :]
 
-        
+
         if self.enable_profiler:
             with torch.profiler.record_function("normalize_and_subsample"):
                 # Subsample
@@ -300,10 +299,10 @@ class CachedWaveDataset(Dataset):
                     # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
                     # X = torch.from_numpy(X).float()
                     # X = self.normalizer.transform_torch(X)
-                    if self.normalise_target:
-                        X, y = self.normalizer.transform_torch(X, normalise_target=True, target=y)
+                    if self.normalize_target:
+                        X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
                     else:
-                        X = self.normalizer.transform_torch(X, normalise_target=False)
+                        X = self.normalizer.transform_torch(X, normalize_target=False)
         else:
             # Without profiler
              # Subsample
@@ -315,10 +314,10 @@ class CachedWaveDataset(Dataset):
                 # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
                 # X = torch.from_numpy(X).float()
                 # X = self.normalizer.transform_torch(X)
-                if self.normalise_target:
-                    X, y = self.normalizer.transform_torch(X, normalise_target=True, target=y)
+                if self.normalize_target:
+                    X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
                 else:
-                    X = self.normalizer.transform_torch(X, normalise_target=False)
+                    X = self.normalizer.transform_torch(X, normalize_target=False)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
