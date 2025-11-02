@@ -987,7 +987,7 @@ def main():
     logger.info(f"Found {len(files)} files")
     
     # Split files by year (same as training)
-    _,test_files, _ = split_files_by_year(
+    _, _ , test_files = split_files_by_year(
         files,
         train_year=data_config.get("train_year", 2021),
         val_year=data_config.get("val_year", 2022),
