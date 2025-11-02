@@ -294,6 +294,28 @@ class WaveNormalizer:
 
         # Handle target shape - ensure it's (H, W) for normalization
         target_shape = target.shape
+
+        if target.dim() == 4:
+            batch_size = target.shape[0]
+            # Process each batch item separately
+            if target.shape[1] == 1:  # (batch, 1, H, W)
+                # Squeeze batch dimension temporarily, process, then restore
+                batch_results = []
+                for b in range(batch_size):
+                    single_target = target[b:b+1]  # (1, 1, H, W)
+                    denorm = self.inverse_transform_torch(single_target.squeeze(0), target_channel_index)  # (1, H, W)
+                    batch_results.append(denorm.unsqueeze(0))  # (1, 1, H, W)
+                return torch.cat(batch_results, dim=0)  # (batch, 1, H, W)
+            elif target.shape[-1] == 1:  # (batch, H, W, 1)
+                batch_results = []
+                for b in range(batch_size):
+                    single_target = target[b]  # (H, W, 1)
+                    denorm = self.inverse_transform_torch(single_target, target_channel_index)  # (H, W, 1)
+                    batch_results.append(denorm.unsqueeze(0))  # (1, H, W, 1)
+                return torch.cat(batch_results, dim=0)  # (batch, H, W, 1)
+            else:
+                raise ValueError(f"Unsupported 4D target shape: {target.shape}")
+
         if target.dim() == 3:
             if target.shape[0] == 1:  # (1, H, W)
                 target_2d = target.squeeze(0)  # (H, W)

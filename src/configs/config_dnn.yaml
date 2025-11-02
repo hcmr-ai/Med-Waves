@@ -14,31 +14,34 @@ data:
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null
-  normalize_target: false
+  use_cache: false
 
   # Data preprocessing
   target_column: "corrected_VHM0" # Target variable
-  predict_bias: true # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
+  predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
+  normalize_target: true
   excluded_columns: [
       "time",
       "latitude",
       "longitude",
       "timestamp",
-      "VTM02",
+      # "VTM02",
       "corrected_VTM02",
       "WDIR",
       "VMDR",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "scalers/BU24h_zscore.pkl"
+  normalizer_path: "scalers/BU24h_zscore_target_21_22_with_corrected.pkl"
 
 # Model configuration
 model:
   in_channels: 15 # Number of input channels (all features except excluded)
-  learning_rate: 1e-4
+  learning_rate: 1e-3  # 1e-3
   loss_type: "mse" # Options: "mse", "weighted_mse"
   filters: [32, 64]
-  dropout: 0.2
+  dropout: 0
+  add_vhm0_residual: true
+  vhm0_channel_index: 0 
 
   # Learning rate scheduler configuration
   lr_scheduler:
@@ -46,7 +49,7 @@ model:
     monitor: "val_loss" # Metric to monitor for ReduceLROnPlateau
     mode: "min" # "min" for loss, "max" for accuracy
     factor: 0.5 # Factor to reduce LR by
-    patience: 5 # Epochs to wait before reducing LR
+    patience: 10 # Epochs to wait before reducing LR
     min_lr: 1e-7 # Minimum learning rate
     # verbose: true # Print LR changes
 
@@ -57,7 +60,7 @@ model:
 
 # Training configuration
 training:
-  batch_size: 64
+  batch_size: 48
   max_epochs: 100
   num_workers: 8
   pin_memory: true
@@ -65,8 +68,8 @@ training:
   devices: 1
   precision: "32" # Full precision training (16 or 32)
   log_every_n_steps: 20
-  early_stopping_patience: 10
-  save_top_k: 3
+  early_stopping_patience: 40
+  save_top_k: 15
   monitor: "val_loss"
   mode: "min"
   fast_dev_run: false
@@ -78,15 +81,15 @@ training:
 # Checkpoint configuration
 checkpoint:
   resume_from_checkpoint: null # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/preprocessed/checkpoints_100" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_small_filters_bias_100" # S3 backup for spot instances
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_small_filters_normalize_target_val_test_23_no_dropout_no_early_stopping_nick_48" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_small_filters_normalize_target_100_val_test_23_no_dropout_no_early_stopping_nick_48" # S3 backup for spot instances
   save_last: true
   sync_frequency: 5 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
   log_dir: "/opt/dlami/nvme/preprocessed/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_small_filters_bias_100"
+  experiment_name: "dnn_wave_correction_subsample_step_5_small_filters_normalize_target_100_val_test_23_no_dropout_no_early_stopping_nick_128"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
   comet_notes: "DNN training for wave height correction using U-Net architecture"

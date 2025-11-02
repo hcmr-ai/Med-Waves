@@ -40,7 +40,9 @@ class ModelEvaluator:
         test_loader: DataLoader,
         output_dir: Path,
         predict_bias: bool = False,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        normalizer: WaveNormalizer = None,
+        normalize_target: bool = False,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -49,7 +51,8 @@ class ModelEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
         self.predict_bias = predict_bias
-        
+        self.normalizer = normalizer
+        self.normalize_target = normalize_target
         # Sea-bin definitions
         self.sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
@@ -126,23 +129,12 @@ class ModelEvaluator:
         y = y[:, :, :min_h, :min_w]
         mask = mask[:, :, :min_h, :min_w]
         
-        if vhm0 is not None:
-            vhm0 = vhm0[:, :, :min_h, :min_w]
-        
-        # if self.normalize_target and self.normalizer is not None:
-        #     # Denormalize predictions and targets before computing metrics
-        #     # Predictions come from model in normalized space
-        #     y_pred_denorm = self.normalizer.inverse_transform_torch(y_pred)
-        #     y_true_denorm = self.normalizer.inverse_transform_torch(y)
-            
-        #     # Use denormalized values for metrics
-        #     y_pred_for_metrics = y_pred_denorm
-        #     y_true_for_metrics = y_true_denorm
-        # else:
-        #     # Already in original space
-        #     y_pred_for_metrics = y_pred
-        #     y_true_for_metrics = y_true
-        
+        vhm0 = vhm0[:, :, :min_h, :min_w]
+
+        if self.normalize_target and self.normalizer is not None:
+            y_pred = self.normalizer.inverse_transform_torch(y_pred)
+            y = self.normalizer.inverse_transform_torch(y)
+
         # Apply mask
         mask_flat = mask.flatten()
         y_true_flat = y.flatten()[mask_flat]
@@ -232,42 +224,42 @@ class ModelEvaluator:
                     self.plot_samples['y_uncorrected'].extend(y_uncorrected_np[indices])
             
             # Also accumulate spatial RMSE if metadata available
-            if batch_metadata is not None:
-                file_idx = batch_metadata.get('file_idx')
-                hour_idx = batch_metadata.get('hour_idx')
+            # if batch_metadata is not None:
+            #     file_idx = batch_metadata.get('file_idx')
+            #     hour_idx = batch_metadata.get('hour_idx')
                 
-                if file_idx is not None and hour_idx is not None:
-                    # For spatial tracking, we need full arrays (not masked) to align with grid indices
-                    # Reconstruct full arrays before masking - do computation on GPU first
-                    y_full = y.flatten()
-                    y_pred_full = y_pred.flatten()
-                    mask_full = mask.flatten()
+            #     if file_idx is not None and hour_idx is not None:
+            #         # For spatial tracking, we need full arrays (not masked) to align with grid indices
+            #         # Reconstruct full arrays before masking - do computation on GPU first
+            #         y_full = y.flatten()
+            #         y_pred_full = y_pred.flatten()
+            #         mask_full = mask.flatten()
                     
-                    # Reconstruct wave heights on full arrays if predicting bias (GPU computation)
-                    if self.predict_bias and vhm0 is not None:
-                        vhm0_full = vhm0.flatten()
-                        # Create a valid mask for reconstruction (where we have both y and vhm0)
-                        valid_for_recon = ~torch.isnan(y_full) & ~torch.isnan(vhm0_full)
-                        y_true_full = torch.where(valid_for_recon, y_full + vhm0_full, y_full)
-                        y_pred_full_waves = torch.where(valid_for_recon, y_pred_full + vhm0_full, y_pred_full)
-                    else:
-                        y_true_full = y_full
-                        y_pred_full_waves = y_pred_full
+            #         # Reconstruct wave heights on full arrays if predicting bias (GPU computation)
+            #         if self.predict_bias and vhm0 is not None:
+            #             vhm0_full = vhm0.flatten()
+            #             # Create a valid mask for reconstruction (where we have both y and vhm0)
+            #             valid_for_recon = ~torch.isnan(y_full) & ~torch.isnan(vhm0_full)
+            #             y_true_full = torch.where(valid_for_recon, y_full + vhm0_full, y_full)
+            #             y_pred_full_waves = torch.where(valid_for_recon, y_pred_full + vhm0_full, y_pred_full)
+            #         else:
+            #             y_true_full = y_full
+            #             y_pred_full_waves = y_pred_full
                     
-                    # Get uncorrected for baseline (full array)
-                    vhm0_full = vhm0.flatten() if vhm0 is not None else None
+            #         # Get uncorrected for baseline (full array)
+            #         vhm0_full = vhm0.flatten() if vhm0 is not None else None
                     
-                    # Convert to numpy in one batch (move to CPU once)
-                    mask_for_spatial = mask_full.cpu().numpy()
-                    y_true_for_spatial = y_true_full.cpu().numpy()
-                    y_pred_for_spatial = y_pred_full_waves.cpu().numpy()
-                    vhm0_for_spatial = vhm0_full.cpu().numpy() if vhm0_full is not None else None
+            #         # Convert to numpy in one batch (move to CPU once)
+            #         mask_for_spatial = mask_full.cpu().numpy()
+            #         y_true_for_spatial = y_true_full.cpu().numpy()
+            #         y_pred_for_spatial = y_pred_full_waves.cpu().numpy()
+            #         vhm0_for_spatial = vhm0_full.cpu().numpy() if vhm0_full is not None else None
                     
-                    self._accumulate_spatial_rmse(
-                        y_true_for_spatial, y_pred_for_spatial, 
-                        vhm0_for_spatial,
-                        mask_for_spatial, file_idx, hour_idx, min_h, min_w
-                    )
+            #         self._accumulate_spatial_rmse(
+            #             y_true_for_spatial, y_pred_for_spatial, 
+            #             vhm0_for_spatial,
+            #             mask_for_spatial, file_idx, hour_idx, min_h, min_w
+            #         )
     
     def run_inference(self):
         """Run model inference and compute metrics incrementally."""
@@ -608,16 +600,17 @@ class ModelEvaluator:
         
         # Plot 1: RMSE by sea state
         axes[0, 0].bar(
-            x - width / 2, rmse_values, width, label="Model", color="skyblue", alpha=0.8
-        )
-        axes[0, 0].bar(
             x + width / 2,
             baseline_rmse_values,
             width,
-            label="Baseline",
+            label="Reference",
             color="darkblue",
             alpha=0.6,
         )
+        axes[0, 0].bar(
+            x - width / 2, rmse_values, width, label="Model", color="skyblue", alpha=0.8
+        )
+
         axes[0, 0].set_title("RMSE by Sea State", fontweight="bold")
         axes[0, 0].set_ylabel("RMSE (m)")
         axes[0, 0].set_xticks(x)
@@ -626,7 +619,7 @@ class ModelEvaluator:
         axes[0, 0].grid(True, alpha=0.3, axis='y')
         
         # Add value labels on bars
-        for i, (v1, v2) in enumerate(zip(rmse_values, baseline_rmse_values, strict=False)):
+        for i, (v1, v2) in enumerate(zip(baseline_rmse_values, rmse_values, strict=False)):
             if v1 > 0:
                 axes[0, 0].text(
                     i - width / 2,
@@ -636,6 +629,7 @@ class ModelEvaluator:
                     va="bottom",
                     fontsize=8,
                 )
+
             if v2 > 0:
                 axes[0, 0].text(
                     i + width / 2,
@@ -648,6 +642,15 @@ class ModelEvaluator:
         
         # Plot 2: MAE by sea state
         axes[0, 1].bar(
+            x + width / 2,
+            baseline_mae_values,
+            width,
+            label="Reference",
+            color="darkred",
+            alpha=0.6,
+        )
+
+        axes[0, 1].bar(
             x - width / 2,
             mae_values,
             width,
@@ -655,14 +658,7 @@ class ModelEvaluator:
             color="lightcoral",
             alpha=0.8,
         )
-        axes[0, 1].bar(
-            x + width / 2,
-            baseline_mae_values,
-            width,
-            label="Baseline",
-            color="darkred",
-            alpha=0.6,
-        )
+
         axes[0, 1].set_title("MAE by Sea State", fontweight="bold")
         axes[0, 1].set_ylabel("MAE (m)")
         axes[0, 1].set_xticks(x)
@@ -671,7 +667,7 @@ class ModelEvaluator:
         axes[0, 1].grid(True, alpha=0.3, axis='y')
         
         # Add value labels on bars
-        for i, (v1, v2) in enumerate(zip(mae_values, baseline_mae_values, strict=False)):
+        for i, (v1, v2) in enumerate(zip(baseline_mae_values, mae_values, strict=False)):
             if v1 > 0:
                 axes[0, 1].text(
                     i - width / 2,
@@ -681,6 +677,7 @@ class ModelEvaluator:
                     va="bottom",
                     fontsize=8,
                 )
+
             if v2 > 0:
                 axes[0, 1].text(
                     i + width / 2,
@@ -690,6 +687,7 @@ class ModelEvaluator:
                     va="bottom",
                     fontsize=8,
                 )
+
         
         # Plot 3: Improvement percentage (RMSE)
         improvement_values = []
@@ -869,7 +867,7 @@ class ModelEvaluator:
         print(f"Saved metrics to {self.output_dir / 'evaluation_metrics.json'}")
         print(f"Saved metrics to {self.output_dir / 'evaluation_metrics.yaml'}")
     
-    def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict, spatial_metrics: Dict = None):
+    def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
         print("\n" + "="*80)
         print("EVALUATION SUMMARY")
@@ -912,7 +910,7 @@ class ModelEvaluator:
         print(f"{'Bin':<20} {'Count':<10} {'MAE':<10} {'RMSE':<10} {'Improvement':<15}")
         print("-" * 80)
         
-        for bin_name, metrics in sea_bin_metrics.items():
+        for _, metrics in sea_bin_metrics.items():
             if metrics['count'] > 0:
                 improvement_str = f"{metrics['mae_improvement_pct']:>7.2f}%" if metrics.get('mae_improvement_pct') is not None else "N/A"
                 print(f"{metrics['label']:<20} "
@@ -934,37 +932,31 @@ class ModelEvaluator:
         print("Computing final metrics...")
         overall_metrics = self.compute_overall_metrics()
         sea_bin_metrics = self.compute_sea_bin_metrics()
-        spatial_metrics = self.compute_spatial_metrics()
         
         # Save metrics
         with open(self.output_dir / 'metrics.json', 'w') as f:
             json.dump({
                 "overall": overall_metrics,
-                "sea_bins": sea_bin_metrics,
-                "spatial": spatial_metrics
+                "sea_bins": sea_bin_metrics
+                # "spatial": spatial_metrics
             }, f, indent=2)
         
         # Create plots using samples
         print("Creating plots...")
-        # self.plot_scatter()
-        # self.plot_error_distribution()
         self.plot_sea_bin_metrics(sea_bin_metrics)
-        # self.create_rmse_difference_map()
         
         # Print summary
-        self.print_summary(overall_metrics, sea_bin_metrics, spatial_metrics)
+        self.print_summary(overall_metrics, sea_bin_metrics)
         
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate WaveBiasCorrector model')
-    parser.add_argument('--checkpoint', type=str, default='/opt/dlami/nvme/preprocessed/checkpoints/epoch=27-val_loss=0.03.ckpt',
+    parser.add_argument('--checkpoint', type=str, default='',
                        help='Path to model checkpoint')
     parser.add_argument('--output-dir', type=str, default='./evaluation_results',
                        help='Output directory for results')
-    parser.add_argument('--batch-size', type=int, default=16,
-                       help='Batch size for evaluation')
     parser.add_argument('--device', type=str, default='cuda',
                        help='Device to use (cuda/cpu)')
     parser.add_argument('--config', type=str, default='src/configs/config_dnn.yaml',
@@ -1021,6 +1013,7 @@ def main():
         normalizer=normalizer,
         enable_profiler=False,
         use_cache=False,  # Use cache for evaluation
+        normalize_target=data_config.get("normalize_target", False)
     )
     
     # Create test loader (use training batch size)
@@ -1044,7 +1037,9 @@ def main():
         test_loader=test_loader,
         output_dir=Path(args.output_dir),
         predict_bias=predict_bias,
-        device="cuda"
+        device="cuda",
+        normalizer=normalizer,
+        normalize_target=data_config.get("normalize_target", False)
     )
     
     evaluator.evaluate()

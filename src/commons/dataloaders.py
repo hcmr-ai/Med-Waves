@@ -268,10 +268,30 @@ class CachedWaveDataset(Dataset):
             i for i, col in enumerate(feature_cols)
             if (col not in self.excluded_columns) and (col != self.target_column)
         ]
+        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
+        
+        # Select input features in FEATURES_ORDER to match scaler's stats_ indices
+        # This ensures stats_[c] applies to channel c in X
+        input_features = []
+        input_col_indices = []
+        
+        for feat in FEATURES_ORDER:
+            # Skip if excluded or is target
+            if feat in self.excluded_columns or feat == self.target_column:
+                continue
+            
+            # Find feature in feature_cols
+            if feat in feature_cols:
+                idx_in_feature_cols = feature_cols.index(feat)
+                input_features.append(feat)
+                input_col_indices.append(idx_in_feature_cols)
+        # print(input_features)
+        # print(input_col_indices)
         X = hour_data[..., input_col_indices]  # (H, W, C_in)
 
+        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+
         if self.predict_bias:
-            vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
             corrected = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
             y = corrected - vhm0
         else:
@@ -294,13 +314,25 @@ class CachedWaveDataset(Dataset):
                 if self.subsample_step is not None:
                     X = X[::self.subsample_step, ::self.subsample_step, :]
                     y = y[::self.subsample_step, ::self.subsample_step, :]
+                    vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
 
                 if self.normalizer is not None:
                     # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
                     # X = torch.from_numpy(X).float()
                     # X = self.normalizer.transform_torch(X)
                     if self.normalize_target:
+                        # Debug: Check inputs before normalization
+                        # print(f"Before normalization - X shape: {X.shape}, y shape: {y.shape}")
+                        # print(f"Before normalization X stats: mean={X[~torch.isnan(X)].mean().item():.4f}, std={X[~torch.isnan(X)].std().item():.4f}, NaN count: {torch.isnan(X).sum().item()}")
+                        # print(f"Before normalization y stats: mean={y[~torch.isnan(y)].mean().item():.4f}, std={y[~torch.isnan(y)].std().item():.4f}, NaN count: {torch.isnan(y).sum().item()}")
+                        
                         X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
+                        
+                        # Debug: Check outputs after normalization
+                        # print(f"After normalization - X shape: {X.shape}, y shape: {y.shape}")
+                        # print(f"After normalization X stats: mean={X[~torch.isnan(X)].mean().item():.4f}, std={X[~torch.isnan(X)].std().item():.4f}, NaN count: {torch.isnan(X).sum().item()}")
+                        # print(f"After normalization y stats: mean={y[~torch.isnan(y)].mean().item():.4f}, std={y[~torch.isnan(y)].std().item():.4f}, NaN count: {torch.isnan(y).sum().item()}")
+                        # exit()
                     else:
                         X = self.normalizer.transform_torch(X, normalize_target=False)
         else:
@@ -322,15 +354,15 @@ class CachedWaveDataset(Dataset):
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
         y = y.permute(2, 0, 1).contiguous()
+        vhm0_for_batch = vhm0.permute(2, 0, 1).contiguous()  # Convert to (C, H, W) like y
 
         # Mask for NaNs
         mask = ~torch.isnan(y)
         if self.predict_bias:
             # Also return VHM0 for baseline metrics calculation
-            vhm0_for_batch = vhm0.permute(2, 0, 1).contiguous()  # Convert to (C, H, W) like y
             return X, y, mask, vhm0_for_batch
         else:
-            return X, y, mask, None
+            return X, y, mask, vhm0_for_batch
 
     def __len__(self):
         return len(self.index_map)

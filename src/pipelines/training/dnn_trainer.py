@@ -339,7 +339,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         subsample_step=subsample_step,
         normalizer=normalizer,
         enable_profiler=True,
-        use_cache=True,
+        use_cache=data_config.get("use_cache", False),
         normalize_target=data_config.get("normalize_target")
     )
 
@@ -476,7 +476,6 @@ def main():
         logger.warning("Consider setting num_workers=0 or pre-downloading data locally.")
 
     train_loader, val_loader = create_data_loaders(config, fs)
-    exit()
 
     # Test one batch
     # logger.info("Testing data loading...")
@@ -513,6 +512,8 @@ def main():
         predict_bias=local_predict_bias,
         filters=model_config["filters"],
         dropout=model_config.get("dropout", 0.2),
+        add_vhm0_residual=model_config.get("add_vhm0_residual", False),
+        vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
     )
 
     # Create callbacks

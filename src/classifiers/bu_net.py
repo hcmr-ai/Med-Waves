@@ -46,7 +46,7 @@ class GeoConv(nn.Module):
 
 class BU_Net_Geo(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
     ):
         """
         BU-Net with geophysical padding.
@@ -57,6 +57,8 @@ class BU_Net_Geo(nn.Module):
         if filters is None:
             filters = [64, 128, 256, 512]
         self.dropout = dropout
+        self.add_vhm0_residual = add_vhm0_residual
+        self.vhm0_channel_index = vhm0_channel_index
         self.encoder_dropouts = nn.ModuleList()
         self.decoder_dropouts = nn.ModuleList()
         # Encoder
@@ -93,6 +95,8 @@ class BU_Net_Geo(nn.Module):
     def forward(self, x):
         # Store input dimensions for output matching
         # input_h, input_w = x.shape[2], x.shape[3]
+        if self.add_vhm0_residual:
+            vhm0_input = x[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
 
         enc_feats = []
         for enc, pool in zip(self.encoders, self.pools, strict=False):
@@ -115,6 +119,15 @@ class BU_Net_Geo(nn.Module):
             x = dec(x)
 
         x = self.final_conv(x)
+        if self.add_vhm0_residual:
+            # Ensure vhm0 matches correction dimensions (in case of interpolation)
+            if vhm0_input.shape[2:] != x.shape[2:]:
+                vhm0_input = F.interpolate(
+                    vhm0_input, size=x.shape[2:], mode="bilinear", align_corners=False
+                )
+            x = x + vhm0_input
+        else:
+            x = x
 
         # Ensure output matches input dimensions
         # if x.shape[2] != input_h or x.shape[3] != input_w:
@@ -123,80 +136,121 @@ class BU_Net_Geo(nn.Module):
         return x
 
 
-class BU_Net(nn.Module):
+class BU_Net_Geo_Nick(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
     ):
         """
-        5-level U-Net with BatchNorm as in Sun et al. (2022).
-        Input: (batch, in_channels, 80, 80)
-        Output: (batch, 1, 80, 80) corrected SWH
+        BU-Net matching notebook architecture exactly.
+        Input: (batch, in_channels, H, W)
+        Output: (batch, out_channels, H, W)
         """
         super().__init__()
-        if filters is None:
-            filters = [64, 128, 256, 512, 1024]
-        self.encoders = nn.ModuleList()
-        self.pools = nn.ModuleList()
-
-        prev_c = in_channels
-        for f in filters:
-            self.encoders.append(conv_block(prev_c, f))
-            self.pools.append(nn.MaxPool2d(2))
-            prev_c = f
-
-        # Bottleneck
-        self.bottleneck = conv_block(filters[-1], filters[-1] * 2)
-
+        # Notebook uses fixed [32, 64] filters, ignore filters parameter
+        self.add_vhm0_residual = add_vhm0_residual
+        self.vhm0_channel_index = vhm0_channel_index
+        
+        # Reflection padding: ((2, 2), (1, 1)) -> (left, right, top, bottom)
+        self.reflection_pad = nn.ReflectionPad2d((1, 1, 2, 2))
+        
+        # Encoder
+        # Block 1: 32 filters
+        self.enc1_conv = nn.Conv2d(in_channels, 32, kernel_size=3, padding=1)
+        self.enc1_bn = nn.BatchNorm2d(32)
+        self.enc1_pool = nn.MaxPool2d(2, 2)
+        
+        # Block 2: 64 filters
+        self.enc2_conv = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.enc2_bn = nn.BatchNorm2d(64)
+        self.enc2_pool = nn.MaxPool2d(2, 2)
+        
+        # Bottleneck: 128 filters
+        self.bottleneck_conv = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bottleneck_bn = nn.BatchNorm2d(128)
+        
         # Decoder
-        self.upconvs = nn.ModuleList()
-        self.decoders = nn.ModuleList()
-        rev_filters = list(reversed(filters))
-        prev_c = filters[-1] * 2
-        for f in rev_filters:
-            self.upconvs.append(nn.ConvTranspose2d(prev_c, f, kernel_size=2, stride=2))
-            self.decoders.append(conv_block(prev_c, f))
-            prev_c = f
-
-        # Output layer
-        self.final_conv = nn.Conv2d(filters[0], out_channels, kernel_size=1)
-
+        # Block 1: Upsample + concat with enc2 + 64 filters
+        self.dec1_upsample = nn.UpsamplingNearest2d(scale_factor=2)  # Matches UpSampling2D
+        self.dec1_conv = nn.Conv2d(192, 64, kernel_size=3, padding=1)  # 64 (skip) + 64 (upsampled) = 128 in
+        self.dec1_bn = nn.BatchNorm2d(64)
+        
+        # Block 2: Upsample + concat with enc1 + 32 filters
+        self.dec2_upsample = nn.UpsamplingNearest2d(scale_factor=2)
+        self.dec2_conv = nn.Conv2d(96, 32, kernel_size=3, padding=1)  # 32 (skip) + 64 (upsampled) = 96 in
+        self.dec2_bn = nn.BatchNorm2d(32)
+        
+        # Output correction: 1 channel, 3x3 conv, linear activation
+        self.correction_conv = nn.Conv2d(32, out_channels, kernel_size=3, padding=1)
+        
+        # Crop padding: removes (2, 2) from height, (1, 1) from width
+        # This is handled in forward by slicing
+    
     def forward(self, x):
-        # Encoder path
-        enc_feats = []
-        for enc, pool in zip(self.encoders, self.pools, strict=False):
-            x = enc(x)
-            enc_feats.append(x)
-            x = pool(x)
-
+        # Apply reflection padding
+        x_padded = self.reflection_pad(x)
+        
+        # Store VHM0 for residual (from padded input)
+        if self.add_vhm0_residual:
+            vhm0_raw = x_padded[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+        
+        # Encoder
+        c1 = F.relu(self.enc1_bn(self.enc1_conv(x_padded)))
+        p1 = self.enc1_pool(c1)
+        
+        c2 = F.relu(self.enc2_bn(self.enc2_conv(p1)))
+        p2 = self.enc2_pool(c2)
+        
         # Bottleneck
-        x = self.bottleneck(x)
-
-        # Decoder path
-        for up, dec, skip in zip(
-            self.upconvs, self.decoders, reversed(enc_feats), strict=False
-        ):
-            x = up(x)
-            # Ensure correct size in case of odd dimensions
-            if x.size() != skip.size():
-                x = nn.functional.interpolate(
-                    x, size=skip.shape[2:], mode="bilinear", align_corners=False
-                )
-            x = torch.cat([skip, x], dim=1)
-            x = dec(x)
-
-        out = self.final_conv(x)
-        return out  # correction field
-
+        c3 = F.relu(self.bottleneck_bn(self.bottleneck_conv(p2)))
+        
+        # Decoder
+        # Block 1: Upsample c3, concat with c2
+        u2 = self.dec1_upsample(c3)
+        # Handle dimension mismatch if needed
+        if u2.size()[2:] != c2.size()[2:]:
+            u2 = F.interpolate(u2, size=c2.shape[2:], mode='bilinear', align_corners=False)
+        u2_concat = torch.cat([u2, c2], dim=1)  # 64 + 64 = 128 channels
+        c4 = F.relu(self.dec1_bn(self.dec1_conv(u2_concat)))
+        
+        # Block 2: Upsample c4, concat with c1
+        u1 = self.dec2_upsample(c4)
+        # Handle dimension mismatch if needed
+        if u1.size()[2:] != c1.size()[2:]:
+            u1 = F.interpolate(u1, size=c1.shape[2:], mode='bilinear', align_corners=False)
+        u1_concat = torch.cat([u1, c1], dim=1)  # 64 + 32 = 96 channels
+        c5 = F.relu(self.dec2_bn(self.dec2_conv(u1_concat)))
+        
+        # Output correction
+        correction = self.correction_conv(c5)  # Linear activation (no ReLU)
+        
+        # Residual connection
+        if self.add_vhm0_residual:
+            # Ensure vhm0 matches correction dimensions
+            if vhm0_raw.shape[2:] != correction.shape[2:]:
+                vhm0_raw = F.interpolate(vhm0_raw, size=correction.shape[2:], mode='bilinear', align_corners=False)
+            output_padded = correction + vhm0_raw
+        else:
+            output_padded = correction
+        
+        # Crop padding: remove (2, 2) from height, (1, 1) from width
+        # If padded input was (B, C, H+4, W+2), output should be (B, C, H, W)
+        # Crop top=2, bottom=2, left=1, right=1
+        _, _, h, w = output_padded.shape
+        output = output_padded[:, :, 2:h-2, 1:w-1]
+        
+        return output
 
 class WaveBiasCorrector(pl.LightningModule):
     def __init__(
         self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False,
         filters=None,
         dropout=0.2,
+        add_vhm0_residual=False,
+        vhm0_channel_index=0,
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = BU_Net_Geo(in_channels=in_channels, filters=filters, dropout=dropout)
+        self.model = BU_Net_Geo_Nick(in_channels=in_channels, filters=filters, dropout=dropout, add_vhm0_residual = add_vhm0_residual,vhm0_channel_index = vhm0_channel_index)
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
@@ -257,7 +311,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "train_baseline")
             else:
                 self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
-                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction, "train_baseline")
+                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "train_baseline")
             
         return loss
 
@@ -307,7 +361,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "val_baseline")
             else:
                 self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
-                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction, "val_baseline")
+                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "val_baseline")
 
         return loss
     
