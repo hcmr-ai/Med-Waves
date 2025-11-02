@@ -6,6 +6,7 @@ from tqdm import tqdm
 from pathlib import Path
 import sys
 import s3fs
+import glob
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
@@ -13,36 +14,46 @@ from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 S3_BUCKET = "medwav-dev-data"
 S3_PREFIX = "scalers/"
 LOCAL_TMP = "data/scalers/"
-DATA_PATH = "s3://medwav-dev-data/parquet/hourly/year=2021"# "/Users/deeplab/Documents/projects/hcmr/data/hourly/"
+USE_S3 = True
+
+if USE_S3:
+    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2021", "s3://medwav-dev-data/parquet/hourly/year=2022"]
+else:
+    DATA_PATHS = ["/Users/deeplab/Documents/projects/hcmr/data/hourly/"]
 
 FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
 def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
     """Load and stack all parquet files into numpy"""
-    # lf = pl.scan_parquet(parquet_dir + "/*.parquet", storage_options={
-    #     "AWS_REGION": "eu-central-1",
-    #     "AWS_ACCESS_KEY_ID": os.environ["AWS_ACCESS_KEY_ID"],
-    #     "AWS_SECRET_ACCESS_KEY": os.environ["AWS_SECRET_ACCESS_KEY"],
-    # })
-    # if features:
-    #     lf = lf.select(features)
-    # df = lf.collect()
-    # arr = df.to_numpy()
-    # return arr
-    fs = s3fs.S3FileSystem()
-    files = fs.glob(f"{parquet_dir}/*.parquet")
+    if USE_S3:
+        fs = s3fs.S3FileSystem()
+        files = fs.glob(f"{parquet_dir}/*.parquet")
+    else:
+        files = glob.glob(f"{parquet_dir}/*.parquet")
     print(f"Found {len(files)} parquet files")
 
     dfs = []
     for f in tqdm(files, desc="Loading parquet files"):
-        with fs.open(f, "rb") as fh:
-            df = pl.read_parquet(fh)
-            print(f"\nFile: {f}")
-            print(f"  Shape: {df.shape}")
-            df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
-            if features:
-                df = df.select(features)
-            dfs.append(df)
-            print(f"  After drop nulls: {df.shape}")
+        if USE_S3:
+            with fs.open(f, "rb") as fh:
+                df = pl.read_parquet(fh)
+                print(f"\nFile: {f}")
+                print(f"  Shape: {df.shape}")
+                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
+                if features:
+                    df = df.select(features)
+                dfs.append(df)
+                print(f"  After drop nulls: {df.shape}")
+        else:
+            with open(os.path.join(parquet_dir, f), "rb") as fh:
+                df = pl.read_parquet(fh)
+                print(f"\nFile: {f}")
+                print(f"  Shape: {df.shape}")
+                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
+                if features:
+                    df = df.select(features)
+                print(df.head())
+                dfs.append(df)
+                print(f"  After drop nulls: {df.shape}")
 
     # Concatenate vertically
     full_df = pl.concat(dfs, how="vertical")
@@ -55,8 +66,10 @@ def save_to_s3(local_path, bucket, key):
     print(f"✓ Uploaded to s3://{bucket}/{key}")
 
 if __name__ == "__main__":
-    X = load_all_data(DATA_PATH, features=FEATURES)
-    print("Loaded data:", X.shape)  # e.g. (N, 1)
+
+    X_parts = [load_all_data(p, features=FEATURES) for p in DATA_PATHS]
+    X = np.concatenate(X_parts, axis=0)
+    print("Loaded data:", X.shape)  # e.g. (N, C)
 
     # Reshape for normalizer: (N, H, W, C)
     if X.ndim == 2:   # (N, C)
@@ -64,9 +77,9 @@ if __name__ == "__main__":
 
     # Define configs
     configs = {
-        "BU24h_zscore": dict(mode="zscore"),
-        # "BU48h_quantile": dict(mode="quantile"),
-        # "BU72h_quantile": dict(mode="quantile"),
+        "BU24h_zscore_target": dict(mode="zscore"),
+        # "BU48h_quantile_target": dict(mode="quantile"),
+        # "BU72h_quantile_target": dict(mode="quantile"),
     }
 
     for name, cfg in tqdm(configs.items(), desc="Fitting scalers"):
@@ -124,7 +137,10 @@ if __name__ == "__main__":
         normalizer.save(local_path)
         print(f"✓ Saved normalizer to {local_path}")
 
-        # Upload to S3
-        s3_key = f"{S3_PREFIX}{name}_with_corrected.pkl"
-        normalizer.save_to_s3(local_path, S3_BUCKET, s3_key)
-        print(f"✓ Uploaded to s3://{S3_BUCKET}/{s3_key}")
+        # Upload to S3 if USE_S3 is True
+        if USE_S3:
+            s3_key = f"{S3_PREFIX}{name}_with_corrected.pkl"
+            normalizer.save_to_s3(local_path, S3_BUCKET, s3_key)
+            print(f"✓ Uploaded to s3://{S3_BUCKET}/{s3_key}")
+        else:
+            print(f"Skipping upload to S3 as USE_S3 is False")
