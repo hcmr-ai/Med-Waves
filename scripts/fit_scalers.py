@@ -77,9 +77,9 @@ if __name__ == "__main__":
 
     # Define configs
     configs = {
-        "BU24h_zscore_target": dict(mode="zscore"),
-        # "BU48h_quantile_target": dict(mode="quantile"),
-        # "BU72h_quantile_target": dict(mode="quantile"),
+        "BU24h_zscore_target_21_22": dict(mode="zscore"),
+        # "BU48h_quantile_target_21_22": dict(mode="quantile"),
+        # "BU72h_quantile_target_21_22": dict(mode="quantile"),
     }
 
     for name, cfg in tqdm(configs.items(), desc="Fitting scalers"):
