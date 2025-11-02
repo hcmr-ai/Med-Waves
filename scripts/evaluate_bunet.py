@@ -992,6 +992,8 @@ def main():
         train_year=data_config.get("train_year", 2021),
         val_year=data_config.get("val_year", 2022),
         test_year=data_config.get("test_year", 2023),
+        val_months=data_config.get("val_months", []),
+        test_months=data_config.get("test_months", []),
     )
     
     logger.info(f"Test files: {len(test_files)}")
@@ -1031,9 +1033,9 @@ def main():
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=training_config["prefetch_factor"]
     )
-
-    logger.info(f"Loading model from {args.checkpoint}...")
-    model = WaveBiasCorrector.load_from_checkpoint(args.checkpoint)
+    checkpoint = config.config["checkpoint"]["resume_from_checkpoint"]
+    logger.info(f"Loading model from {checkpoint}...")
+    model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
     logger.info(f"Model loaded. predict_bias={predict_bias}")
 
     # Create evaluator and run evaluation
