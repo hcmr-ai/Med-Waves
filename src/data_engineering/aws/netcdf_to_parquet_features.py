@@ -15,7 +15,7 @@ import time
 
 import fsspec
 
-from src.data_engineering.feature_augmentation import add_features_lazy
+from src.data_engineering.neptune.feature_augmentation import add_features_lazy
 
 
 def convert_netcdf_to_parquet_hourly(netcdf_file_path) -> pl.DataFrame:
