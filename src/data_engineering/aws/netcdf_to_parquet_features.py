@@ -114,17 +114,29 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
             if not corrected_exists:
                 return file_name, False, "corrected file not found", time.time() - start_time
 
+            # Determine output file name and skip if already exists in output_dir
+            if mode == "parquet":
+                out_file_name = file_name
+            else:
+                out_file_name = file_name[:-3] + ".parquet" if file_name.endswith(".nc") else (file_name + ".parquet")
+
+            if is_s3_output:
+                target_path = output_dir.rstrip("/") + f"/{out_file_name}"
+                if fs.exists(target_path):  # type: ignore[union-attr]
+                    return file_name, False, "exists", time.time() - start_time
+            else:
+                if (Path(output_dir) / out_file_name).exists():
+                    return file_name, False, "exists", time.time() - start_time
+
             # Read inputs based on mode
             if mode == "parquet":
                 df_deg = pl.scan_parquet(degraded_path)
                 df_cor = pl.scan_parquet(corrected_path)
-                out_file_name = file_name
             else:
                 df_deg_pl = convert_netcdf_to_parquet_hourly(degraded_path)
                 df_cor_pl = convert_netcdf_to_parquet_hourly(corrected_path)
                 df_deg = df_deg_pl.lazy()
                 df_cor = df_cor_pl.lazy()
-                out_file_name = file_name[:-3] + ".parquet" if file_name.endswith(".nc") else (file_name + ".parquet")
 
             df_cor_labels = df_cor.select([
                 pl.col("VHM0").alias("corrected_VHM0"),
@@ -162,6 +174,8 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                     tqdm.write(f"ℹ️ Dry-run: would write {(output_dir.rstrip('/') + '/' + (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname)) if is_s3_output else str(Path(output_dir) / (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname))}")
                 elif msg == "corrected file not found":
                     tqdm.write(f"⚠️  Skipping {fname} – corrected file not found.")
+                elif msg == "exists":
+                    tqdm.write(f"⏭️  Skipping {fname} – output already exists.")
                 else:
                     tqdm.write(f"❌ Error processing {fname}: {msg}")
     else:
@@ -178,6 +192,8 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                         tqdm.write(f"ℹ️ Dry-run: would write {target_desc}")
                     elif msg == "corrected file not found":
                         tqdm.write(f"⚠️  Skipping {fname} – corrected file not found.")
+                    elif msg == "exists":
+                        tqdm.write(f"⏭️  Skipping {fname} – output already exists.")
                     else:
                         tqdm.write(f"❌ Error processing {fname}: {msg}")
                     pbar.update(1)
