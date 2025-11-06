@@ -7,11 +7,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from transformers import get_cosine_schedule_with_warmup
 
 # Add src to path for imports
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
-from src.commons.losses import masked_mse_loss, masked_weighted_mse
+from src.commons.losses import masked_mse_loss, masked_weighted_mse, masked_smooth_l1_loss
 
 
 def conv_block(in_channels, out_channels):
@@ -254,6 +255,8 @@ class WaveBiasCorrector(pl.LightningModule):
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
+        if loss_type == "smooth_l1":
+            self.criterion = torch.nn.SmoothL1Loss(beta=0.1, reduction="mean")
 
     def forward(self, x):
         # Handle NaN values in input by replacing with zeros
@@ -263,6 +266,8 @@ class WaveBiasCorrector(pl.LightningModule):
     def compute_loss(self, y_pred, y_true, mask):
         if self.loss_type == "mse":
             return masked_mse_loss(y_pred, y_true, mask)
+        elif self.loss_type == "smooth_l1":
+            return masked_smooth_l1_loss(y_pred, y_true, mask, self.criterion)
         else:
             return masked_weighted_mse(y_pred, y_true, mask)
 
@@ -459,7 +464,7 @@ class WaveBiasCorrector(pl.LightningModule):
 
         elif scheduler_type == "CosineAnnealingLR":
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=int(scheduler_config.get("T_max", 50))
+                optimizer, T_max=int(scheduler_config.get("T_max", 50)), eta_min=get_float("eta_min", 1e-6),
             )
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
@@ -474,6 +479,14 @@ class WaveBiasCorrector(pl.LightningModule):
         elif scheduler_type == "ExponentialLR":
             scheduler = optim.lr_scheduler.ExponentialLR(
                 optimizer, gamma=get_float("gamma", 0.1)
+            )
+            return {"optimizer": optimizer, "lr_scheduler": scheduler}
+
+        elif scheduler_type == "CosineAnnealingWarmupRestarts":
+            num_steps = self.trainer.estimated_stepping_batches
+            warmup_steps = int(0.1 * num_steps)  # 10% warmup
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_steps,
             )
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 

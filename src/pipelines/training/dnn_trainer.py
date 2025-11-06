@@ -46,6 +46,17 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
 
+# def set_global_seed(seed: int = 42):
+#     import random
+#     import numpy as np
+#     random.seed(seed)
+#     np.random.seed(seed)
+#     torch.manual_seed(seed)
+#     torch.cuda.manual_seed_all(seed)  # if using GPU
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cudnn.benchmark = False
+
+# set_global_seed(42)
 
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
@@ -375,7 +386,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
-        prefetch_factor=training_config["prefetch_factor"]
+        prefetch_factor=None
     )
 
     return train_loader, val_loader
@@ -476,13 +487,6 @@ def main():
         logger.warning("Consider setting num_workers=0 or pre-downloading data locally.")
 
     train_loader, val_loader = create_data_loaders(config, fs)
-
-    # Test one batch
-    # logger.info("Testing data loading...")
-    # for batch in train_loader:
-    #     X, y, mask = batch
-    #     logger.info(f"X shape: {X.shape}, y shape: {y.shape}, mask shape: {mask.shape}")
-    #     break
 
     # Create model
     model_config = config.config["model"]

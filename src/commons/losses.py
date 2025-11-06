@@ -1,6 +1,22 @@
 import torch
 
 
+def masked_smooth_l1_loss(y_pred, y_true, mask, criterion):
+    min_h = min(y_pred.shape[2], y_true.shape[2])
+    min_w = min(y_pred.shape[3], y_true.shape[3])
+    y_pred = y_pred[:, :, :min_h, :min_w]
+    y_true = y_true[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w]
+
+    if not mask.any():
+        return torch.tensor(0.0, device=y_true.device)
+
+    y_clean = torch.nan_to_num(y_true, nan=0.0)
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
+
+    return criterion(y_pred_clean[mask], y_clean[mask])
+
+
 def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])

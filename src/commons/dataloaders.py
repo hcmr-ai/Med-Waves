@@ -276,7 +276,6 @@ class CachedWaveDataset(Dataset):
         input_col_indices = []
         
         for feat in FEATURES_ORDER:
-            # Skip if excluded or is target
             if feat in self.excluded_columns or feat == self.target_column:
                 continue
             
@@ -285,8 +284,6 @@ class CachedWaveDataset(Dataset):
                 idx_in_feature_cols = feature_cols.index(feat)
                 input_features.append(feat)
                 input_col_indices.append(idx_in_feature_cols)
-        # print(input_features)
-        # print(input_col_indices)
         X = hour_data[..., input_col_indices]  # (H, W, C_in)
 
         vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
@@ -296,7 +293,7 @@ class CachedWaveDataset(Dataset):
             y = corrected - vhm0
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
-
+        mask = ~torch.isnan(y)
         # Patch sampling
         if self.patch_size is not None:
             H, W, _ = X.shape
@@ -317,22 +314,8 @@ class CachedWaveDataset(Dataset):
                     vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
 
                 if self.normalizer is not None:
-                    # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
-                    # X = torch.from_numpy(X).float()
-                    # X = self.normalizer.transform_torch(X)
                     if self.normalize_target:
-                        # Debug: Check inputs before normalization
-                        # print(f"Before normalization - X shape: {X.shape}, y shape: {y.shape}")
-                        # print(f"Before normalization X stats: mean={X[~torch.isnan(X)].mean().item():.4f}, std={X[~torch.isnan(X)].std().item():.4f}, NaN count: {torch.isnan(X).sum().item()}")
-                        # print(f"Before normalization y stats: mean={y[~torch.isnan(y)].mean().item():.4f}, std={y[~torch.isnan(y)].std().item():.4f}, NaN count: {torch.isnan(y).sum().item()}")
-                        
                         X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
-                        
-                        # Debug: Check outputs after normalization
-                        # print(f"After normalization - X shape: {X.shape}, y shape: {y.shape}")
-                        # print(f"After normalization X stats: mean={X[~torch.isnan(X)].mean().item():.4f}, std={X[~torch.isnan(X)].std().item():.4f}, NaN count: {torch.isnan(X).sum().item()}")
-                        # print(f"After normalization y stats: mean={y[~torch.isnan(y)].mean().item():.4f}, std={y[~torch.isnan(y)].std().item():.4f}, NaN count: {torch.isnan(y).sum().item()}")
-                        # exit()
                     else:
                         X = self.normalizer.transform_torch(X, normalize_target=False)
         else:
@@ -341,11 +324,9 @@ class CachedWaveDataset(Dataset):
             if self.subsample_step is not None:
                 X = X[::self.subsample_step, ::self.subsample_step, :]
                 y = y[::self.subsample_step, ::self.subsample_step, :]
+                vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
 
             if self.normalizer is not None:
-                # X = self.normalizer.transform(X.numpy()[np.newaxis])[0]
-                # X = torch.from_numpy(X).float()
-                # X = self.normalizer.transform_torch(X)
                 if self.normalize_target:
                     X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
                 else:
@@ -355,9 +336,9 @@ class CachedWaveDataset(Dataset):
         X = X.permute(2, 0, 1).contiguous()
         y = y.permute(2, 0, 1).contiguous()
         vhm0_for_batch = vhm0.permute(2, 0, 1).contiguous()  # Convert to (C, H, W) like y
+        mask = mask.permute(2, 0, 1).contiguous()  # Convert mask to (C, H, W) to match y
 
         # Mask for NaNs
-        mask = ~torch.isnan(y)
         if self.predict_bias:
             # Also return VHM0 for baseline metrics calculation
             return X, y, mask, vhm0_for_batch
