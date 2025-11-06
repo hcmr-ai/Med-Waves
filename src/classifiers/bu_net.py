@@ -12,7 +12,11 @@ from transformers import get_cosine_schedule_with_warmup
 # Add src to path for imports
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
-from src.commons.losses import masked_mse_loss, masked_weighted_mse, masked_smooth_l1_loss
+from src.commons.losses import (
+    masked_mse_loss,
+    masked_smooth_l1_loss,
+    masked_weighted_mse,
+)
 
 
 def conv_block(in_channels, out_channels):
@@ -136,8 +140,7 @@ class BU_Net_Geo(nn.Module):
 
         return x
 
-
-class BU_Net_Geo_Nick(nn.Module):
+class BU_Net_Geo_Nick_Shallow(nn.Module):
     def __init__(
         self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
     ):
@@ -150,60 +153,60 @@ class BU_Net_Geo_Nick(nn.Module):
         # Notebook uses fixed [32, 64] filters, ignore filters parameter
         self.add_vhm0_residual = add_vhm0_residual
         self.vhm0_channel_index = vhm0_channel_index
-        
+
         # Reflection padding: ((2, 2), (1, 1)) -> (left, right, top, bottom)
         self.reflection_pad = nn.ReflectionPad2d((1, 1, 2, 2))
-        
+
         # Encoder
         # Block 1: 32 filters
         self.enc1_conv = nn.Conv2d(in_channels, 32, kernel_size=3, padding=1)
         self.enc1_bn = nn.BatchNorm2d(32)
         self.enc1_pool = nn.MaxPool2d(2, 2)
-        
+
         # Block 2: 64 filters
         self.enc2_conv = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.enc2_bn = nn.BatchNorm2d(64)
         self.enc2_pool = nn.MaxPool2d(2, 2)
-        
+
         # Bottleneck: 128 filters
         self.bottleneck_conv = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bottleneck_bn = nn.BatchNorm2d(128)
-        
+
         # Decoder
         # Block 1: Upsample + concat with enc2 + 64 filters
         self.dec1_upsample = nn.UpsamplingNearest2d(scale_factor=2)  # Matches UpSampling2D
         self.dec1_conv = nn.Conv2d(192, 64, kernel_size=3, padding=1)  # 64 (skip) + 64 (upsampled) = 128 in
         self.dec1_bn = nn.BatchNorm2d(64)
-        
+
         # Block 2: Upsample + concat with enc1 + 32 filters
         self.dec2_upsample = nn.UpsamplingNearest2d(scale_factor=2)
         self.dec2_conv = nn.Conv2d(96, 32, kernel_size=3, padding=1)  # 32 (skip) + 64 (upsampled) = 96 in
         self.dec2_bn = nn.BatchNorm2d(32)
-        
+
         # Output correction: 1 channel, 3x3 conv, linear activation
         self.correction_conv = nn.Conv2d(32, out_channels, kernel_size=3, padding=1)
-        
+
         # Crop padding: removes (2, 2) from height, (1, 1) from width
         # This is handled in forward by slicing
-    
+
     def forward(self, x):
         # Apply reflection padding
         x_padded = self.reflection_pad(x)
-        
+
         # Store VHM0 for residual (from padded input)
         if self.add_vhm0_residual:
             vhm0_raw = x_padded[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
-        
+
         # Encoder
         c1 = F.relu(self.enc1_bn(self.enc1_conv(x_padded)))
         p1 = self.enc1_pool(c1)
-        
+
         c2 = F.relu(self.enc2_bn(self.enc2_conv(p1)))
         p2 = self.enc2_pool(c2)
-        
+
         # Bottleneck
         c3 = F.relu(self.bottleneck_bn(self.bottleneck_conv(p2)))
-        
+
         # Decoder
         # Block 1: Upsample c3, concat with c2
         u2 = self.dec1_upsample(c3)
@@ -212,7 +215,7 @@ class BU_Net_Geo_Nick(nn.Module):
             u2 = F.interpolate(u2, size=c2.shape[2:], mode='bilinear', align_corners=False)
         u2_concat = torch.cat([u2, c2], dim=1)  # 64 + 64 = 128 channels
         c4 = F.relu(self.dec1_bn(self.dec1_conv(u2_concat)))
-        
+
         # Block 2: Upsample c4, concat with c1
         u1 = self.dec2_upsample(c4)
         # Handle dimension mismatch if needed
@@ -220,10 +223,10 @@ class BU_Net_Geo_Nick(nn.Module):
             u1 = F.interpolate(u1, size=c1.shape[2:], mode='bilinear', align_corners=False)
         u1_concat = torch.cat([u1, c1], dim=1)  # 64 + 32 = 96 channels
         c5 = F.relu(self.dec2_bn(self.dec2_conv(u1_concat)))
-        
+
         # Output correction
         correction = self.correction_conv(c5)  # Linear activation (no ReLU)
-        
+
         # Residual connection
         if self.add_vhm0_residual:
             # Ensure vhm0 matches correction dimensions
@@ -232,13 +235,118 @@ class BU_Net_Geo_Nick(nn.Module):
             output_padded = correction + vhm0_raw
         else:
             output_padded = correction
-        
+
         # Crop padding: remove (2, 2) from height, (1, 1) from width
         # If padded input was (B, C, H+4, W+2), output should be (B, C, H, W)
         # Crop top=2, bottom=2, left=1, right=1
         _, _, h, w = output_padded.shape
         output = output_padded[:, :, 2:h-2, 1:w-1]
-        
+
+        return output
+
+class BU_Net_Geo_Nick(nn.Module):
+    def __init__(
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
+    ):
+        """
+        BU-Net matching notebook architecture exactly.
+        Input: (batch, in_channels, H, W)
+        Output: (batch, out_channels, H, W)
+        """
+        super().__init__()
+        filters = [32, 64] if filters is None else filters
+        self.add_vhm0_residual = add_vhm0_residual
+        self.vhm0_channel_index = vhm0_channel_index
+        self.filters = filters
+        self.dropout = dropout
+
+        # Reflection padding: ((2, 2), (1, 1)) -> (left, right, top, bottom)
+        self.reflection_pad = nn.ReflectionPad2d((1, 1, 2, 2))
+
+        # Encoder (automated)
+        self.encoders = nn.ModuleList()
+        self.pools = nn.ModuleList()
+        prev_c = in_channels
+        for f in filters:
+            self.encoders.append(
+                nn.Sequential(
+                    nn.Conv2d(prev_c, f, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(f),
+                    nn.ReLU(inplace=True),
+                )
+            )
+            self.pools.append(nn.MaxPool2d(2, 2))
+            prev_c = f
+
+        # Bottleneck (keep same channels as last encoder to match notebook math: 64 + 64)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(filters[-1], filters[-1], kernel_size=3, padding=1),
+            nn.BatchNorm2d(filters[-1]),
+            nn.ReLU(inplace=True),
+        )
+
+        # Decoder (automated): upsample then Conv2d(current + skip -> skip)
+        self.up_samples = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        current_channels = filters[-1]
+        for skip_channels in reversed(filters[:-1]):
+            self.up_samples.append(nn.UpsamplingNearest2d(scale_factor=2))
+            self.decoders.append(
+                nn.Sequential(
+                    nn.Conv2d(current_channels + skip_channels, skip_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(skip_channels),
+                    nn.ReLU(inplace=True),
+                )
+            )
+            current_channels = skip_channels
+
+        # Output correction: 1 channel, 3x3 conv, linear activation
+        self.correction_conv = nn.Conv2d(filters[0], out_channels, kernel_size=3, padding=1)
+
+        # Crop padding: removes (2, 2) from height, (1, 1) from width) handled in forward
+
+    def forward(self, x):
+        # Apply reflection padding
+        x_padded = self.reflection_pad(x)
+
+        # Store VHM0 for residual (from padded input)
+        if self.add_vhm0_residual:
+            vhm0_raw = x_padded[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+
+        # Encoder
+        enc_feats = []
+        out = x_padded
+        for enc, pool in zip(self.encoders, self.pools, strict=False):
+            out = enc(out)
+            enc_feats.append(out)
+            out = pool(out)
+
+        # Bottleneck
+        out = self.bottleneck(out)
+
+        # Decoder
+        for up, dec, skip in zip(self.up_samples, self.decoders, reversed(enc_feats), strict=False):
+            out = up(out)
+            if out.size()[2:] != skip.size()[2:]:
+                out = F.interpolate(out, size=skip.shape[2:], mode='bilinear', align_corners=False)
+            out = torch.cat([out, skip], dim=1)
+            out = dec(out)
+
+        # Output correction
+        correction = self.correction_conv(out)  # Linear activation (no ReLU)
+
+        # Residual connection
+        if self.add_vhm0_residual:
+            if vhm0_raw.shape[2:] != correction.shape[2:]:
+                vhm0_raw = F.interpolate(vhm0_raw, size=correction.shape[2:], mode='bilinear', align_corners=False)
+            output_padded = correction + vhm0_raw
+        else:
+            output_padded = correction
+
+        # Crop padding: remove (2, 2) from height, (1, 1) from width
+        _, _, h, w = output_padded.shape
+        output = output_padded[:, :, 2:h-2, 1:w-1]
+
         return output
 
 class WaveBiasCorrector(pl.LightningModule):
@@ -306,7 +414,7 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log(
                 "train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True
             )
-            
+
             # Log sea-bin metrics for training
             if self.predict_bias and vhm0_for_reconstruction is not None:
                 vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
@@ -317,7 +425,7 @@ class WaveBiasCorrector(pl.LightningModule):
             else:
                 self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
                 self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "train_baseline")
-            
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -356,7 +464,7 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("val_pred_mean", y_pred[mask].mean(), on_epoch=True)
             self.log("val_pred_std", y_pred[mask].std(), on_epoch=True)
             self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
-            
+
             # Log sea-bin metrics for validation
             if self.predict_bias and vhm0_for_reconstruction is not None:
                 vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
@@ -369,11 +477,11 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "val_baseline")
 
         return loss
-    
+
     def on_train_epoch_end(self) -> None:
         lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
-    
+
     def on_after_backward(self):
         total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
         self.log("grad_norm_clipped", total_norm, on_step=True, on_epoch=True, prog_bar=True)
@@ -383,7 +491,7 @@ class WaveBiasCorrector(pl.LightningModule):
         # Convert to numpy for sea-bin calculation
         y_true_np = y_true.cpu().numpy()
         y_pred_np = y_pred.cpu().numpy()
-        
+
         # Define sea-bin ranges (same as in config)
         sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0},
@@ -402,26 +510,26 @@ class WaveBiasCorrector(pl.LightningModule):
             {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
             {"name": "extreme_14_15", "min": 14.0, "max": 15.0}
         ]
-        
+
         for bin_config in sea_bins:
             bin_name = bin_config["name"]
             bin_min = bin_config["min"]
             bin_max = bin_config["max"]
-            
+
             # Filter data for this sea state bin
             mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
             bin_count = np.sum(mask)
-            
+
             if bin_count > 0:
                 bin_y_true = y_true_np[mask]
                 bin_y_pred = y_pred_np[mask]
-                
+
                 # Calculate metrics for this bin
                 mae = np.mean(np.abs(bin_y_pred - bin_y_true))
                 mse = np.mean((bin_y_pred - bin_y_true) ** 2)
                 rmse = np.sqrt(mse)
                 bias = np.mean(bin_y_pred - bin_y_true)
-                
+
                 # Log metrics with bin-specific names
                 self.log(f"{prefix}_{bin_name}_mae", mae, on_epoch=True)
                 self.log(f"{prefix}_{bin_name}_rmse", rmse, on_epoch=True)
@@ -429,7 +537,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
 
     def configure_optimizers(self):
-        lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
+        # lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
         optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr)
         def get_float(key, default):
             val = scheduler_config.get(key, default)
