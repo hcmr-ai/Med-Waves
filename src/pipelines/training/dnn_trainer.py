@@ -140,6 +140,7 @@ class DNNConfig:
                 "learning_rate": 1e-4,
                 "loss_type": "weighted_mse",
                 "filters": [64, 128, 256, 512, 1024],
+                "weight_decay": 0,
             },
             "training": {
                 "batch_size": 8,
@@ -518,6 +519,7 @@ def main():
         dropout=model_config.get("dropout", 0.2),
         add_vhm0_residual=model_config.get("add_vhm0_residual", False),
         vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
+        weight_decay=model_config.get("weight_decay", 0),
     )
 
     # Create callbacks
@@ -604,6 +606,7 @@ def main():
         resume_path = download_s3_checkpoint(
             resume_path, config.config["checkpoint"]["checkpoint_dir"]
         )
+    logger.info(f"Resume path: {resume_path}")
 
     # Train model
     logger.info("Starting training...")

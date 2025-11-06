@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_lightning as pl
 import torch
-import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import sys
@@ -269,14 +268,19 @@ class ModelEvaluator:
             y_baseline_full = vhm0  # Baseline is just vhm0
             
             error_map = ((y_pred_full - y_true_full) ** 2).cpu().numpy()  # (N, C, H, W)
+            error_map_mae = (y_pred_full - y_true_full).abs().cpu().numpy()  # (N, C, H, W)
             error_map_baseline = ((y_baseline_full - y_true_full) ** 2).cpu().numpy()  # (N, C, H, W)
+            error_map_baseline_mae = (y_baseline_full - y_true_full).abs().cpu().numpy()  # (N, C, H, W)
         else:
             # Not predicting bias
             error_map = ((y_pred - y) ** 2).cpu().numpy()  # (N, C, H, W)
+            error_map_mae = (y_pred - y).abs().cpu().numpy()  # (N, C, H, W)
             if vhm0 is not None:
                 error_map_baseline = ((vhm0 - y) ** 2).cpu().numpy()  # (N, C, H, W)
+                error_map_baseline_mae = (vhm0 - y).abs().cpu().numpy()  # (N, C, H, W)
             else:
                 error_map_baseline = None
+                error_map_baseline_mae = None
         
         count_map = mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
     
@@ -284,16 +288,19 @@ class ModelEvaluator:
         error_map = error_map * count_map
         if error_map_baseline is not None:
             error_map_baseline = error_map_baseline * count_map
-        
+        if error_map_baseline_mae is not None:
+            error_map_baseline_mae = error_map_baseline_mae * count_map
         # Store spatial errors (sum over batch and channel dimensions)
         self.spatial_errors_model.append({
             'error_sq': error_map.sum(axis=(0, 1)),  # (H, W)
+            'error_sq_mae': error_map_mae.sum(axis=(0, 1)),  # (H, W)
             'count': count_map.sum(axis=(0, 1))  # (H, W)
         })
         
         if error_map_baseline is not None:
             self.spatial_errors_baseline.append({
                 'error_sq': error_map_baseline.sum(axis=(0, 1)),  # (H, W)
+                'error_sq_mae': error_map_baseline_mae.sum(axis=(0, 1)),  # (H, W)
                 'count': count_map.sum(axis=(0, 1))  # (H, W)
             })
 
@@ -533,25 +540,30 @@ class ModelEvaluator:
         # Aggregate spatial errors across all batches
         total_error_sq_model = np.zeros_like(lat_grid)
         total_count = np.zeros_like(lat_grid)
+        total_error_sq_mae_model = np.zeros_like(lat_grid)
         
         for i, batch_data in enumerate(self.spatial_errors_model):
             h, w = batch_data['error_sq'].shape
             total_error_sq_model[:h, :w] += batch_data['error_sq']
             total_count[:h, :w] += batch_data['count']
-        
+            total_error_sq_mae_model[:h, :w] += batch_data['error_sq_mae']
         # Calculate RMSE (avoid division by zero)
         rmse_model = np.sqrt(total_error_sq_model / np.maximum(total_count, 1))
         rmse_model[total_count == 0] = np.nan
-        
+        mae_model = total_error_sq_mae_model / np.maximum(total_count, 1)
+        mae_model[total_count == 0] = np.nan
         # Same for baseline if available
         if self.spatial_errors_baseline:
             total_error_sq_baseline = np.zeros_like(lat_grid)
+            total_error_sq_mae_baseline = np.zeros_like(lat_grid)
             for batch_data in self.spatial_errors_baseline:
                 h, w = batch_data['error_sq'].shape
                 total_error_sq_baseline[:h, :w] += batch_data['error_sq']
-            
+                total_error_sq_mae_baseline[:h, :w] += batch_data['error_sq_mae']
             rmse_baseline = np.sqrt(total_error_sq_baseline / np.maximum(total_count, 1))
             rmse_baseline[total_count == 0] = np.nan
+            mae_baseline = total_error_sq_mae_baseline / np.maximum(total_count, 1)
+            mae_baseline[total_count == 0] = np.nan
         else:
             rmse_baseline = None
         
@@ -573,6 +585,13 @@ class ModelEvaluator:
             save_path=self.output_dir / 'rmse_model.png',
             title='Model RMSE',
             vmin=0, vmax=vmax_combined,
+            cmap=cmap
+        )
+        plot_spatial_rmse_map(
+            lat_grid, lon_grid, mae_model,
+            save_path=self.output_dir / 'mae_model.png',
+            title='Model MAE',
+            vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
             cmap=cmap
         )
         # fig1, ax1 = plt.subplots(figsize=(10, 6))
@@ -597,9 +616,16 @@ class ModelEvaluator:
                 vmin=0, vmax=vmax_combined,
                 cmap=cmap
             )
-
+            plot_spatial_rmse_map(
+                lat_grid, lon_grid, mae_baseline,
+                save_path=self.output_dir / 'mae_reference.png',
+                title='Reference MAE',
+                vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
+                cmap=cmap
+            )
             # ========== PLOT 3: Improvement (separate figure) ==========
             improvement = rmse_baseline - rmse_model
+            improvement_mae = mae_baseline - mae_model
             # Symmetric scale around zero
             imp_abs_max = np.nanpercentile(np.abs(improvement), 98)
             
@@ -607,7 +633,14 @@ class ModelEvaluator:
                 lat_grid, lon_grid, improvement,
                 save_path=self.output_dir / 'rmse_improvement.png',
                 title='RMSE Improvement (Reference - Model)',
-                vmin=-imp_abs_max, vmax=imp_abs_max,
+                vmin=-0.06, vmax=0.06,
+                cmap=cmap
+            )
+            plot_spatial_rmse_map(
+                lat_grid, lon_grid, improvement_mae,
+                save_path=self.output_dir / 'mae_improvement.png',
+                title='MAE Improvement (Reference - Model)',
+                vmin=-0.06, vmax=0.06,
                 cmap=cmap
             )
     
@@ -990,7 +1023,7 @@ def main():
     evaluator = ModelEvaluator(
         model=model,
         test_loader=test_loader,
-        output_dir=Path(args.output_dir),
+        output_dir=Path(args.output_dir) / (config.config["logging"]["experiment_name"] + "_" + config.config["checkpoint"]["resume_from_checkpoint"].split("/")[-1].split(".")[0]),
         predict_bias=predict_bias,
         device="cuda",
         normalizer=normalizer,

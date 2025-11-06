@@ -59,6 +59,8 @@ run-train-random: ## Run random regressor training
 evaluation: ## Run evaluation
 	poetry run python src/pipelines/evaluation/evaluate_model_refactored.py --config src/configs/config_evaluation.yaml
 
+eval-bunet:
+	poetry run python scripts/evaluate_bunet.py
 # Scripts
 run-manual-exp: ## Create manual experiment
 	poetry run python scripts/create_manual_experiment.py
