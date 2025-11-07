@@ -347,3 +347,141 @@ class CachedWaveDataset(Dataset):
 
     def __len__(self):
         return len(self.index_map)
+
+
+class GridPatchWaveDataset(Dataset):
+    """Dataset that samples patches in a systematic grid to cover the entire image."""
+    
+    def __init__(self, file_paths, patch_size=(128, 128), stride=None,
+                 target_column="corrected_VHM0", excluded_columns=None, 
+                 normalizer=None, subsample_step=None, predict_bias=False,
+                 use_cache=True, normalize_target=False):
+        """
+        Args:
+            patch_size: (H, W) size of each patch
+            stride: step size for patch extraction. If None, uses patch_size (no overlap)
+                   If smaller than patch_size, creates overlapping patches
+        """
+        self.file_paths = file_paths
+        self.patch_size = patch_size
+        self.stride = stride or patch_size  # Default: non-overlapping
+        self.target_column = target_column
+        self.excluded_columns = excluded_columns or []
+        self.normalizer = normalizer
+        self.subsample_step = subsample_step
+        self.predict_bias = predict_bias
+        self.use_cache = use_cache
+        self.normalize_target = normalize_target
+        self._cache = {}
+        
+        # Image dimensions - detect from actual stored data
+        # Load a sample file to get actual dimensions (handles pre-subsampled data)
+        sample_tensor, _ = self._load_file_pt(file_paths[0])
+        self.H_full, self.W_full = sample_tensor.shape[1], sample_tensor.shape[2]
+        print(f"Detected data dimensions: {self.H_full} x {self.W_full}")
+        
+        # Calculate grid dimensions
+        ph, pw = self.patch_size
+        sh, sw = self.stride
+        
+        # Number of patches along each dimension
+        self.n_patches_h = (self.H_full - ph) // sh + 1
+        self.n_patches_w = (self.W_full - pw) // sw + 1
+        
+        # Total patches per hour
+        patches_per_hour = self.n_patches_h * self.n_patches_w
+        
+        # Index map: (file_idx, hour_idx, patch_row, patch_col)
+        self.index_map = [
+            (f_idx, h, pi, pj)
+            for f_idx in range(len(file_paths))
+            for h in range(24)
+            for pi in range(self.n_patches_h)
+            for pj in range(self.n_patches_w)
+        ]
+        
+        print(f"Grid Patch Dataset Info:")
+        print(f"  Full image size: {self.H_full} x {self.W_full}")
+        print(f"  Patch size: {ph} x {pw}")
+        print(f"  Stride: {sh} x {sw}")
+        print(f"  Grid: {self.n_patches_h} x {self.n_patches_w} = {patches_per_hour} patches/hour")
+        print(f"  Total samples: {len(self.index_map)}")
+    
+    def _load_file_pt(self, path):
+        data = torch.load(path, map_location="cpu")
+        return data["tensor"], data["feature_cols"]
+    
+    def _get_file_tensor(self, path):
+        if self.use_cache and path in self._cache:
+            return self._cache[path]
+        
+        tensor, feature_cols = self._load_file_pt(path)
+        if self.use_cache:
+            self._cache.clear()  # Keep only 1 file in memory
+            self._cache[path] = (tensor, feature_cols)
+        return tensor, feature_cols
+    
+    def __getitem__(self, idx):
+        file_idx, hour_idx, patch_i, patch_j = self.index_map[idx]
+        path = self.file_paths[file_idx]
+        
+        # Load full day tensor
+        tensor, feature_cols = self._get_file_tensor(path)
+        hour_data = tensor[hour_idx]  # (H, W, C)
+        
+        # Select input features
+        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 
+                         'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 
+                         'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 
+                         'wave_dir_cos', 'corrected_VHM0']
+        
+        input_col_indices = []
+        for feat in FEATURES_ORDER:
+            if feat in self.excluded_columns or feat == self.target_column:
+                continue
+            if feat in feature_cols:
+                input_col_indices.append(feature_cols.index(feat))
+        
+        X = hour_data[..., input_col_indices]
+        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        
+        # Get target
+        if self.predict_bias:
+            corrected = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
+            y = corrected - vhm0
+        else:
+            y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
+        
+        # Apply subsampling BEFORE patch extraction
+        if self.subsample_step is not None:
+            X = X[::self.subsample_step, ::self.subsample_step, :]
+            y = y[::self.subsample_step, ::self.subsample_step, :]
+            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+        
+        # Extract patch at grid location
+        ph, pw = self.patch_size
+        sh, sw = self.stride
+        i_start = patch_i * sh
+        j_start = patch_j * sw
+        
+        X = X[i_start:i_start+ph, j_start:j_start+pw, :]
+        y = y[i_start:i_start+ph, j_start:j_start+pw, :]
+        vhm0 = vhm0[i_start:i_start+ph, j_start:j_start+pw, :]
+        
+        # Normalize
+        if self.normalizer is not None:
+            if self.normalize_target:
+                X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
+            else:
+                X = self.normalizer.transform_torch(X, normalize_target=False)
+        
+        # Convert to (C, H, W)
+        X = X.permute(2, 0, 1).contiguous()
+        y = y.permute(2, 0, 1).contiguous()
+        vhm0 = vhm0.permute(2, 0, 1).contiguous()
+        mask = ~torch.isnan(y).contiguous()  # y is already (C, H, W), no need to permute
+        
+        return X, y, mask, vhm0
+    
+    def __len__(self):
+        return len(self.index_map)

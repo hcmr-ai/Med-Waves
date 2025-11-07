@@ -25,7 +25,7 @@ sys.path.insert(0, str(project_root))
 from src.classifiers.bu_net import WaveBiasCorrector
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.pipelines.training.dnn_trainer import DNNConfig, get_file_list, split_files_by_year
-from src.commons.dataloaders import CachedWaveDataset
+from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
 import logging
 
 logger = logging.getLogger(__name__)
@@ -991,19 +991,30 @@ def main():
     target_column = data_config.get("target_column", "corrected_VHM0")
     subsample_step = data_config.get("subsample_step", None)
     
-    test_dataset = CachedWaveDataset(
-        test_files,
-        patch_size=patch_size,
-        excluded_columns=excluded_columns,
-        target_column=target_column,
-        predict_bias=predict_bias,
-        subsample_step=subsample_step,
-        normalizer=normalizer,
-        enable_profiler=False,
-        use_cache=False,  # Use cache for evaluation
-        normalize_target=data_config.get("normalize_target", False)
-    )
-    
+    if patch_size is not None:
+        test_dataset = GridPatchWaveDataset(
+            test_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            use_cache=False,
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    else: 
+        test_dataset = CachedWaveDataset(
+            test_files,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=False,
+            use_cache=False,  # Use cache for evaluation
+            normalize_target=data_config.get("normalize_target", False)
+        )
     # Create test loader (use training batch size)
     test_loader = DataLoader(
         test_dataset,

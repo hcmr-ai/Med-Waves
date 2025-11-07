@@ -35,7 +35,7 @@ from classifiers.bu_net import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
-from commons.dataloaders import CachedWaveDataset
+from commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import (
@@ -45,18 +45,6 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
-
-# def set_global_seed(seed: int = 42):
-#     import random
-#     import numpy as np
-#     random.seed(seed)
-#     np.random.seed(seed)
-#     torch.manual_seed(seed)
-#     torch.cuda.manual_seed_all(seed)  # if using GPU
-#     torch.backends.cudnn.deterministic = True
-#     torch.backends.cudnn.benchmark = False
-
-# set_global_seed(42)
 
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
@@ -340,36 +328,109 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    train_dataset = CachedWaveDataset(
-        train_files,
-        # index_map=train_index_map,
-        # fs=fs,
-        patch_size=patch_size,
-        excluded_columns=excluded_columns,
-        target_column=target_column,
-        predict_bias=predict_bias,
-        subsample_step=subsample_step,
-        normalizer=normalizer,
-        enable_profiler=True,
-        use_cache=data_config.get("use_cache", False),
-        normalize_target=data_config.get("normalize_target")
-    )
+    if data_config.get("patch_size", None) is not None:
+        train_dataset = GridPatchWaveDataset(
+            train_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    else:
+        train_dataset = CachedWaveDataset(
+            train_files,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=True,
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    
+    if data_config.get("patch_size", None) is not None:
+        val_dataset = GridPatchWaveDataset(
+            val_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            use_cache=False,
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    else:
+        val_dataset = CachedWaveDataset(
+            val_files,
+            # fs=fs,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=True,
+            use_cache=False,
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    # train_dataset = CachedWaveDataset(
+    #     train_files,
+    #     # index_map=train_index_map,
+    #     # fs=fs,
+    #     patch_size=patch_size,
+    #     excluded_columns=excluded_columns,
+    #     target_column=target_column,  
+    #     predict_bias=predict_bias,
+    #     subsample_step=subsample_step,
+    #     normalizer=normalizer,
+    #     enable_profiler=True,
+    #     use_cache=data_config.get("use_cache", False),
+    #     normalize_target=data_config.get("normalize_target")
+    # )
+    # train_dataset = GridPatchWaveDataset(
+    #     train_files,
+    #     patch_size=patch_size,
+    #     excluded_columns=excluded_columns,
+    #     target_column=target_column,
+    #     predict_bias=predict_bias,
+    #     subsample_step=subsample_step,
+    #     normalizer=normalizer,
+    #     use_cache=data_config.get("use_cache", False),
+    #     normalize_target=data_config.get("normalize_target", False)
+    # )
 
-    val_dataset = CachedWaveDataset(
-        val_files,
-        # fs=fs,
-        patch_size=patch_size,
-        excluded_columns=excluded_columns,
-        target_column=target_column,
-        predict_bias=predict_bias,
-        subsample_step=subsample_step,
-        normalizer=normalizer,
-        enable_profiler=True,
-        use_cache=False,
-        normalize_target=data_config.get("normalize_target", False)
-    )
+    # val_dataset = CachedWaveDataset(
+    #     val_files,
+    #     # fs=fs,
+    #     patch_size=patch_size,
+    #     excluded_columns=excluded_columns,
+    #     target_column=target_column,
+    #     predict_bias=predict_bias,
+    #     subsample_step=subsample_step,
+    #     normalizer=normalizer,
+    #     enable_profiler=True,
+    #     use_cache=False,
+    #     normalize_target=data_config.get("normalize_target", False)
+    # )
+    # val_dataset = GridPatchWaveDataset(
+    #     val_files,
+    #     patch_size=patch_size,
+    #     excluded_columns=excluded_columns,
+    #     target_column=target_column,
+    #     predict_bias=predict_bias,
+    #     subsample_step=subsample_step,
+    #     normalizer=normalizer,
+    #     use_cache=False,
+    #     normalize_target=data_config.get("normalize_target", False)
+    # )
 
-    # Create data loaders
+    # # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config["batch_size"],
@@ -509,6 +570,7 @@ def main():
         logger.info("LR Scheduler: None")
 
     local_predict_bias = config.config.get("data", {}).get("predict_bias", False)
+
     model = WaveBiasCorrector(
         in_channels=model_config["in_channels"],
         lr=float(model_config["learning_rate"]),
@@ -520,6 +582,8 @@ def main():
         add_vhm0_residual=model_config.get("add_vhm0_residual", False),
         vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
         weight_decay=model_config.get("weight_decay", 0),
+        model_type=model_config.get("model_type", "nick"),  # Options: "nick", "geo", "enhanced"
+        upsample_mode=model_config.get("upsample_mode", "nearest"),
     )
 
     # Create callbacks

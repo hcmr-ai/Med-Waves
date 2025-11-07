@@ -272,6 +272,7 @@ class BU_Net_Geo_Nick(nn.Module):
                 nn.Sequential(
                     nn.Conv2d(prev_c, f, kernel_size=3, padding=1),
                     nn.BatchNorm2d(f),
+                    # nn.GroupNorm(1, f),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -282,6 +283,7 @@ class BU_Net_Geo_Nick(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(filters[-1], filters[-1], kernel_size=3, padding=1),
             nn.BatchNorm2d(filters[-1]),
+            # nn.GroupNorm(1, filters[-1]),
             nn.ReLU(inplace=True),
         )
 
@@ -295,6 +297,7 @@ class BU_Net_Geo_Nick(nn.Module):
                 nn.Sequential(
                     nn.Conv2d(current_channels + skip_channels, skip_channels, kernel_size=3, padding=1),
                     nn.BatchNorm2d(skip_channels),
+                    # nn.GroupNorm(1, skip_channels),
                     nn.ReLU(inplace=True),
                 )
             )
@@ -324,8 +327,8 @@ class BU_Net_Geo_Nick(nn.Module):
         # Bottleneck
         out = self.bottleneck(out)
 
-        # Decoder
-        for up, dec, skip in zip(self.up_samples, self.decoders, reversed(enc_feats), strict=False):
+        # Decoder (skip the last encoder output as it feeds into bottleneck)
+        for up, dec, skip in zip(self.up_samples, self.decoders, reversed(enc_feats[:-1]), strict=False):
             out = up(out)
             if out.size()[2:] != skip.size()[2:]:
                 out = F.interpolate(out, size=skip.shape[2:], mode='bilinear', align_corners=False)
@@ -349,6 +352,128 @@ class BU_Net_Geo_Nick(nn.Module):
 
         return output
 
+
+class BU_Net_Geo_Nick_Enhanced(nn.Module):
+    def __init__(
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0, upsample_mode="nearest"
+    ):
+        """
+        Enhanced BU-Net with geophysical padding and deeper architecture.
+        Combines Nick's architecture with Geo features:
+        - GeoConv layers with circular longitude padding
+        - Two conv layers per encoder/decoder block
+        - Doubled bottleneck channels
+        - Learnable upsampling (ConvTranspose2d)
+        - Dropout throughout
+        - All skip connections
+        
+        Input: (batch, in_channels, H, W)
+        Output: (batch, out_channels, H, W)
+        """
+        super().__init__()
+        if filters is None:
+            filters = [64, 128, 256, 512]
+        self.dropout = dropout
+        self.add_vhm0_residual = add_vhm0_residual
+        self.vhm0_channel_index = vhm0_channel_index
+        self.filters = filters
+        
+        # Encoder with GeoConv
+        self.encoders = nn.ModuleList()
+        self.pools = nn.ModuleList()
+        self.encoder_dropouts = nn.ModuleList()
+        prev_c = in_channels
+        for f in filters:
+            self.encoders.append(
+                nn.Sequential(
+                    GeoConv(prev_c, f),
+                    GeoConv(f, f)
+                )
+            )
+            self.pools.append(nn.MaxPool2d(2))
+            self.encoder_dropouts.append(nn.Dropout2d(dropout))
+            prev_c = f
+        
+        # Bottleneck with doubled channels
+        self.bottleneck = nn.Sequential(
+            GeoConv(filters[-1], filters[-1] * 2),
+            GeoConv(filters[-1] * 2, filters[-1] * 2),
+            nn.Dropout2d(dropout),
+        )
+        
+        # Decoder with learnable upsampling
+        self.upconvs = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        self.decoder_dropouts = nn.ModuleList()
+        self.upsample_mode = upsample_mode
+        rev_filters = list(reversed(filters))
+        prev_c = filters[-1] * 2
+        for f in rev_filters:
+            if upsample_mode == "nearest":
+                self.upconvs.append(nn.UpsamplingNearest2d(scale_factor=2))
+                # With nearest upsampling: channels don't change, so after concat: prev_c + f
+                decoder_in_channels = prev_c + f
+            else:
+                self.upconvs.append(nn.ConvTranspose2d(prev_c, f, kernel_size=2, stride=2))
+                # With ConvTranspose2d: channels reduced to f, so after concat: f + f = 2*f
+                decoder_in_channels = f * 2
+            
+            self.decoders.append(
+                nn.Sequential(
+                    GeoConv(decoder_in_channels, f),
+                    GeoConv(f, f)
+                )
+            )
+            self.decoder_dropouts.append(nn.Dropout2d(dropout))
+            prev_c = f
+        
+        # Final 1×1 conv to output
+        self.final_conv = nn.Conv2d(filters[0], out_channels, kernel_size=1)
+    
+    def forward(self, x):
+        # Store VHM0 for residual connection
+        if self.add_vhm0_residual:
+            vhm0_input = x[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+        
+        # Encoder with dropout
+        enc_feats = []
+        for enc, pool, dropout in zip(self.encoders, self.pools, self.encoder_dropouts, strict=False):
+            x = enc(x)
+            x = dropout(x)
+            enc_feats.append(x)
+            x = pool(x)
+        
+        # Bottleneck
+        x = self.bottleneck(x)
+        
+        # Decoder with skip connections and dropout
+        for up, dec, dropout, skip in zip(
+            self.upconvs, self.decoders, self.decoder_dropouts, reversed(enc_feats), strict=False
+        ):
+            x = up(x)
+            # Align dimensions if needed
+            if x.size()[2:] != skip.size()[2:]:
+                x = F.interpolate(
+                    x, size=skip.shape[2:], mode="bilinear", align_corners=False
+                )
+            x = torch.cat([skip, x], dim=1)
+            x = dec(x)
+            x = dropout(x)
+        
+        # Final output
+        x = self.final_conv(x)
+        
+        # Add residual connection
+        if self.add_vhm0_residual:
+            if vhm0_input.shape[2:] != x.shape[2:]:
+                vhm0_input = F.interpolate(
+                    vhm0_input, size=x.shape[2:], mode="bilinear", align_corners=False
+                )
+            x = x + vhm0_input
+        
+        return x
+
+
 class WaveBiasCorrector(pl.LightningModule):
     def __init__(
         self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False,
@@ -356,10 +481,31 @@ class WaveBiasCorrector(pl.LightningModule):
         dropout=0.2,
         add_vhm0_residual=False,
         vhm0_channel_index=0,
+        weight_decay=1e-4,
+        model_type="nick",  # Options: "nick", "geo", "enhanced"
+        upsample_mode="nearest",
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.model = BU_Net_Geo_Nick(in_channels=in_channels, filters=filters, dropout=dropout, add_vhm0_residual = add_vhm0_residual,vhm0_channel_index = vhm0_channel_index)
+        
+        # Select model architecture
+        if model_type == "geo":
+            self.model = BU_Net_Geo(
+                in_channels=in_channels, filters=filters, dropout=dropout,
+                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index
+            )
+        elif model_type == "enhanced":
+            self.model = BU_Net_Geo_Nick_Enhanced(
+                in_channels=in_channels, filters=filters, dropout=dropout,
+                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index,
+                upsample_mode=upsample_mode,
+            )
+        else:  # "nick" or default
+            self.model = BU_Net_Geo_Nick(
+                in_channels=in_channels, filters=filters, dropout=dropout,
+                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index
+            )
+        
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
@@ -478,6 +624,18 @@ class WaveBiasCorrector(pl.LightningModule):
 
         return loss
 
+    def on_train_start(self) -> None:
+        """Log scheduler info and other hyperparameters when training starts."""
+        # Log optimizer info
+        if hasattr(self, 'optimizer_info'):
+            for key, value in self.optimizer_info.items():
+                self.log(key, value)
+        
+        # Log scheduler info
+        if hasattr(self, 'scheduler_info'):
+            for key, value in self.scheduler_info.items():
+                self.log(key, value)
+
     def on_train_epoch_end(self) -> None:
         lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
@@ -538,7 +696,14 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def configure_optimizers(self):
         # lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
-        optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr)
+        optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        
+        # Store optimizer info to log later
+        self.optimizer_info = {
+            "optimizer_weight_decay": self.hparams.weight_decay,
+            "optimizer_lr": self.hparams.lr
+        }
+        
         def get_float(key, default):
             val = scheduler_config.get(key, default)
             try:
@@ -591,12 +756,27 @@ class WaveBiasCorrector(pl.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": scheduler}
 
         elif scheduler_type == "CosineAnnealingWarmupRestarts":
-            num_steps = self.trainer.estimated_stepping_batches
-            warmup_steps = int(0.1 * num_steps)  # 10% warmup
+            # Use PyTorch Lightning's estimated_stepping_batches
+            total_steps = self.trainer.estimated_stepping_batches
+            warmup_ratio = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
+            warmup_steps = int(warmup_ratio * total_steps)
+            
+            # Store these values to log them during training
+            self.scheduler_info = {
+                "total_steps": total_steps,
+                "max_epochs": self.trainer.max_epochs,
+                "warmup_ratio": warmup_ratio,
+                "warmup_steps_calculated": warmup_steps
+            }
+            
             scheduler = get_cosine_schedule_with_warmup(
-                optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_steps,
+                optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
             )
-            return {"optimizer": optimizer, "lr_scheduler": scheduler}
+            return {"optimizer": optimizer, "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
+                    "frequency": 1,
+                }}
 
         else:
             # Unknown scheduler type, return optimizer only
