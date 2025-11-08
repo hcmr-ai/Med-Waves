@@ -4,7 +4,7 @@ Enhanced Comet ML callback for wave height prediction
 """
 import matplotlib.pyplot as plt
 import numpy as np
-from pytorch_lightning.callbacks import Callback
+from lightning.pytorch.callbacks import Callback
 
 import logging
 logger = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pytorch_lightning as pl
+import lightning as pl
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -1062,6 +1062,226 @@ class ModelEvaluator:
                    dpi=300, bbox_inches='tight')
         plt.close()
         print(f"Saved error distribution box plots to {self.output_dir / 'error_distribution_boxplots.png'}")
+
+    def plot_error_violins(self):
+        """Plot violin plots showing error distributions per sea bin."""
+        print("Creating error distribution violin plots...")
+        
+        # Filter bins with sufficient samples
+        bins_to_plot = []
+        empty_bins = []
+        for bin_config in self.sea_bins:
+            bin_name = bin_config["name"]
+            n_samples = len(self.sea_bin_error_samples[bin_name]['model_errors'])
+            if n_samples > 5:  # Need more samples for violin plots
+                bins_to_plot.append(bin_config)
+            else:
+                empty_bins.append(f"{bin_config['label']} (n={n_samples})")
+        
+        if empty_bins:
+            print(f"  Skipping bins with too few samples: {', '.join(empty_bins)}")
+        print(f"  Plotting {len(bins_to_plot)} bins with sufficient data")
+        
+        if not bins_to_plot:
+            logger.warning("No bins with sufficient samples for violin plots")
+            return
+        
+        # Create grid layout
+        n_bins = len(bins_to_plot)
+        n_cols = 3
+        n_rows = int(np.ceil(n_bins / n_cols))
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+        fig.suptitle("Error Distribution Violin Plots by Sea State", 
+                     fontsize=16, fontweight='bold', y=0.995)
+        
+        # Flatten axes for easier iteration
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
+        axes_flat = axes.flatten()
+        
+        for idx, bin_config in enumerate(bins_to_plot):
+            ax = axes_flat[idx]
+            bin_name = bin_config["name"]
+            bin_label = bin_config["label"]
+            
+            model_errors = np.array(self.sea_bin_error_samples[bin_name]['model_errors'])
+            baseline_errors = np.array(self.sea_bin_error_samples[bin_name]['baseline_errors'])
+            
+            # Prepare data for violin plot
+            plot_data = []
+            plot_labels = []
+            plot_colors = []
+            
+            plot_data.append(model_errors)
+            plot_labels.append('Model')
+            plot_colors.append('lightblue')
+            
+            if len(baseline_errors) > 5:
+                plot_data.append(baseline_errors)
+                plot_labels.append('Baseline')
+                plot_colors.append('lightcoral')
+            
+            # Create violin plot
+            parts = ax.violinplot(plot_data, positions=range(len(plot_data)),
+                                 showmeans=True, showmedians=True, widths=0.7)
+            
+            # Color the violins
+            for i, pc in enumerate(parts['bodies']):
+                pc.set_facecolor(plot_colors[i])
+                pc.set_alpha(0.7)
+            
+            # Style the mean and median lines
+            parts['cmeans'].set_color('darkblue')
+            parts['cmeans'].set_linewidth(2)
+            parts['cmedians'].set_color('red')
+            parts['cmedians'].set_linewidth(2)
+            
+            # Add zero line
+            ax.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.3)
+            
+            # Formatting
+            ax.set_title(f'{bin_label}', fontweight='bold', fontsize=11)
+            ax.set_ylabel('Error (m)', fontsize=9)
+            ax.set_xticks(range(len(plot_labels)))
+            ax.set_xticklabels(plot_labels, fontsize=9)
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Add statistics
+            model_mean = np.mean(model_errors)
+            model_median = np.median(model_errors)
+            model_std = np.std(model_errors)
+            stats_text = f'Model:\nμ={model_mean:.3f}\nmedian={model_median:.3f}\nσ={model_std:.3f}\nn={len(model_errors):,}'
+            
+            if len(baseline_errors) > 5:
+                baseline_mean = np.mean(baseline_errors)
+                baseline_median = np.median(baseline_errors)
+                baseline_std = np.std(baseline_errors)
+                stats_text += f'\n\nBaseline:\nμ={baseline_mean:.3f}\nmedian={baseline_median:.3f}\nσ={baseline_std:.3f}'
+            
+            ax.text(0.98, 0.98, stats_text, transform=ax.transAxes,
+                   verticalalignment='top', horizontalalignment='right', fontsize=7,
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Hide unused subplots
+        for idx in range(len(bins_to_plot), len(axes_flat)):
+            axes_flat[idx].axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "error_distribution_violins.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved error distribution violin plots to {self.output_dir / 'error_distribution_violins.png'}")
+
+    def plot_error_cdfs(self):
+        """Plot cumulative distribution functions for errors across sea bins."""
+        print("Creating error CDF plots...")
+        
+        # Prepare data
+        bins_with_data = []
+        for bin_config in self.sea_bins:
+            bin_name = bin_config["name"]
+            if len(self.sea_bin_error_samples[bin_name]['model_errors']) > 0:
+                bins_with_data.append(bin_config)
+        
+        if not bins_with_data:
+            logger.warning("No error data available for CDF plots")
+            return
+        
+        print(f"  Plotting CDFs for {len(bins_with_data)} bins")
+        
+        # Create figure with subplots - one for model, one for model vs baseline
+        fig, axes = plt.subplots(2, 1, figsize=(16, 12))
+        fig.suptitle("Cumulative Distribution Functions of Errors by Sea State",
+                     fontsize=16, fontweight='bold')
+        
+        # Plot 1: Model errors only (all bins)
+        ax1 = axes[0]
+        colors = plt.cm.viridis(np.linspace(0, 1, len(bins_with_data)))
+        
+        for idx, bin_config in enumerate(bins_with_data):
+            bin_name = bin_config["name"]
+            bin_label = bin_config["label"]
+            model_errors = np.array(self.sea_bin_error_samples[bin_name]['model_errors'])
+            
+            if len(model_errors) > 0:
+                # Sort errors for CDF
+                sorted_errors = np.sort(model_errors)
+                cdf = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
+                
+                ax1.plot(sorted_errors, cdf, label=bin_label, 
+                        color=colors[idx], linewidth=2, alpha=0.8)
+        
+        ax1.axvline(0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Zero error')
+        ax1.set_xlabel('Error (m)', fontsize=12)
+        ax1.set_ylabel('Cumulative Probability', fontsize=12)
+        ax1.set_title('Model Error CDFs', fontweight='bold', fontsize=14)
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='lower right', fontsize=9, ncol=2)
+        
+        # Add horizontal lines at key percentiles
+        for percentile, alpha_val in [(0.5, 0.3), (0.9, 0.3), (0.95, 0.3)]:
+            ax1.axhline(percentile, color='gray', linestyle=':', linewidth=1, alpha=alpha_val)
+            ax1.text(ax1.get_xlim()[1], percentile, f'{int(percentile*100)}%', 
+                    fontsize=8, va='center')
+        
+        # Plot 2: Model vs Baseline comparison for selected bins
+        ax2 = axes[1]
+        
+        # Select a few representative bins to avoid clutter
+        representative_bins = [
+            bins_with_data[i] for i in [0, len(bins_with_data)//4, 
+                                         len(bins_with_data)//2, 
+                                         min(len(bins_with_data)-1, 3*len(bins_with_data)//4)]
+            if i < len(bins_with_data)
+        ]
+        
+        for bin_config in representative_bins:
+            bin_name = bin_config["name"]
+            bin_label = bin_config["label"]
+            model_errors = np.array(self.sea_bin_error_samples[bin_name]['model_errors'])
+            baseline_errors = np.array(self.sea_bin_error_samples[bin_name]['baseline_errors'])
+            
+            if len(model_errors) > 0:
+                sorted_errors = np.sort(model_errors)
+                cdf = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
+                ax2.plot(sorted_errors, cdf, label=f'{bin_label} (Model)',
+                        linewidth=2, linestyle='-')
+            
+            if len(baseline_errors) > 0:
+                sorted_errors = np.sort(baseline_errors)
+                cdf = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
+                ax2.plot(sorted_errors, cdf, label=f'{bin_label} (Baseline)',
+                        linewidth=2, linestyle='--', alpha=0.7)
+        
+        ax2.axvline(0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+        ax2.set_xlabel('Error (m)', fontsize=12)
+        ax2.set_ylabel('Cumulative Probability', fontsize=12)
+        ax2.set_title('Model vs Baseline CDF Comparison (Selected Bins)', 
+                     fontweight='bold', fontsize=14)
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc='lower right', fontsize=9, ncol=2)
+        
+        # Add percentile lines
+        for percentile, alpha_val in [(0.5, 0.3), (0.9, 0.3), (0.95, 0.3)]:
+            ax2.axhline(percentile, color='gray', linestyle=':', linewidth=1, alpha=alpha_val)
+            ax2.text(ax2.get_xlim()[1], percentile, f'{int(percentile*100)}%',
+                    fontsize=8, va='center')
+        
+        # Add text box with interpretation guide
+        guide_text = ("CDF Interpretation:\n"
+                     "• Steeper curve = tighter error distribution\n"
+                     "• Curve closer to zero = better accuracy\n"
+                     "• Read percentiles at horizontal lines")
+        ax1.text(0.02, 0.98, guide_text, transform=ax1.transAxes,
+                verticalalignment='top', fontsize=9,
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "error_distribution_cdfs.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved error CDF plots to {self.output_dir / 'error_distribution_cdfs.png'}")
     
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
@@ -1132,6 +1352,8 @@ class ModelEvaluator:
         self.plot_rmse_maps()
         self.plot_error_distribution_histograms()
         self.plot_error_boxplots()
+        self.plot_error_violins()
+        self.plot_error_cdfs()
         
         # Print summary
         self.print_summary(overall_metrics, sea_bin_metrics)
