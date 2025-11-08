@@ -39,15 +39,15 @@ model:
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4  # 1e-3
   loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1"
-  filters: [64, 128, 256, 512]
+  filters: [64, 128, 256]
   dropout: 0
-  add_vhm0_residual: true
+  add_vhm0_residual: false
   vhm0_channel_index: 0 
-  weight_decay: 0 #1e-4
+  weight_decay: 1e-4 #1e-4
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
   # Learning rate scheduler configuration
   lr_scheduler:
-    type: null # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts"
+    type: ReduceLROnPlateau # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts"
     monitor: "val_loss" # Metric to monitor for ReduceLROnPlateau
     mode: "min" # "min" for loss, "max" for accuracy
     factor: 0.5 # Factor to reduce LR by
@@ -65,7 +65,7 @@ model:
 # Training configuration
 training:
   batch_size: 64
-  max_epochs: 200
+  max_epochs: 100
   num_workers: 8
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
@@ -84,16 +84,16 @@ training:
   val_check_interval: null
 # Checkpoint configuration
 checkpoint: 
-  resume_from_checkpoint: "/opt/dlami/nvme/checkpoints_200_val_test_23_nick_17-22_large_filters_mse_64_enhanced/epoch=00-val_loss=0.02.ckpt" # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_200_val_test_23_nick_17-22_large_filters_mse_64_enhanced" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_200_val_test_23_nick_17-22_large_filters_mse_64_enhanced" # S3 backup for spot instances
+  resume_from_checkpoint: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual/epoch=02-val_loss=0.02.ckpt" # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual" # S3 backup for spot instances
   save_last: true
   sync_frequency: 5 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
   log_dir: "/opt/dlami/nvme/preprocessed/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_200_val_test_23_nick_17-22_large_filters_mse_64_enhanced"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
   comet_notes: "DNN training for wave height correction using U-Net architecture"

@@ -239,6 +239,16 @@ class ModelEvaluator:
             }
             for bin_config in self.sea_bins
         }
+        
+        # Store error samples for distribution plots
+        self.sea_bin_error_samples = {
+            bin_config["name"]: {
+                'model_errors': [],
+                'baseline_errors': [],
+            }
+            for bin_config in self.sea_bins
+        }
+        
         self.spatial_rmse_accumulators = {}
     
     def _reconstruct_wave_heights(self, bias: torch.Tensor, vhm0: torch.Tensor) -> torch.Tensor:
@@ -375,12 +385,18 @@ class ModelEvaluator:
                     self.sea_bin_accumulators[bin_name]['sum_mse'] += np.sum(bin_errors ** 2)
                     self.sea_bin_accumulators[bin_name]['sum_bias'] += np.sum(bin_errors)
                     
+                    # Store all error samples
+                    self.sea_bin_error_samples[bin_name]['model_errors'].extend(bin_errors.tolist())
+                    
                     if y_uncorrected is not None:
                         bin_y_uncorrected = y_uncorrected_np[bin_mask]
                         baseline_bin_errors = bin_y_uncorrected - bin_y_true
                         self.sea_bin_accumulators[bin_name]['sum_baseline_mae'] += np.sum(np.abs(baseline_bin_errors))
                         self.sea_bin_accumulators[bin_name]['sum_baseline_mse'] += np.sum(baseline_bin_errors ** 2)
                         self.sea_bin_accumulators[bin_name]['sum_baseline_bias'] += np.sum(baseline_bin_errors)
+                        
+                        # Store all baseline error samples
+                        self.sea_bin_error_samples[bin_name]['baseline_errors'].extend(baseline_bin_errors.tolist())
             
             # Store samples for plotting (limited)
             self.plot_samples['y_true'].extend(y_true_np)
@@ -851,6 +867,201 @@ class ModelEvaluator:
         
         print(f"Saved sea-bin performance plot to {self.output_dir / 'sea_bin_performance.png'}")
 
+    def plot_error_distribution_histograms(self):
+        """Plot histogram grid showing error distributions per sea bin."""
+        print("Creating error distribution histogram grid...")
+        
+        # Filter bins with sufficient samples
+        bins_to_plot = []
+        for bin_config in self.sea_bins:
+            bin_name = bin_config["name"]
+            if len(self.sea_bin_error_samples[bin_name]['model_errors']) > 0:
+                bins_to_plot.append(bin_config)
+        
+        if not bins_to_plot:
+            logger.warning("No error samples available for histogram plots")
+            return
+        
+        # Create grid layout (5 rows x 3 cols for up to 15 bins)
+        n_bins = len(bins_to_plot)
+        n_cols = 3
+        n_rows = int(np.ceil(n_bins / n_cols))
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
+        fig.suptitle("Error Distribution by Sea State (Model vs Baseline)", 
+                     fontsize=16, fontweight='bold', y=0.995)
+        
+        # Flatten axes for easier iteration
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
+        axes_flat = axes.flatten()
+        
+        for idx, bin_config in enumerate(bins_to_plot):
+            ax = axes_flat[idx]
+            bin_name = bin_config["name"]
+            bin_label = bin_config["label"]
+            
+            model_errors = np.array(self.sea_bin_error_samples[bin_name]['model_errors'])
+            baseline_errors = np.array(self.sea_bin_error_samples[bin_name]['baseline_errors'])
+            
+            # Determine histogram range
+            all_errors = np.concatenate([model_errors, baseline_errors]) if len(baseline_errors) > 0 else model_errors
+            error_range = (np.percentile(all_errors, 1), np.percentile(all_errors, 99))
+            
+            # Plot histograms
+            bins = np.linspace(error_range[0], error_range[1], 40)
+            
+            ax.hist(model_errors, bins=bins, alpha=0.6, color='blue', 
+                   label=f'Model (n={len(model_errors):,})', density=True)
+            
+            if len(baseline_errors) > 0:
+                ax.hist(baseline_errors, bins=bins, alpha=0.6, color='red', 
+                       label=f'Baseline (n={len(baseline_errors):,})', density=True)
+            
+            # Add vertical lines for mean
+            model_mean = np.mean(model_errors)
+            ax.axvline(model_mean, color='blue', linestyle='--', linewidth=2, 
+                      label=f'Model μ={model_mean:.3f}m')
+            
+            if len(baseline_errors) > 0:
+                baseline_mean = np.mean(baseline_errors)
+                ax.axvline(baseline_mean, color='red', linestyle='--', linewidth=2,
+                          label=f'Baseline μ={baseline_mean:.3f}m')
+            
+            # Add zero line
+            ax.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.3)
+            
+            # Formatting
+            ax.set_title(f'{bin_label}', fontweight='bold', fontsize=11)
+            ax.set_xlabel('Error (m)', fontsize=9)
+            ax.set_ylabel('Density', fontsize=9)
+            ax.legend(fontsize=7, loc='upper right')
+            ax.grid(True, alpha=0.3)
+            
+            # Add statistics box
+            model_std = np.std(model_errors)
+            stats_text = f'Model: μ={model_mean:.3f}, σ={model_std:.3f}'
+            if len(baseline_errors) > 0:
+                baseline_std = np.std(baseline_errors)
+                stats_text += f'\nBaseline: μ={baseline_mean:.3f}, σ={baseline_std:.3f}'
+            
+            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+                   verticalalignment='top', fontsize=7,
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Hide unused subplots
+        for idx in range(len(bins_to_plot), len(axes_flat)):
+            axes_flat[idx].axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "error_distribution_histograms.png", 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved error distribution histograms to {self.output_dir / 'error_distribution_histograms.png'}")
+
+    def plot_error_boxplots(self):
+        """Plot box plot comparison of errors across all sea bins."""
+        print("Creating error distribution box plots...")
+        
+        # Prepare data
+        bin_labels = []
+        model_error_data = []
+        baseline_error_data = []
+        
+        for bin_config in self.sea_bins:
+            bin_name = bin_config["name"]
+            model_errors = self.sea_bin_error_samples[bin_name]['model_errors']
+            baseline_errors = self.sea_bin_error_samples[bin_name]['baseline_errors']
+            
+            if len(model_errors) > 0:
+                bin_labels.append(bin_config["label"])
+                model_error_data.append(model_errors)
+                baseline_error_data.append(baseline_errors if len(baseline_errors) > 0 else [])
+        
+        if not bin_labels:
+            logger.warning("No error data available for box plots")
+            return
+        
+        # Create figure with two subplots
+        fig, axes = plt.subplots(2, 1, figsize=(16, 12))
+        fig.suptitle("Error Distribution Box Plots by Sea State", 
+                     fontsize=16, fontweight='bold')
+        
+        # Plot 1: Model errors
+        ax1 = axes[0]
+        bp1 = ax1.boxplot(model_error_data, labels=bin_labels, patch_artist=True,
+                          showmeans=True, meanline=True,
+                          boxprops=dict(facecolor='lightblue', alpha=0.7),
+                          medianprops=dict(color='blue', linewidth=2),
+                          meanprops=dict(color='darkblue', linewidth=2, linestyle='--'),
+                          whiskerprops=dict(color='blue'),
+                          capprops=dict(color='blue'),
+                          flierprops=dict(marker='o', markerfacecolor='blue', 
+                                        markersize=3, alpha=0.3))
+        
+        ax1.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax1.set_title("Model Errors", fontweight='bold', fontsize=14)
+        ax1.set_ylabel("Error (m)", fontsize=12)
+        ax1.tick_params(axis='x', rotation=45)
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Add sample counts
+        for i, (label, data) in enumerate(zip(bin_labels, model_error_data, strict=False)):
+            ax1.text(i+1, ax1.get_ylim()[0], f'n={len(data):,}',
+                    ha='center', va='top', fontsize=8, rotation=0)
+        
+        # Plot 2: Model vs Baseline comparison (side-by-side)
+        ax2 = axes[1]
+        
+        # Prepare positions for side-by-side box plots
+        positions_model = np.arange(len(bin_labels)) * 2.5 + 0.6
+        positions_baseline = np.arange(len(bin_labels)) * 2.5 + 1.4
+        
+        bp_model = ax2.boxplot(model_error_data, positions=positions_model,
+                               widths=0.6, patch_artist=True, showmeans=True,
+                               boxprops=dict(facecolor='lightblue', alpha=0.7),
+                               medianprops=dict(color='blue', linewidth=2),
+                               meanprops=dict(color='darkblue', linewidth=1.5, linestyle='--'),
+                               whiskerprops=dict(color='blue'),
+                               capprops=dict(color='blue'),
+                               flierprops=dict(marker='o', markerfacecolor='blue', 
+                                             markersize=2, alpha=0.3))
+        
+        # Only plot baseline if data exists
+        has_baseline = any(len(d) > 0 for d in baseline_error_data)
+        if has_baseline:
+            bp_baseline = ax2.boxplot(baseline_error_data, positions=positions_baseline,
+                                     widths=0.6, patch_artist=True, showmeans=True,
+                                     boxprops=dict(facecolor='lightcoral', alpha=0.7),
+                                     medianprops=dict(color='red', linewidth=2),
+                                     meanprops=dict(color='darkred', linewidth=1.5, linestyle='--'),
+                                     whiskerprops=dict(color='red'),
+                                     capprops=dict(color='red'),
+                                     flierprops=dict(marker='o', markerfacecolor='red',
+                                                   markersize=2, alpha=0.3))
+        
+        ax2.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax2.set_title("Model vs Baseline Comparison", fontweight='bold', fontsize=14)
+        ax2.set_ylabel("Error (m)", fontsize=12)
+        ax2.set_xlabel("Sea State", fontsize=12)
+        
+        # Set x-ticks at the center of each pair
+        ax2.set_xticks((positions_model + positions_baseline) / 2)
+        ax2.set_xticklabels(bin_labels, rotation=45, ha='right')
+        ax2.grid(True, alpha=0.3, axis='y')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [Patch(facecolor='lightblue', edgecolor='blue', label='Model')]
+        if has_baseline:
+            legend_elements.append(Patch(facecolor='lightcoral', edgecolor='red', label='Baseline'))
+        ax2.legend(handles=legend_elements, loc='upper right', fontsize=11)
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "error_distribution_boxplots.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved error distribution box plots to {self.output_dir / 'error_distribution_boxplots.png'}")
     
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
@@ -919,6 +1130,8 @@ class ModelEvaluator:
         print("Creating plots...")
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_error_distribution_histograms()
+        self.plot_error_boxplots()
         
         # Print summary
         self.print_summary(overall_metrics, sea_bin_metrics)

@@ -581,7 +581,7 @@ def main():
         dropout=model_config.get("dropout", 0.2),
         add_vhm0_residual=model_config.get("add_vhm0_residual", False),
         vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
-        weight_decay=model_config.get("weight_decay", 0),
+        weight_decay=float(model_config.get("weight_decay", 0)),
         model_type=model_config.get("model_type", "nick"),  # Options: "nick", "geo", "enhanced"
         upsample_mode=model_config.get("upsample_mode", "nearest"),
     )
