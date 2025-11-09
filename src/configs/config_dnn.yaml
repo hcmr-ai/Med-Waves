@@ -38,7 +38,7 @@ model:
   model_type: "enhanced" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4  # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1"
+  loss_type: "multi_bin_weighted_smooth_l1" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
@@ -72,7 +72,7 @@ training:
   devices: 1
   precision: "32" # Full precision training (16 or 32)
   log_every_n_steps: 20
-  early_stopping_patience: 15
+  early_stopping_patience: 30
   save_top_k: 25
   monitor: "val_loss"
   mode: "min"
@@ -82,18 +82,20 @@ training:
   benchmark: false
   prefetch_factor: 1
   val_check_interval: null
+  use_swa: false
+  use_ema: true
 # Checkpoint configuration
 checkpoint: 
-  resume_from_checkpoint: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual/epoch=02-val_loss=0.02.ckpt" # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual" # S3 backup for spot instances
+  resume_from_checkpoint: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual/epoch=03-val_loss=0.04.ckpt" # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual" # S3 backup for spot instances
   save_last: true
   sync_frequency: 5 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/preprocessed/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual"
+  log_dir: "/opt/dlami/nvme/logs"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual_continue"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
   comet_notes: "DNN training for wave height correction using U-Net architecture"
