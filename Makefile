@@ -61,6 +61,9 @@ evaluation: ## Run evaluation
 
 eval-bunet:
 	poetry run python scripts/evaluate_bunet.py
+
+eval-bunet-bitwise:
+	poetry run python scripts/evaluate_bunet.py --apply-binwise-correction
 # Scripts
 run-manual-exp: ## Create manual experiment
 	poetry run python scripts/create_manual_experiment.py

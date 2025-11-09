@@ -1,6 +1,5 @@
 import torch
 from torch.utils.data import Dataset
-import numpy as np
 
 class GridPatchWaveDataset(Dataset):
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,

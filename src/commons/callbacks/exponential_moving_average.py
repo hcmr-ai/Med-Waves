@@ -12,9 +12,7 @@ class EMAWeightAveraging(Callback):
         self.global_step += 1
         if self.global_step < self.start_step:
             return
-        
-        print(f"[EMA Initialization] at step={self.global_step}")
-        
+                
         # Initialize or update EMA weights
         if self.ema_weights is None:
             self.ema_weights = [p.detach().clone() for p in pl_module.parameters() if p.requires_grad]
@@ -24,7 +22,6 @@ class EMAWeightAveraging(Callback):
                 ema_w.add_((1.0 - self.decay) * model_w.detach())
 
     def on_validation_start(self, trainer, pl_module):
-        print(f"[EMA Validation Start] at step={self.global_step}")
         if self.ema_weights is not None:
             # Store current model weights and switch to EMA
             self.model_weights = [p.detach().clone() for p in pl_module.parameters()]
@@ -52,6 +49,7 @@ class EMAWeightAveraging(Callback):
         self.global_step = checkpoint.get("global_step", 0)
     
     def state_dict(self):
+        print(f"[EMA State Dict] at step={self.global_step}")
         return {
             "ema_weights": self.ema_weights,
             "global_step": self.global_step,
@@ -59,5 +57,6 @@ class EMAWeightAveraging(Callback):
 
     # ✅ REQUIRED for restoring EMA after Resume
     def load_state_dict(self, state_dict):
+        print(f"[EMA Load State Dict] at step={self.global_step}")
         self.ema_weights = state_dict.get("ema_weights")
         self.global_step = state_dict.get("global_step", 0)

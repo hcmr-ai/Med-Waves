@@ -30,6 +30,86 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import torch
+
+def apply_binwise_correction(
+    y_pred,
+    y_true,
+    vhm0,
+    bins=[0, 1, 2, 3, 4, 5, 10],  # Wave height bins in meters
+    normalize=False,
+    std=None,
+    mean=None,
+    mask=None
+):
+    """
+    Apply post-hoc bin-wise bias correction based on VHM0 (true or predicted).
+
+    Args:
+        y_pred: (B, 1, H, W) torch.Tensor, model predictions (normalized or real)
+        y_true: (B, 1, H, W) torch.Tensor, ground truth (same units as y_pred)
+        vhm0:   (B, 1, H, W) torch.Tensor, original wave height (same units as y_true)
+        bins:   List of bin edges in meters for binning vhm0
+        normalize: If True, assumes y_pred and y_true are normalized
+        std, mean: If normalize=True, std and mean should be provided
+        mask: (B, 1, H, W) optional boolean mask of valid sea pixels
+
+    Returns:
+        y_corr: (B, 1, H, W) bias-corrected predictions
+        bin_biases: dict of {bin_label: bias_value}
+        bin_counts: dict of {bin_label: sample_count}
+    """
+
+    # 1. Unnormalize if needed
+    if normalize:
+        assert std is not None and mean is not None, "Need mean/std to unnormalize"
+        y_pred_denorm = y_pred * std + mean
+        y_true_denorm = y_true * std + mean
+        vhm0_denorm   = vhm0 * std + mean
+    else:
+        y_pred_denorm, y_true_denorm, vhm0_denorm = y_pred, y_true, vhm0
+
+    # 2. Prepare mask
+    if mask is None:
+        mask = ~torch.isnan(y_true_denorm)
+
+    # 3. Compute residuals (true - pred)
+    residuals = y_true_denorm - y_pred_denorm
+
+    # 4. Compute mean bias per bin
+    bin_biases = {}
+    bin_counts = {}
+    for i in range(len(bins) - 1):
+        low, high = bins[i], bins[i + 1]
+        bin_label = f"{low}-{high}m"
+
+        in_bin = (vhm0_denorm >= low) & (vhm0_denorm < high) & mask
+        if in_bin.any():
+            bin_bias = residuals[in_bin].mean().item()
+            bin_count = in_bin.sum().item()
+        else:
+            bin_bias = 0.0  # no data in this bin → no correction
+            bin_count = 0
+        bin_biases[bin_label] = bin_bias
+        bin_counts[bin_label] = bin_count
+
+    # 5. Apply correction
+    y_corr_denorm = y_pred_denorm.clone()
+    for i in range(len(bins) - 1):
+        low, high = bins[i], bins[i + 1]
+        bin_label = f"{low}-{high}m"
+        in_bin = (vhm0_denorm >= low) & (vhm0_denorm < high) & mask
+        y_corr_denorm[in_bin] += bin_biases[bin_label]
+
+    # 6. Normalize back if needed
+    if normalize:
+        y_corr = (y_corr_denorm - mean) / std
+    else:
+        y_corr = y_corr_denorm
+
+    return y_corr, bin_biases, bin_counts
+
+
 def plot_spatial_rmse_map(
     lat_grid: np.ndarray,
     lon_grid: np.ndarray,
@@ -163,16 +243,20 @@ class ModelEvaluator:
         normalize_target: bool = False,
         test_files: List[str] = None,
         subsample_step: int = None,
+        apply_binwise_correction_flag: bool = False,
+        bias_loader: DataLoader = None,
     ):
         self.model = model.to(device)
         self.model.eval()
         self.test_loader = test_loader
+        self.bias_loader = bias_loader  # Separate loader for computing biases (train/val)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
         self.predict_bias = predict_bias
         self.normalizer = normalizer
         self.normalize_target = normalize_target
+        self.apply_binwise_correction_flag = apply_binwise_correction_flag
         # Sea-bin definitions
         self.sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
@@ -258,17 +342,17 @@ class ModelEvaluator:
     def _process_batch(self, y, mask, vhm0, y_pred):
         """Process a single batch and update accumulators."""
         # Align dimensions
-        min_h = min(y_pred.shape[2], y.shape[2])
-        min_w = min(y_pred.shape[3], y.shape[3])
-        y_pred = y_pred[:, :, :min_h, :min_w]
-        y = y[:, :, :min_h, :min_w]
-        mask = mask[:, :, :min_h, :min_w]
+        # min_h = min(y_pred.shape[2], y.shape[2])
+        # min_w = min(y_pred.shape[3], y.shape[3])
+        # y_pred = y_pred[:, :, :min_h, :min_w]
+        # y = y[:, :, :min_h, :min_w]
+        # mask = mask[:, :, :min_h, :min_w]
         
-        vhm0 = vhm0[:, :, :min_h, :min_w]
+        # vhm0 = vhm0[:, :, :min_h, :min_w]
 
-        if self.normalize_target and self.normalizer is not None:
-            y_pred = self.normalizer.inverse_transform_torch(y_pred)
-            y = self.normalizer.inverse_transform_torch(y)
+        # if self.normalize_target and self.normalizer is not None:
+        #     y_pred = self.normalizer.inverse_transform_torch(y_pred)
+        #     y = self.normalizer.inverse_transform_torch(y)
         
         # ========== COMPUTE SPATIAL ERROR MAPS FIRST (using full 4D tensors) ==========
         if self.predict_bias:
@@ -410,6 +494,12 @@ class ModelEvaluator:
         self.model.eval()
         self._reset_accumulators()
 
+        # If binwise correction is enabled, compute biases from bias_loader first
+        if self.apply_binwise_correction_flag:
+            if self.bias_loader is None:
+                raise ValueError("bias_loader must be provided when apply_binwise_correction_flag=True")
+            self._compute_global_bin_biases()
+        
         with torch.no_grad():
             for batch_idx, batch in enumerate(tqdm(self.test_loader, desc="Processing batches")):
                 # Handle batch format based on predict_bias
@@ -427,10 +517,107 @@ class ModelEvaluator:
                 # Get predictions
                 y_pred = self.model(X)
                 
+                # Align dimensions
+                min_h = min(y_pred.shape[2], y.shape[2])
+                min_w = min(y_pred.shape[3], y.shape[3])
+                y_pred = y_pred[:, :, :min_h, :min_w]
+                y = y[:, :, :min_h, :min_w]
+                mask = mask[:, :, :min_h, :min_w]
+                if vhm0 is not None:
+                    vhm0 = vhm0[:, :, :min_h, :min_w]
+                
+                # Unnormalize if needed
+                if self.normalize_target and self.normalizer is not None:
+                    y_pred = self.normalizer.inverse_transform_torch(y_pred)
+                    y = self.normalizer.inverse_transform_torch(y)
+                
+                # Apply bin-wise correction if enabled
+                if self.apply_binwise_correction_flag and vhm0 is not None:
+                    y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
+                
                 # Process batch and update accumulators
                 self._process_batch(y, mask, vhm0, y_pred)
         
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
+    
+    def _compute_global_bin_biases(self):
+        """Compute global bin-wise correction biases from training/validation set."""
+        print("Computing global bin-wise correction biases from training/validation set...")
+        
+        all_residuals_by_bin = {}
+        self.bins = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        
+        # Initialize storage for each bin
+        for i in range(len(self.bins) - 1):
+            bin_label = f"{self.bins[i]}-{self.bins[i+1]}m"
+            all_residuals_by_bin[bin_label] = []
+        
+        with torch.no_grad():
+            for batch in tqdm(self.bias_loader, desc="Computing biases from train/val"):
+                # Handle batch format
+                if self.predict_bias:
+                    X, y, mask, vhm0 = batch
+                    vhm0 = vhm0.to(self.device) if vhm0 is not None else None
+                else:
+                    X, y, mask, vhm0_batch = batch
+                    vhm0 = vhm0_batch.to(self.device) if vhm0_batch is not None else None
+                
+                X = X.to(self.device)
+                y = y.to(self.device)
+                mask = mask.to(self.device)
+                
+                # Get predictions
+                y_pred = self.model(X)
+                
+                # Align dimensions
+                min_h = min(y_pred.shape[2], y.shape[2])
+                min_w = min(y_pred.shape[3], y.shape[3])
+                y_pred = y_pred[:, :, :min_h, :min_w]
+                y = y[:, :, :min_h, :min_w]
+                mask = mask[:, :, :min_h, :min_w]
+                if vhm0 is not None:
+                    vhm0 = vhm0[:, :, :min_h, :min_w]
+                
+                # Unnormalize
+                if self.normalize_target and self.normalizer is not None:
+                    y_pred = self.normalizer.inverse_transform_torch(y_pred)
+                    y = self.normalizer.inverse_transform_torch(y)
+                
+                # Compute residuals and bin them
+                residuals = y - y_pred
+                
+                for i in range(len(self.bins) - 1):
+                    low, high = self.bins[i], self.bins[i + 1]
+                    bin_label = f"{low}-{high}m"
+                    in_bin = (vhm0 >= low) & (vhm0 < high) & mask
+                    if in_bin.any():
+                        all_residuals_by_bin[bin_label].append(residuals[in_bin].cpu())
+        
+        # Compute global bin biases
+        self.global_bin_biases = {}
+        print("\nGlobal bin-wise correction biases (from train/val set):")
+        print(f"{'Bin':<12} {'Count':<15} {'Bias (m)':<12}")
+        print("-" * 39)
+        
+        for bin_label, residual_list in all_residuals_by_bin.items():
+            if residual_list:
+                all_residuals = torch.cat(residual_list)
+                self.global_bin_biases[bin_label] = all_residuals.mean().item()
+                bin_count = len(all_residuals)
+                print(f"{bin_label:<12} {bin_count:<15,} {self.global_bin_biases[bin_label]:>10.4f}")
+            else:
+                self.global_bin_biases[bin_label] = 0.0
+    
+    def _apply_bin_corrections(self, y_pred, vhm0, mask):
+        """Apply pre-computed global bin-wise corrections to predictions."""
+        y_pred_corrected = y_pred.clone()
+        for i in range(len(self.bins) - 1):
+            low, high = self.bins[i], self.bins[i + 1]
+            bin_label = f"{low}-{high}m"
+            in_bin = (vhm0 >= low) & (vhm0 < high) & mask
+            if in_bin.any() and bin_label in self.global_bin_biases:
+                y_pred_corrected[in_bin] += self.global_bin_biases[bin_label]
+        return y_pred_corrected
     
     def compute_overall_metrics(self) -> Dict[str, float]:
         """Compute overall performance metrics from accumulators."""
@@ -1371,6 +1558,8 @@ def main():
                        help='Device to use (cuda/cpu)')
     parser.add_argument('--config', type=str, default='src/configs/config_dnn.yaml',
                        help='Configuration file')
+    parser.add_argument('--apply-binwise-correction', action='store_true',
+                       help='Apply bin-wise bias correction computed from training set')
     args = parser.parse_args()
     
     config = DNNConfig(args.config)
@@ -1402,7 +1591,7 @@ def main():
     logger.info(f"Found {len(files)} files")
     
     # Split files by year (same as training)
-    _, _ , test_files = split_files_by_year(
+    train_files, _ , test_files = split_files_by_year(
         files,
         train_year=data_config.get("train_year", 2021),
         val_year=data_config.get("val_year", 2022),
@@ -1412,6 +1601,7 @@ def main():
     )
     
     logger.info(f"Test files: {len(test_files)}")
+    logger.info(f"Train files: {len(train_files)}")
     
     # Load normalizer (same as training)
     normalizer = WaveNormalizer.load_from_s3("medwav-dev-data", data_config["normalizer_path"])
@@ -1460,14 +1650,52 @@ def main():
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=training_config["prefetch_factor"]
     )
+    
+    # Create train loader for binwise correction (if needed)
+    train_loader = None
+    if args.apply_binwise_correction:
+        logger.info("Creating train loader for bin-wise correction...")
+        if patch_size is not None:
+            train_dataset = GridPatchWaveDataset(
+                train_files,
+                patch_size=patch_size,
+                excluded_columns=excluded_columns,
+                target_column=target_column,
+                predict_bias=predict_bias,
+                subsample_step=subsample_step,
+                normalizer=normalizer,
+                use_cache=False,
+                normalize_target=data_config.get("normalize_target", False)
+            )
+        else:
+            train_dataset = CachedWaveDataset(
+                train_files,
+                excluded_columns=excluded_columns,
+                target_column=target_column,
+                predict_bias=predict_bias,
+                subsample_step=subsample_step,
+                normalizer=normalizer,
+                enable_profiler=False,
+                use_cache=False,
+                normalize_target=data_config.get("normalize_target", False)
+            )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=training_config["batch_size"],
+            shuffle=False,
+            num_workers=training_config["num_workers"],
+            pin_memory=training_config["pin_memory"],
+            persistent_workers=training_config["num_workers"] > 0,
+            prefetch_factor=training_config["prefetch_factor"]
+        )
+        logger.info(f"Train loader created with {len(train_dataset)} samples")
+    
     checkpoint = config.config["checkpoint"]["resume_from_checkpoint"]
     ckpt = torch.load(checkpoint, map_location="cpu")
     
     logger.info(f"Loading model from {checkpoint}...")
     model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
     logger.info(f"Model loaded. predict_bias={predict_bias}")
-
-    print(ckpt.keys())
 
     if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
         logger.info("Applying EMA weights for evaluation...")
@@ -1483,13 +1711,15 @@ def main():
     evaluator = ModelEvaluator(
         model=model,
         test_loader=test_loader,
-        output_dir=Path(args.output_dir) / (config.config["logging"]["experiment_name"] + "_" + config.config["checkpoint"]["resume_from_checkpoint"].split("/")[-1].split(".")[0]),
+        output_dir=Path(args.output_dir) / (config.config["logging"]["experiment_name"] /  config.config["checkpoint"]["resume_from_checkpoint"].split("/")[-1].split(".")[0]),
         predict_bias=predict_bias,
         device="cuda",
         normalizer=normalizer,
         normalize_target=data_config.get("normalize_target", False),
         test_files=test_files_parq,
-        subsample_step=5
+        subsample_step=5,
+        apply_binwise_correction_flag=args.apply_binwise_correction,
+        bias_loader=train_loader  # Use train set to compute bin biases
     )
     
     evaluator.evaluate()
