@@ -28,22 +28,26 @@ def setup_logging(level=logging.INFO):
 
 logger = setup_logging()
 
-import pytorch_lightning as lightning
+# import pytorch_lightning as lightning
 import s3fs
 import torch
 from classifiers.bu_net import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
+from commons.callbacks.exponential_moving_average import EMAWeightAveraging
 from commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import (
+import lightning
+from lightning import Trainer
+from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
+    StochasticWeightAveraging
 )
-from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
+
+from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
 
 def _log_training_artifacts(comet_logger, config_file):
@@ -453,7 +457,6 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
 
     return train_loader, val_loader
 
-
 def create_callbacks(config: DNNConfig) -> list:
     """Create training callbacks"""
     callbacks = []
@@ -462,6 +465,7 @@ def create_callbacks(config: DNNConfig) -> list:
     training_config = config.config["training"]
 
     # Model checkpoint callback
+    logger.info("Adding checkpoint callback")
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_config["checkpoint_dir"],
         filename="{epoch:02d}-{val_loss:.2f}",
@@ -474,6 +478,7 @@ def create_callbacks(config: DNNConfig) -> list:
 
     # Add S3 sync callback for spot instances
     if checkpoint_config.get("s3_sync_dir"):
+        logger.info("Adding S3 sync callback")
         s3_sync_callback = S3CheckpointSyncCallback(
             s3_dir=checkpoint_config["s3_sync_dir"],
             local_dir=checkpoint_config["checkpoint_dir"],
@@ -496,6 +501,23 @@ def create_callbacks(config: DNNConfig) -> list:
     if config.config["logging"]["use_comet"]:
         comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
         callbacks.append(comet_callback)
+    
+    if config.config["training"]["use_swa"]:
+        logger.info("Adding SWA callback")
+        swa_callback = StochasticWeightAveraging(
+            swa_lrs=1e-3,       # Same LR or lower than initial LR
+            annealing_epochs=10,
+            swa_epoch_start=5        # When to start SWA averaging
+        )
+        callbacks.append(swa_callback)
+    
+    if config.config["training"]["use_ema"]:
+        logger.info("Adding EMA callback")
+        ema_callback = EMAWeightAveraging(
+            decay=0.999,          # Higher decay => slower updates, smoother EMA
+            start_step=100,
+        )
+        callbacks.append(ema_callback)
 
     return callbacks
 

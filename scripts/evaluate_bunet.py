@@ -1461,9 +1461,23 @@ def main():
         prefetch_factor=training_config["prefetch_factor"]
     )
     checkpoint = config.config["checkpoint"]["resume_from_checkpoint"]
+    ckpt = torch.load(checkpoint, map_location="cpu")
+    
     logger.info(f"Loading model from {checkpoint}...")
     model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
     logger.info(f"Model loaded. predict_bias={predict_bias}")
+
+    print(ckpt.keys())
+
+    if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
+        logger.info("Applying EMA weights for evaluation...")
+        ema_weights = [w.to(model.device) for w in ckpt["ema_weights"]]
+        
+        # Copy into model
+        for ema_param, param in zip(ema_weights, model.parameters()):
+            param.data.copy_(ema_param.data)
+    else:
+        logger.info("No EMA weights found in checkpoint. Using standard weights.")
 
     # Create evaluator and run evaluation
     evaluator = ModelEvaluator(

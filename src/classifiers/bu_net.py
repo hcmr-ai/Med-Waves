@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytorch_lightning as pl
+import lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,7 +15,8 @@ sys.path.insert(0, str(project_root))
 from src.commons.losses import (
     masked_mse_loss,
     masked_smooth_l1_loss,
-    masked_weighted_mse,
+    masked_multi_bin_weighted_mse,
+    masked_multi_bin_weighted_smooth_l1
 )
 
 
@@ -509,27 +510,29 @@ class WaveBiasCorrector(pl.LightningModule):
         self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
-        if loss_type == "smooth_l1":
-            self.criterion = torch.nn.SmoothL1Loss(beta=0.1, reduction="mean")
+        if loss_type == "smooth_l1" or loss_type == "multi_bin_weighted_smooth_l1":
+            self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="none")
 
     def forward(self, x):
         # Handle NaN values in input by replacing with zeros
         x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return self.model(x_clean)
 
-    def compute_loss(self, y_pred, y_true, mask):
+    def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction):
         if self.loss_type == "mse":
             return masked_mse_loss(y_pred, y_true, mask)
         elif self.loss_type == "smooth_l1":
             return masked_smooth_l1_loss(y_pred, y_true, mask, self.criterion)
+        elif self.loss_type == "multi_bin_weighted_smooth_l1":
+            return masked_multi_bin_weighted_smooth_l1(y_pred, y_true, mask, vhm0_for_reconstruction, self.criterion)
         else:
-            return masked_weighted_mse(y_pred, y_true, mask)
+            return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
 
     def training_step(self, batch, batch_idx):
         X, y, mask, vhm0_for_reconstruction = batch
 
         y_pred = self(X)
-        loss = self.compute_loss(y_pred, y, mask)
+        loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
 
         # Enhanced metrics for Comet
         with torch.no_grad():
@@ -578,7 +581,7 @@ class WaveBiasCorrector(pl.LightningModule):
         X, y, mask, vhm0_for_reconstruction = batch
 
         y_pred = self(X)
-        loss = self.compute_loss(y_pred, y, mask)
+        loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
 
         # Enhanced validation metrics
         with torch.no_grad():

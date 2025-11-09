@@ -160,7 +160,7 @@ def masked_multi_bin_weighted_smooth_l1(
             bin_thresholds = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 15.0]
     if bin_weights is None:
         bin_weights = [0.9,  1.0,  1.2,  1.5,  2.2,  3.0,  4.0]
-    # --- Crop dimensions if needed ---
+
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]
@@ -192,3 +192,59 @@ def masked_multi_bin_weighted_smooth_l1(
     weighted_loss = num / den
     
     return weighted_loss
+
+def pixel_switch_loss(
+    y_pred,
+    y_true,
+    mask,
+    base_loss_fn,
+    threshold=0.03,      # threshold in normalized space
+    weight_normal=1.0,   # weight for normal pixels
+    weight_hard=5.0,     # higher weight for 'hard' pixels
+):
+    """
+    Pixel-Switch Loss: higher weight for pixels where |error| > threshold.
+
+    Args:
+        y_pred: (B, 1, H, W) prediction tensor
+        y_true: (B, 1, H, W) ground truth tensor
+        mask:   (B, 1, H, W) True where valid pixel
+        threshold: float, normalized error threshold for “hard” pixels
+        weight_normal: weight multiplier for normal pixels
+        weight_hard: weight multiplier for hard pixels
+        base_loss_fn: base loss to apply (e.g., nn.MSELoss or nn.SmoothL1Loss)
+    """
+    # Ensure valid region via mask
+    min_h = min(y_pred.shape[2], y_true.shape[2])
+    min_w = min(y_pred.shape[3], y_true.shape[3])
+    y_pred = y_pred[:, :, :min_h, :min_w]
+    y_true = y_true[:, :, :min_h, :min_w]
+    mask   = mask[:, :, :min_h, :min_w]
+    
+    mask = mask.bool()
+    y_true = torch.nan_to_num(y_true, nan=0.0)
+    y_pred = torch.nan_to_num(y_pred, nan=0.0)
+
+    # Compute base loss per-pixel: shape (B, 1, H, W)
+    loss_per_pixel = base_loss_fn(y_pred, y_true)
+
+    # Compute absolute error
+    error = torch.abs(y_pred - y_true)
+
+    # Pixel switch: identify hard pixels (where error > threshold)
+    hard_mask = error > threshold
+    normal_mask = ~hard_mask
+
+    # Apply weights
+    weighted_loss = (
+        loss_per_pixel * (
+            normal_mask * weight_normal +
+            hard_mask * weight_hard
+        )
+    )
+
+    # Apply valid mask
+    weighted_loss = weighted_loss[mask]
+
+    # Return average loss
+    return weighted_loss.mean()
