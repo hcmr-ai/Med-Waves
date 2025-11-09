@@ -197,54 +197,125 @@ def pixel_switch_loss(
     y_pred,
     y_true,
     mask,
-    base_loss_fn,
-    threshold=0.03,      # threshold in normalized space
-    weight_normal=1.0,   # weight for normal pixels
-    weight_hard=5.0,     # higher weight for 'hard' pixels
+    threshold_m=None,      # 1 meter threshold in real space
+    std=None,             # std used during normalization (required!)
+    weight_normal=0.0,    
+    weight_hard=1.0,
 ):
     """
-    Pixel-Switch Loss: higher weight for pixels where |error| > threshold.
-
-    Args:
-        y_pred: (B, 1, H, W) prediction tensor
-        y_true: (B, 1, H, W) ground truth tensor
-        mask:   (B, 1, H, W) True where valid pixel
-        threshold: float, normalized error threshold for “hard” pixels
-        weight_normal: weight multiplier for normal pixels
-        weight_hard: weight multiplier for hard pixels
-        base_loss_fn: base loss to apply (e.g., nn.MSELoss or nn.SmoothL1Loss)
+    Pixel-Switch Loss (Weighted MSE / SmoothL1)
+    - threshold_m: threshold in meters
+    - std: used to convert to normalized space
+    - base_loss_fn: must support reduction="none"
     """
-    # Ensure valid region via mask
+
+    # Convert threshold to normalized units
+
+    if std is not None and threshold_m is not None:
+        threshold = threshold_m / std
+    elif threshold_m is not None:
+        threshold = threshold_m
+
+    # Crop shapes
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]
     y_true = y_true[:, :, :min_h, :min_w]
     mask   = mask[:, :, :min_h, :min_w]
-    
+
     mask = mask.bool()
     y_true = torch.nan_to_num(y_true, nan=0.0)
     y_pred = torch.nan_to_num(y_pred, nan=0.0)
+    # Compute pixelwise base loss
+    loss_per_pixel = (y_pred - y_true) ** 2
 
-    # Compute base loss per-pixel: shape (B, 1, H, W)
-    loss_per_pixel = base_loss_fn(y_pred, y_true)
+    # Compute absolute error in normalized space
+    error = torch.abs(y_pred - y_true)
+
+    # Define hard vs normal pixels
+    hard_mask = (error > threshold) & mask
+    normal_mask = (~hard_mask) & mask
+
+    # Apply weights only where valid
+    weights = torch.zeros_like(error)
+    weights[hard_mask] = weight_hard
+    weights[normal_mask] = weight_normal
+
+    # Final weighted loss
+    weighted_loss = loss_per_pixel * weights
+    return weighted_loss[mask].mean()
+
+
+import torch.nn as nn
+
+def pixel_switch_loss_stable(
+    y_pred,
+    y_true,
+    mask,
+    threshold_m=None,   # threshold in meters (optional)
+    std=None,           # normalization std if threshold_m is in meters
+    weight_normal=0.1,  # soft weight for "easy" pixels
+    weight_hard=1.0,    # weight for "hard" pixels
+    dynamic_quantile=0.90,  # used if threshold_m is None
+    smooth_mix=0.2,     # fraction of SmoothL1 stabilizer
+    epsilon=1e-6,
+):
+    """
+    Soft Pixel-Switch Loss (stable version for fine-tuning).
+
+    Args:
+        y_pred, y_true: tensors (B, 1, H, W)
+        mask: valid pixels (B, 1, H, W)
+        base_loss_fn: must support reduction="none" (e.g. nn.MSELoss(reduction="none"))
+        threshold_m: threshold in meters (optional)
+        std: normalization std (if data normalized)
+        weight_normal, weight_hard: weights for normal/hard pixels
+        dynamic_quantile: used if threshold_m is None (e.g. 0.9 = 90th percentile)
+        smooth_mix: fraction of SmoothL1Loss blended in for stability
+    """
+
+    # Crop dimensions to match
+    min_h = min(y_pred.shape[2], y_true.shape[2])
+    min_w = min(y_pred.shape[3], y_true.shape[3])
+    y_pred = y_pred[:, :, :min_h, :min_w]
+    y_true = y_true[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w].bool()
+
+    # Replace NaNs
+    y_true = torch.nan_to_num(y_true, nan=0.0)
+    y_pred = torch.nan_to_num(y_pred, nan=0.0)
+
+    # Compute per-pixel base loss (e.g. MSE)
+    loss_per_pixel = (y_pred - y_true) ** 2
+    # if loss_per_pixel.ndim > 3:
+    #     loss_per_pixel = loss_per_pixel.squeeze(1)
 
     # Compute absolute error
     error = torch.abs(y_pred - y_true)
 
-    # Pixel switch: identify hard pixels (where error > threshold)
-    hard_mask = error > threshold
-    normal_mask = ~hard_mask
+    # Determine threshold (in normalized space)
+    if threshold_m is not None and std is not None:
+        threshold = threshold_m / std
+    elif threshold_m is not None:
+        threshold = threshold_m
 
-    # Apply weights
-    weighted_loss = (
-        loss_per_pixel * (
-            normal_mask * weight_normal +
-            hard_mask * weight_hard
-        )
-    )
+    # Identify hard pixels
+    hard_mask = (error > threshold) & mask
+    normal_mask = (~hard_mask) & mask
 
-    # Apply valid mask
-    weighted_loss = weighted_loss[mask]
+    # Apply weights softly
+    weights = torch.zeros_like(error)
+    weights[normal_mask] = weight_normal
+    weights[hard_mask] = weight_hard
 
-    # Return average loss
-    return weighted_loss.mean()
+    # Weighted pixel-switch component
+    weighted_loss = loss_per_pixel * weights
+    pixel_switch_term = weighted_loss[mask].mean()
+
+    # Add SmoothL1 stabilizer
+    smooth_l1_term = nn.SmoothL1Loss()(y_pred[mask], y_true[mask])
+
+    # Combine them
+    total_loss = (1 - smooth_mix) * pixel_switch_term + smooth_mix * smooth_l1_term
+
+    return total_loss

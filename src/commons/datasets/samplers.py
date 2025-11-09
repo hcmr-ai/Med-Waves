@@ -14,9 +14,12 @@ class WaveBinBalancedSampler(Sampler):
         
         # Default: equal distribution across bins
         if bins_per_batch is None:
-            n_bins = len(np.unique(dataset.patch_bins))
+            unique_bins = np.unique(dataset.patch_bins)
+            n_bins = len(unique_bins)
             n_each = batch_size // n_bins
-            self.bins_per_batch = {b: n_each for b in range(n_bins)}
+            print(f"Found {n_bins} unique bins: {unique_bins}")
+            # Use actual bin IDs, not range(n_bins)
+            self.bins_per_batch = {int(b): n_each for b in unique_bins}
         else:
             self.bins_per_batch = bins_per_batch
         
@@ -31,9 +34,17 @@ class WaveBinBalancedSampler(Sampler):
             self.bin_to_idxs[b] = np.array(self.bin_to_idxs[b])
 
         # Compute number of batches per epoch
-        min_bin_size = min(len(idxs) for idxs in self.bin_to_idxs.values())
-        max_batches = min_bin_size // self.bins_per_batch[b]
-        self.total_batches = max_batches
+        # For each bin, calculate how many batches we can make given the samples we need per batch
+        batches_per_bin = []
+        for b, n_samples_needed in self.bins_per_batch.items():
+            if n_samples_needed > 0:
+                n_available = len(self.bin_to_idxs[b])
+                batches_possible = n_available // n_samples_needed
+                batches_per_bin.append(batches_possible)
+                print(f"  Bin {b}: {n_available} samples available, need {n_samples_needed} per batch -> {batches_possible} batches possible")
+        
+        self.total_batches = min(batches_per_bin) if batches_per_bin else 0
+        print(f"Total batches per epoch: {self.total_batches} (batch_size={self.batch_size})")
 
     def __len__(self):
         return self.total_batches * self.batch_size

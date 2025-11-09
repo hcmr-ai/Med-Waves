@@ -1711,7 +1711,7 @@ def main():
     evaluator = ModelEvaluator(
         model=model,
         test_loader=test_loader,
-        output_dir=Path(args.output_dir) / (config.config["logging"]["experiment_name"] /  config.config["checkpoint"]["resume_from_checkpoint"].split("/")[-1].split(".")[0]),
+        output_dir=Path(args.output_dir) / config.config["logging"]["experiment_name"] / config.config["checkpoint"]["resume_from_checkpoint"].split("/")[-1].split(".")[0],
         predict_bias=predict_bias,
         device="cuda",
         normalizer=normalizer,
