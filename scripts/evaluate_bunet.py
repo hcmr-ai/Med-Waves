@@ -11,11 +11,15 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import lightning as pl
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import sys
+
+import cartopy.crs as ccrs
+import matplotlib.patches as mpatches
 
 # Add src to path for imports
 project_root = Path(__file__).parent.parent
@@ -119,6 +123,7 @@ def plot_spatial_rmse_map(
     vmin: float = None,
     vmax: float = None,
     cmap: str = "YlOrRd",
+    geo_bounds: dict = None,
 ):
     """
     Plot a spatial RMSE heatmap with coastlines and proper projection.
@@ -139,9 +144,10 @@ def plot_spatial_rmse_map(
         Color scale limits
     cmap : str
         Colormap name
+    geo_bounds : dict, optional
+        Geographic bounds for filtering: {'lat_min', 'lat_max', 'lon_min', 'lon_max'}
+        If provided, zooms into this region and adds a rectangle
     """
-    import cartopy.crs as ccrs
-    
     fig = plt.figure(figsize=(12, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     
@@ -163,16 +169,47 @@ def plot_spatial_rmse_map(
     )
     
     # Add colorbar
-    cbar = plt.colorbar(im, ax=ax, orientation="vertical", 
+    _ = plt.colorbar(im, ax=ax, orientation="vertical", 
                        label='RMSE (m)', pad=0.05, shrink=0.8)
     
-    # Set extent to data bounds
-    ax.set_extent([
-        np.nanmin(lon_grid),
-        np.nanmax(lon_grid),
-        np.nanmin(lat_grid),
-        np.nanmax(lat_grid)
-    ], crs=ccrs.PlateCarree())
+    # Set extent based on geo_bounds or data bounds
+    if geo_bounds is not None:
+        # Zoom into the filtered region with a small margin
+        margin_lat = (geo_bounds['lat_max'] - geo_bounds['lat_min']) * 0.1
+        margin_lon = (geo_bounds['lon_max'] - geo_bounds['lon_min']) * 0.1
+        ax.set_extent([
+            geo_bounds['lon_min'] - margin_lon,
+            geo_bounds['lon_max'] + margin_lon,
+            geo_bounds['lat_min'] - margin_lat,
+            geo_bounds['lat_max'] + margin_lat
+        ], crs=ccrs.PlateCarree())
+        
+        # Add rectangle showing the filtered region
+        rect = mpatches.Rectangle(
+            (geo_bounds['lon_min'], geo_bounds['lat_min']),
+            geo_bounds['lon_max'] - geo_bounds['lon_min'],
+            geo_bounds['lat_max'] - geo_bounds['lat_min'],
+            fill=False,
+            edgecolor='red',
+            linewidth=2.5,
+            linestyle='--',
+            transform=ccrs.PlateCarree(),
+            zorder=10,
+            label='Filtered Region'
+        )
+        ax.add_patch(rect)
+        
+        # Update title to indicate filtering
+        title = f"{title}\n(Filtered: {geo_bounds['lat_min']:.1f}°-{geo_bounds['lat_max']:.1f}°N, " \
+                f"{geo_bounds['lon_min']:.1f}°-{geo_bounds['lon_max']:.1f}°E)"
+    else:
+        # Use data bounds
+        ax.set_extent([
+            np.nanmin(lon_grid),
+            np.nanmax(lon_grid),
+            np.nanmin(lat_grid),
+            np.nanmax(lat_grid)
+        ], crs=ccrs.PlateCarree())
     
     ax.set_title(title, fontsize=14, fontweight='bold', pad=10)
     ax.set_xlabel("Longitude", fontsize=12)
@@ -245,6 +282,7 @@ class ModelEvaluator:
         subsample_step: int = None,
         apply_binwise_correction_flag: bool = False,
         bias_loader: DataLoader = None,
+        geo_bounds: dict = None,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -257,6 +295,7 @@ class ModelEvaluator:
         self.normalizer = normalizer
         self.normalize_target = normalize_target
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
+        self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
         # Sea-bin definitions
         self.sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
@@ -277,6 +316,11 @@ class ModelEvaluator:
         ]
         self.test_files = test_files
         self.subsample_step = subsample_step
+        
+        # Load geographic mask if filtering is requested
+        self.geo_mask = None
+        if self.geo_bounds and self.test_files:
+            self._load_geographic_mask()
         
         # Add spatial accumulators for RMSE maps
         self.spatial_errors_model = []  # Store (error_map, count_map) for each batch
@@ -320,6 +364,7 @@ class ModelEvaluator:
                 'sum_baseline_mae': 0.0,
                 'sum_baseline_mse': 0.0,
                 'sum_baseline_bias': 0.0,
+                'count_model_better': 0,  # Count of samples where |model_error| < |baseline_error|
             }
             for bin_config in self.sea_bins
         }
@@ -335,12 +380,50 @@ class ModelEvaluator:
         
         self.spatial_rmse_accumulators = {}
     
+    def _load_geographic_mask(self):
+        """Load coordinate grid and create geographic filtering mask."""
+        try:
+            logger.info("Loading geographic coordinates for filtering...")
+            lat_grid, lon_grid = load_coordinates_from_parquet(
+                "s3://" + self.test_files[0] if not self.test_files[0].startswith("s3://") else self.test_files[0],
+                subsample_step=self.subsample_step
+            )
+            
+            # Create boolean mask based on bounds
+            lat_mask = (lat_grid >= self.geo_bounds['lat_min']) & (lat_grid <= self.geo_bounds['lat_max'])
+            lon_mask = (lon_grid >= self.geo_bounds['lon_min']) & (lon_grid <= self.geo_bounds['lon_max'])
+            geo_mask = lat_mask & lon_mask
+            
+            # Convert to torch tensor and store
+            self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
+            
+            valid_pixels = geo_mask.sum()
+            total_pixels = geo_mask.size
+            logger.info(f"Geographic filter: {valid_pixels}/{total_pixels} pixels "
+                       f"({100*valid_pixels/total_pixels:.1f}%) within bounds "
+                       f"[lat: {self.geo_bounds['lat_min']}-{self.geo_bounds['lat_max']}, "
+                       f"lon: {self.geo_bounds['lon_min']}-{self.geo_bounds['lon_max']}]")
+            
+        except Exception as e:
+            logger.warning(f"Failed to load geographic mask: {e}. Continuing without geographic filtering.")
+            self.geo_mask = None
+    
     def _reconstruct_wave_heights(self, bias: torch.Tensor, vhm0: torch.Tensor) -> torch.Tensor:
         """Reconstruct full wave heights from bias: corrected = vhm0 + bias"""
         return bias + vhm0 
     
     def _process_batch(self, y, mask, vhm0, y_pred):
         """Process a single batch and update accumulators."""
+        # Apply geographic mask if available
+        if self.geo_mask is not None:            
+            # Crop geo_mask to match current batch size if needed
+            h, w = mask.shape[2], mask.shape[3]
+            geo_mask_crop = self.geo_mask[:h, :w]
+            
+            # Expand dimensions and apply
+            geo_mask_expanded = geo_mask_crop.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+            mask = mask & geo_mask_expanded  # Combine with existing validity mask
+        
         # Align dimensions
         # min_h = min(y_pred.shape[2], y.shape[2])
         # min_w = min(y_pred.shape[3], y.shape[3])
@@ -479,6 +562,10 @@ class ModelEvaluator:
                         self.sea_bin_accumulators[bin_name]['sum_baseline_mse'] += np.sum(baseline_bin_errors ** 2)
                         self.sea_bin_accumulators[bin_name]['sum_baseline_bias'] += np.sum(baseline_bin_errors)
                         
+                        # Count samples where model has better (lower) absolute error than baseline
+                        model_better = np.abs(bin_errors) < np.abs(baseline_bin_errors)
+                        self.sea_bin_accumulators[bin_name]['count_model_better'] += np.sum(model_better)
+                        
                         # Store all baseline error samples
                         self.sea_bin_error_samples[bin_name]['baseline_errors'].extend(baseline_bin_errors.tolist())
             
@@ -501,7 +588,7 @@ class ModelEvaluator:
             self._compute_global_bin_biases()
         
         with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(self.test_loader, desc="Processing batches")):
+            for _, batch in enumerate(tqdm(self.test_loader, desc="Processing batches")):
                 # Handle batch format based on predict_bias
                 if self.predict_bias:
                     X, y, mask, vhm0 = batch
@@ -698,6 +785,7 @@ class ModelEvaluator:
                 baseline_bias = None
                 mae_improvement = None
                 rmse_improvement = None
+                pct_model_better = None
                 
                 if bin_data['sum_baseline_mae'] > 0:
                     baseline_mae = bin_data['sum_baseline_mae'] / bin_count
@@ -706,6 +794,9 @@ class ModelEvaluator:
                     baseline_bias = bin_data['sum_baseline_bias'] / bin_count
                     mae_improvement = ((baseline_mae - mae) / baseline_mae) * 100 if baseline_mae > 0 else 0.0
                     rmse_improvement = ((baseline_rmse - rmse) / baseline_rmse) * 100 if baseline_rmse > 0 else 0.0
+                    
+                    # Calculate percentage of samples where model is better
+                    pct_model_better = (bin_data['count_model_better'] / bin_count) * 100
                 
                 sea_bin_metrics[bin_name] = {
                     "label": bin_config["label"],
@@ -717,7 +808,8 @@ class ModelEvaluator:
                     "baseline_rmse": float(baseline_rmse) if baseline_rmse is not None else None,
                     "baseline_bias": float(baseline_bias) if baseline_bias is not None else None,
                     "mae_improvement_pct": float(mae_improvement) if mae_improvement is not None else None,
-                    "rmse_improvement_pct": float(rmse_improvement) if rmse_improvement is not None else None
+                    "rmse_improvement_pct": float(rmse_improvement) if rmse_improvement is not None else None,
+                    "pct_model_better": float(pct_model_better) if pct_model_better is not None else None
                 }
         
         return sea_bin_metrics
@@ -788,14 +880,16 @@ class ModelEvaluator:
             save_path=self.output_dir / 'rmse_model.png',
             title='Model RMSE',
             vmin=0, vmax=vmax_combined,
-            cmap=cmap
+            cmap=cmap,
+            geo_bounds=self.geo_bounds
         )
         plot_spatial_rmse_map(
             lat_grid, lon_grid, mae_model,
             save_path=self.output_dir / 'mae_model.png',
             title='Model MAE',
             vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
-            cmap=cmap
+            cmap=cmap,
+            geo_bounds=self.geo_bounds
         )
         # fig1, ax1 = plt.subplots(figsize=(10, 6))
         # im1 = ax1.pcolormesh(lon_grid, lat_grid, rmse_model, 
@@ -817,14 +911,16 @@ class ModelEvaluator:
                 save_path=self.output_dir / 'rmse_reference.png',
                 title='Reference RMSE',
                 vmin=0, vmax=vmax_combined,
-                cmap=cmap
+                cmap=cmap,
+                geo_bounds=self.geo_bounds
             )
             plot_spatial_rmse_map(
                 lat_grid, lon_grid, mae_baseline,
                 save_path=self.output_dir / 'mae_reference.png',
                 title='Reference MAE',
                 vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
-                cmap=cmap
+                cmap=cmap,
+                geo_bounds=self.geo_bounds
             )
             # ========== PLOT 3: Improvement (separate figure) ==========
             improvement = rmse_baseline - rmse_model
@@ -832,19 +928,25 @@ class ModelEvaluator:
             # Symmetric scale around zero
             imp_abs_max = np.nanpercentile(np.abs(improvement), 98)
             
+            # Use diverging colormap for improvements (red=negative/worse, blue=positive/better)
+            cmap_div = plt.get_cmap("RdBu").copy()
+            cmap_div.set_bad("white")
+            
             plot_spatial_rmse_map(
                 lat_grid, lon_grid, improvement,
                 save_path=self.output_dir / 'rmse_improvement.png',
                 title='RMSE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap
+                cmap=cmap_div,
+                geo_bounds=self.geo_bounds
             )
             plot_spatial_rmse_map(
                 lat_grid, lon_grid, improvement_mae,
                 save_path=self.output_dir / 'mae_improvement.png',
                 title='MAE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap
+                cmap=cmap_div,
+                geo_bounds=self.geo_bounds
             )
     
     def plot_sea_bin_metrics(self, sea_bin_metrics: Dict[str, Dict]):
@@ -908,7 +1010,7 @@ class ModelEvaluator:
         # Create subplots
         fig, axes = plt.subplots(2, 2, figsize=(18, 12))
         fig.suptitle(
-            "Sea-Bin Performance Analysis (Model vs Baseline)",
+            "Sea-Bin Performance Analysis (Model vs Reference)",
             fontsize=16,
             fontweight="bold",
         )
@@ -1470,6 +1572,104 @@ class ModelEvaluator:
         plt.close()
         print(f"Saved error CDF plots to {self.output_dir / 'error_distribution_cdfs.png'}")
     
+    def plot_vhm0_distributions(self):
+        """Plot distributions of ground truth, predicted, and uncorrected VHM0."""
+        print("Creating VHM0 distribution comparison plot...")
+        
+        y_true = np.array(self.plot_samples['y_true'])
+        y_pred = np.array(self.plot_samples['y_pred'])
+        y_uncorrected = np.array(self.plot_samples['y_uncorrected'])
+        
+        _, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        # Use seaborn for smooth KDE plots
+        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
+                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
+                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
+                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        
+        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Density', fontsize=12, fontweight='bold')
+        ax.set_title('VHM0 Distribution Comparison', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 15)
+        
+        # Add statistics text
+        # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
+        #              f"Model Prediction:\n  Mean={np.mean(y_pred):.2f}m, Std={np.std(y_pred):.2f}m\n"
+        #              f"Uncorrected:\n  Mean={np.mean(y_uncorrected):.2f}m, Std={np.std(y_uncorrected):.2f}m")
+        # ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+        #         verticalalignment='top', horizontalalignment='right',
+                # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "vhm0_distributions.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions.png'}")
+
+        _, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        # Use seaborn for smooth KDE plots
+        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
+                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
+                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        
+        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Density', fontsize=12, fontweight='bold')
+        ax.set_title('VHM0 Distribution Comparison (Model vs Reference)', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 15)
+        
+        # Add statistics text
+        # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
+        #              f"Model Prediction:\n  Mean={np.mean(y_pred):.2f}m, Std={np.std(y_pred):.2f}m\n"
+        #              f"Uncorrected:\n  Mean={np.mean(y_uncorrected):.2f}m, Std={np.std(y_uncorrected):.2f}m")
+        # ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+        #         verticalalignment='top', horizontalalignment='right',
+                # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "vhm0_distributions_model_vs_reference.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_model_vs_reference.png'}")
+
+
+        _, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        # Use seaborn for smooth KDE plots
+        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
+                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
+                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        
+        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Density', fontsize=12, fontweight='bold')
+        ax.set_title('VHM0 Distribution Comparison (Reference vs Uncorrected)', fontsize=14, fontweight='bold')
+        ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 15)
+        
+        # Add statistics text
+        # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
+        #              f"Model Prediction:\n  Mean={np.mean(y_pred):.2f}m, Std={np.std(y_pred):.2f}m\n"
+        #              f"Uncorrected:\n  Mean={np.mean(y_uncorrected):.2f}m, Std={np.std(y_uncorrected):.2f}m")
+        # ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+        #         verticalalignment='top', horizontalalignment='right',
+                # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "vhm0_distributions_reference_vs_uncorrected.png",
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_reference_vs_uncorrected.png'}")
+    
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
         print("\n" + "="*80)
@@ -1497,19 +1697,21 @@ class ModelEvaluator:
                 print(f"  RMSE Improvement:     {overall_metrics['rmse_improvement_pct']:.2f}%")
         
         print("\nSea-Bin Metrics:")
-        print(f"{'Bin':<20} {'Count':<10} {'MAE':<10} {'RMSE':<10} {'Improvement':<15} {'Improvement RMSE':<15}")
-        print("-" * 80)
+        print(f"{'Bin':<20} {'Count':<10} {'MAE':<10} {'RMSE':<10} {'MAE Improv':<15} {'RMSE Improv':<15} {'% Better':<12}")
+        print("-" * 102)
         
         for _, metrics in sea_bin_metrics.items():
             if metrics['count'] > 0:
                 improvement_str = f"{metrics['mae_improvement_pct']:>7.2f}%" if metrics.get('mae_improvement_pct') is not None else "N/A"
                 improvement_rmse_str = f"{metrics['rmse_improvement_pct']:>7.2f}%" if metrics.get('rmse_improvement_pct') is not None else "N/A"
+                pct_better_str = f"{metrics['pct_model_better']:>7.2f}%" if metrics.get('pct_model_better') is not None else "N/A"
                 print(f"{metrics['label']:<20} "
                       f"{metrics['count']:<10,} "
                       f"{metrics['mae']:<10.4f} "
                       f"{metrics['rmse']:<10.4f} "
                       f"{improvement_str:>15} "
-                      f"{improvement_rmse_str:>15}")
+                      f"{improvement_rmse_str:>15} "
+                      f"{pct_better_str:>12}")
         
         print("="*80 + "\n")
     
@@ -1535,12 +1737,13 @@ class ModelEvaluator:
         
         # Create plots using samples
         print("Creating plots...")
+        self.plot_vhm0_distributions()
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_rmse_maps()
         self.plot_error_distribution_histograms()
         self.plot_error_boxplots()
-        self.plot_error_violins()
-        self.plot_error_cdfs()
+        # self.plot_error_violins()
+        # self.plot_error_cdfs()
         
         # Print summary
         self.print_summary(overall_metrics, sea_bin_metrics)
@@ -1560,6 +1763,8 @@ def main():
                        help='Configuration file')
     parser.add_argument('--apply-binwise-correction', action='store_true',
                        help='Apply bin-wise bias correction computed from training set')
+    parser.add_argument('--apply-geographic-filtering', action='store_true',
+                       help='Apply geographic filtering to the test set')
     args = parser.parse_args()
     
     config = DNNConfig(args.config)
@@ -1707,6 +1912,28 @@ def main():
     else:
         logger.info("No EMA weights found in checkpoint. Using standard weights.")
 
+    # Create geographic bounds dictionary if filtering is requested
+    geo_bounds = None
+    if args.apply_geographic_filtering:
+        if patch_size is not None:
+            logger.warning("=" * 80)
+            logger.warning("Geographic filtering is NOT supported with patch-based datasets!")
+            logger.warning("Patches don't maintain spatial coordinate information.")
+            logger.warning("Geographic filtering will be DISABLED.")
+            logger.warning("To use geographic filtering, set patch_size to null in config.")
+            logger.warning("=" * 80)
+            geo_bounds = None
+        else:
+            # Iberian Peninsula bounds
+            geo_bounds = {
+                'lat_min': 43.0,
+                'lat_max': 48.0,
+                'lon_min': -8.0,
+                'lon_max': 0.0
+            }
+            logger.info(f"Geographic filtering enabled: lat=[{geo_bounds['lat_min']}, {geo_bounds['lat_max']}], "
+                       f"lon=[{geo_bounds['lon_min']}, {geo_bounds['lon_max']}]")
+
     # Create evaluator and run evaluation
     evaluator = ModelEvaluator(
         model=model,
@@ -1719,7 +1946,8 @@ def main():
         test_files=test_files_parq,
         subsample_step=5,
         apply_binwise_correction_flag=args.apply_binwise_correction,
-        bias_loader=train_loader  # Use train set to compute bin biases
+        bias_loader=train_loader,  # Use train set to compute bin biases
+        geo_bounds=geo_bounds
     )
     
     evaluator.evaluate()
