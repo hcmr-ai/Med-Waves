@@ -391,11 +391,25 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         )
 
     # Pre-compute wave bins for balanced sampling (if using patched dataset)
-    use_balanced_sampling = True  # Re-enable to check VHM0 distribution
+    use_balanced_sampling = True  # Re-enable - filtering works perfectly!
     if patch_size is not None and use_balanced_sampling:
         logger.info("Pre-computing wave bins for balanced sampling...")
         train_dataset.compute_all_bins()
-        val_dataset.compute_all_bins()
+        logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
+        
+        # val_dataset.compute_all_bins()
+        # logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
+        
+        # # Show validation bin distribution too
+        # import numpy as np
+        # val_unique_bins = np.unique(val_dataset.patch_bins)
+        # print(f"Validation bins: {val_unique_bins}")
+        # for bin_id in val_unique_bins:
+        #     count = val_dataset.patch_bins.count(bin_id)
+        #     print(f"  Val Bin {bin_id}: {count} samples")
+        
+        # if len(val_dataset) == 0:
+        #     raise ValueError("Validation dataset is empty after filtering! Lower min_valid_pixels threshold.")
 
     # # Create data loaders
     train_loader = DataLoader(
@@ -419,6 +433,9 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         prefetch_factor=None,
         sampler=None
     )
+    
+    logger.info(f"Train loader: {len(train_loader)} batches")
+    logger.info(f"Val loader: {len(val_loader)} batches")
 
     return train_loader, val_loader
 
@@ -453,6 +470,7 @@ def create_callbacks(config: DNNConfig) -> list:
         callbacks.append(s3_sync_callback)
 
     # Early stopping callback
+    logger.info("Adding Early Stopping callback")
     early_stopping = EarlyStopping(
         monitor=training_config["monitor"],
         patience=training_config["early_stopping_patience"],
@@ -461,11 +479,13 @@ def create_callbacks(config: DNNConfig) -> list:
     )
     callbacks.append(early_stopping)
 
+    logger.info("Adding Learning Rate Monitor callback")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks.append(lr_monitor)
 
     # Add Comet visualization callback if using Comet
     if config.config["logging"]["use_comet"]:
+        logger.info("Adding Comet visualization callback")
         comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
         callbacks.append(comet_callback)
     
@@ -690,10 +710,17 @@ def main():
 
     # Train model
     logger.info("Starting training...")
+    logger.info(f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches")
+    
+    # Only pass ckpt_path if we actually have a checkpoint to resume from
     if config.config["training"]["finetune_model"]:
-        trainer.fit(model, train_loader, val_loader)
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    elif resume_path is not None:
+        logger.info(f"Resuming from checkpoint: {resume_path}")
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_path)
     else:
-        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_path)
+        logger.info("Training from scratch (no checkpoint)")
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     logger.info("Training completed!")
 

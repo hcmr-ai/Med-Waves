@@ -16,7 +16,9 @@ from src.commons.losses import (
     masked_mse_loss,
     masked_smooth_l1_loss,
     masked_multi_bin_weighted_mse,
-    masked_multi_bin_weighted_smooth_l1
+    masked_multi_bin_weighted_smooth_l1,
+    pixel_switch_loss,
+    pixel_switch_loss_stable
 )
 
 
@@ -485,10 +487,11 @@ class WaveBiasCorrector(pl.LightningModule):
         weight_decay=1e-4,
         model_type="nick",  # Options: "nick", "geo", "enhanced"
         upsample_mode="nearest",
+        pixel_switch_threshold_m=0.45,
     ):
         super().__init__()
         self.save_hyperparameters()
-        
+        self.pixel_switch_threshold_m = pixel_switch_threshold_m
         # Select model architecture
         if model_type == "geo":
             self.model = BU_Net_Geo(
@@ -525,11 +528,13 @@ class WaveBiasCorrector(pl.LightningModule):
             return masked_smooth_l1_loss(y_pred, y_true, mask, self.criterion)
         elif self.loss_type == "multi_bin_weighted_smooth_l1":
             return masked_multi_bin_weighted_smooth_l1(y_pred, y_true, mask, vhm0_for_reconstruction, self.criterion)
+        elif self.loss_type == "pixel_switch_mse":
+            return pixel_switch_loss_stable(y_pred, y_true, mask, threshold_m=self.pixel_switch_threshold_m)
         else:
             return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
 
     def training_step(self, batch, batch_idx):
-        X, y, mask, vhm0_for_reconstruction = batch
+        X, y, mask, vhm0_for_reconstruction, _ = batch  # _ is the bin_id we don't need
 
         y_pred = self(X)
         loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
@@ -552,6 +557,10 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("train_mae", mae, on_step=True, on_epoch=True)
             self.log("train_mse", mse, on_step=True, on_epoch=True)
             self.log("train_rmse", rmse, on_step=True, on_epoch=True)
+            self.log("train_error_min", (y_pred - y)[mask].min(), on_step=True, on_epoch=True)
+            self.log("train_error_max", (y_pred - y)[mask].max(), on_step=True, on_epoch=True)
+            self.log("train_error_mean", (y_pred - y)[mask].mean(), on_step=True, on_epoch=True)
+            self.log("train_error_p95", torch.quantile(torch.abs(y_pred - y)[mask], 0.95), on_step=True, on_epoch=True)
 
             # Log data statistics
             self.log("train_y_mean", y[mask].mean(), on_step=True, on_epoch=True)
@@ -577,11 +586,25 @@ class WaveBiasCorrector(pl.LightningModule):
 
         return loss
 
+    def on_validation_epoch_start(self):
+        print(f"\n>>> ON_VALIDATION_EPOCH_START CALLED - Epoch {self.current_epoch}")
+    
     def validation_step(self, batch, batch_idx):
-        X, y, mask, vhm0_for_reconstruction = batch
+        if batch_idx == 0:
+            print(f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}")
+        
+        try:
+            X, y, mask, vhm0_for_reconstruction, _ = batch  # _ is the bin_id
+            if batch_idx == 0:
+                print(f"Batch unpacked: X={X.shape}, y={y.shape}, mask={mask.shape}")
 
-        y_pred = self(X)
-        loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+            y_pred = self(X)
+            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+        except Exception as e:
+            print(f"\n!!! ERROR IN VALIDATION_STEP: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
         # Enhanced validation metrics
         with torch.no_grad():
@@ -606,6 +629,10 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("val_mae", mae, on_step=log_on_step, on_epoch=True)
             self.log("val_mse", mse, on_step=log_on_step, on_epoch=True)
             self.log("val_rmse", rmse, on_step=log_on_step, on_epoch=True)
+            self.log("val_error_min", (y_pred - y)[mask].min(), on_step=log_on_step, on_epoch=True)
+            self.log("val_error_max", (y_pred - y)[mask].max(), on_step=log_on_step, on_epoch=True)
+            self.log("val_error_mean", (y_pred - y)[mask].mean(), on_step=log_on_step, on_epoch=True)
+            self.log("val_error_p95", torch.quantile(torch.abs(y_pred - y)[mask], 0.95), on_step=log_on_step, on_epoch=True)
 
             # Log validation data statistics
             self.log("val_y_mean", y[mask].mean(), on_epoch=True)
@@ -625,7 +652,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
                 self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "val_baseline")
 
-        return loss
+        return {"loss": loss, "pred": y_pred}
 
     def on_train_start(self) -> None:
         """Log scheduler info and other hyperparameters when training starts."""

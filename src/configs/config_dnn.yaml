@@ -10,7 +10,7 @@ data:
   val_months: [1, 4, 6, 7, 9, 10]
   test_year: [2023]
   test_months: [2, 5, 8, 11]
-  patch_size: null #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
+  patch_size: [64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null  # Data already subsampled in files, no additional runtime subsampling
@@ -37,8 +37,8 @@ data:
 model:
   model_type: "enhanced" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features)
   in_channels: 15 # Number of input channels (all features except excluded)
-  learning_rate: 1e-4  # 1e-3
-  loss_type: "multi_bin_weighted_smooth_l1" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1"
+  learning_rate: 1e-3 # 1e-3
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
@@ -72,7 +72,7 @@ training:
   devices: 1
   precision: "32" # Full precision training (16 or 32)
   log_every_n_steps: 20
-  early_stopping_patience: 30
+  early_stopping_patience: 20
   save_top_k: 25
   monitor: "val_loss"
   mode: "min"
@@ -83,19 +83,25 @@ training:
   prefetch_factor: 1
   val_check_interval: null
   use_swa: false
-  use_ema: true
+  use_ema: false
+  finetune_model: false
+  freeze_encoder_layers: false
+  pixel_switch_threshold_m: 0.45
+  gradient_clip_val: null
+  gradient_clip_algorithm: "norm"
+  aggressive_freeze: false
 # Checkpoint configuration
 checkpoint: 
-  resume_from_checkpoint: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual/epoch=03-val_loss=0.04.ckpt" # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual" # S3 backup for spot instances
+  resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # S3 backup for spot instances
   save_last: true
-  sync_frequency: 5 # Sync to S3 every N epochs
+  sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
   log_dir: "/opt/dlami/nvme/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_weighted_smooth_l1_64_enhanced_no_residual_continue"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
   comet_notes: "DNN training for wave height correction using U-Net architecture"
