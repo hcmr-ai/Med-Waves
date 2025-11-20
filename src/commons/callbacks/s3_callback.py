@@ -1,7 +1,7 @@
 import logging
 
 import s3fs
-from pytorch_lightning.callbacks import Callback
+from lightning.pytorch.callbacks import Callback
 
 logger = logging.getLogger(__name__)
 

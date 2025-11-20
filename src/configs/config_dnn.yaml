@@ -5,15 +5,15 @@
 data:
   data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.pt"
-  train_year: [2021, 2022]
+  train_year: [2017, 2018, 2019, 2020, 2021, 2022]
   val_year: [2023]
   val_months: [1, 4, 6, 7, 9, 10]
   test_year: [2023]
   test_months: [2, 5, 8, 11]
-  patch_size: null #[256, 256] # Random crop size for training (256x256 for proper U-Net bottleneck)
+  patch_size: [64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
-  subsample_step: null
+  subsample_step: null  # Data already subsampled in files, no additional runtime subsampling
   use_cache: false
 
   # Data preprocessing
@@ -35,32 +35,36 @@ data:
 
 # Model configuration
 model:
+  model_type: "enhanced" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features)
   in_channels: 15 # Number of input channels (all features except excluded)
-  learning_rate: 1e-3  # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse"
-  filters: [32, 64]
+  learning_rate: 1e-3 # 1e-3
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse"
+  filters: [64, 128, 256]
   dropout: 0
-  add_vhm0_residual: true
+  add_vhm0_residual: false
   vhm0_channel_index: 0 
-
+  weight_decay: 1e-4 #1e-4
+  upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
   # Learning rate scheduler configuration
   lr_scheduler:
-    type: "ReduceLROnPlateau" # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none"
+    type: ReduceLROnPlateau # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts"
     monitor: "val_loss" # Metric to monitor for ReduceLROnPlateau
     mode: "min" # "min" for loss, "max" for accuracy
     factor: 0.5 # Factor to reduce LR by
-    patience: 10 # Epochs to wait before reducing LR
+    patience: 5 # Epochs to wait before reducing LR
     min_lr: 1e-7 # Minimum learning rate
     # verbose: true # Print LR changes
 
     # Additional scheduler parameters
     T_max: 50 # For CosineAnnealingLR: max epochs
+    eta_min: 1e-6
+    warmup_steps: 0.1 # For CosineAnnealingLR: warmup steps
     step_size: 10 # For StepLR: epochs between LR reductions
     gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
 
 # Training configuration
 training:
-  batch_size: 48
+  batch_size: 64
   max_epochs: 100
   num_workers: 8
   pin_memory: true
@@ -68,8 +72,8 @@ training:
   devices: 1
   precision: "32" # Full precision training (16 or 32)
   log_every_n_steps: 20
-  early_stopping_patience: 40
-  save_top_k: 15
+  early_stopping_patience: 20
+  save_top_k: 25
   monitor: "val_loss"
   mode: "min"
   fast_dev_run: false
@@ -78,18 +82,26 @@ training:
   benchmark: false
   prefetch_factor: 1
   val_check_interval: null
+  use_swa: false
+  use_ema: false
+  finetune_model: false
+  freeze_encoder_layers: false
+  pixel_switch_threshold_m: 0.45
+  gradient_clip_val: null
+  gradient_clip_algorithm: "norm"
+  aggressive_freeze: false
 # Checkpoint configuration
-checkpoint:
-  resume_from_checkpoint: null # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_small_filters_normalize_target_val_test_23_no_dropout_no_early_stopping_nick_48" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_small_filters_normalize_target_100_val_test_23_no_dropout_no_early_stopping_nick_48" # S3 backup for spot instances
+checkpoint: 
+  resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # S3 backup for spot instances
   save_last: true
-  sync_frequency: 5 # Sync to S3 every N epochs
+  sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/preprocessed/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_small_filters_normalize_target_100_val_test_23_no_dropout_no_early_stopping_nick_128"
+  log_dir: "/opt/dlami/nvme/logs"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced"
   use_comet: true
   comet_tags: ["wave_height", "bu_net", "bias_correction"]
   comet_notes: "DNN training for wave height correction using U-Net architecture"

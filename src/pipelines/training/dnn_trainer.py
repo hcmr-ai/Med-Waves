@@ -28,24 +28,31 @@ def setup_logging(level=logging.INFO):
 
 logger = setup_logging()
 
-import pytorch_lightning as lightning
+# import pytorch_lightning as lightning
 import s3fs
 import torch
 from classifiers.bu_net import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
+from commons.callbacks.exponential_moving_average import EMAWeightAveraging
+from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
+from commons.callbacks.freeze_layers import FreezeEncoderCallback
 from commons.dataloaders import CachedWaveDataset
+from commons.datasets.samplers import WaveBinBalancedSampler
+from commons.datasets.grid_patched_dataset import GridPatchWaveDataset
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import (
+import lightning
+from lightning import Trainer
+from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
+    StochasticWeightAveraging
 )
-from pytorch_lightning.loggers import CometLogger, TensorBoardLogger
-from torch.utils.data import DataLoader
 
+from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
+from torch.utils.data import DataLoader
 
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
@@ -129,6 +136,7 @@ class DNNConfig:
                 "learning_rate": 1e-4,
                 "loss_type": "weighted_mse",
                 "filters": [64, 128, 256, 512, 1024],
+                "weight_decay": 0,
             },
             "training": {
                 "batch_size": 8,
@@ -328,44 +336,91 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    train_dataset = CachedWaveDataset(
-        train_files,
-        # index_map=train_index_map,
-        # fs=fs,
-        patch_size=patch_size,
-        excluded_columns=excluded_columns,
-        target_column=target_column,
-        predict_bias=predict_bias,
-        subsample_step=subsample_step,
-        normalizer=normalizer,
-        enable_profiler=True,
-        use_cache=data_config.get("use_cache", False),
-        normalize_target=data_config.get("normalize_target")
-    )
+    if data_config.get("patch_size", None) is not None:
+        train_dataset = GridPatchWaveDataset(
+            train_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False),
+            min_valid_pixels=0.3  # Only keep patches with >30% sea pixels
+        )
+    else:
+        train_dataset = CachedWaveDataset(
+            train_files,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=True,
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False)
+        )
+    
+    if data_config.get("patch_size", None) is not None:
+        val_dataset = GridPatchWaveDataset(
+            val_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            use_cache=False,
+            normalize_target=data_config.get("normalize_target", False),
+            min_valid_pixels=0.3  # Only keep patches with >30% sea pixels
+        )
+    else:
+        val_dataset = CachedWaveDataset(
+            val_files,
+            # fs=fs,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_column=target_column,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=True,
+            use_cache=False,
+            normalize_target=data_config.get("normalize_target", False)
+        )
 
-    val_dataset = CachedWaveDataset(
-        val_files,
-        # fs=fs,
-        patch_size=patch_size,
-        excluded_columns=excluded_columns,
-        target_column=target_column,
-        predict_bias=predict_bias,
-        subsample_step=subsample_step,
-        normalizer=normalizer,
-        enable_profiler=True,
-        use_cache=False,
-        normalize_target=data_config.get("normalize_target", False)
-    )
+    # Pre-compute wave bins for balanced sampling (if using patched dataset)
+    use_balanced_sampling = True  # Re-enable - filtering works perfectly!
+    if patch_size is not None and use_balanced_sampling:
+        logger.info("Pre-computing wave bins for balanced sampling...")
+        train_dataset.compute_all_bins()
+        logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
+        
+        # val_dataset.compute_all_bins()
+        # logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
+        
+        # # Show validation bin distribution too
+        # import numpy as np
+        # val_unique_bins = np.unique(val_dataset.patch_bins)
+        # print(f"Validation bins: {val_unique_bins}")
+        # for bin_id in val_unique_bins:
+        #     count = val_dataset.patch_bins.count(bin_id)
+        #     print(f"  Val Bin {bin_id}: {count} samples")
+        
+        # if len(val_dataset) == 0:
+        #     raise ValueError("Validation dataset is empty after filtering! Lower min_valid_pixels threshold.")
 
-    # Create data loaders
+    # # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config["batch_size"],
-        shuffle=True,
+        shuffle=True if patch_size is None or not use_balanced_sampling else False,  # Don't shuffle when using sampler
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=training_config["prefetch_factor"],
+        sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None
     )
 
     val_loader = DataLoader(
@@ -375,11 +430,14 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
-        prefetch_factor=training_config["prefetch_factor"]
+        prefetch_factor=None,
+        sampler=None
     )
+    
+    logger.info(f"Train loader: {len(train_loader)} batches")
+    logger.info(f"Val loader: {len(val_loader)} batches")
 
     return train_loader, val_loader
-
 
 def create_callbacks(config: DNNConfig) -> list:
     """Create training callbacks"""
@@ -389,6 +447,7 @@ def create_callbacks(config: DNNConfig) -> list:
     training_config = config.config["training"]
 
     # Model checkpoint callback
+    logger.info("Adding checkpoint callback")
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_config["checkpoint_dir"],
         filename="{epoch:02d}-{val_loss:.2f}",
@@ -396,11 +455,13 @@ def create_callbacks(config: DNNConfig) -> list:
         mode=training_config["mode"],
         save_top_k=training_config["save_top_k"],
         save_last=checkpoint_config["save_last"],
+        save_on_train_epoch_end=False,  # Only save when validation runs
     )
     callbacks.append(checkpoint_callback)
 
     # Add S3 sync callback for spot instances
     if checkpoint_config.get("s3_sync_dir"):
+        logger.info("Adding S3 sync callback")
         s3_sync_callback = S3CheckpointSyncCallback(
             s3_dir=checkpoint_config["s3_sync_dir"],
             local_dir=checkpoint_config["checkpoint_dir"],
@@ -409,20 +470,51 @@ def create_callbacks(config: DNNConfig) -> list:
         callbacks.append(s3_sync_callback)
 
     # Early stopping callback
+    logger.info("Adding Early Stopping callback")
     early_stopping = EarlyStopping(
         monitor=training_config["monitor"],
         patience=training_config["early_stopping_patience"],
         mode=training_config["mode"],
+        check_on_train_epoch_end=False,  # Only check when validation runs
     )
     callbacks.append(early_stopping)
 
+    logger.info("Adding Learning Rate Monitor callback")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     callbacks.append(lr_monitor)
 
     # Add Comet visualization callback if using Comet
     if config.config["logging"]["use_comet"]:
+        logger.info("Adding Comet visualization callback")
         comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
         callbacks.append(comet_callback)
+    
+    if config.config["training"]["use_swa"]:
+        logger.info("Adding SWA callback")
+        swa_callback = StochasticWeightAveraging(
+            swa_lrs=1e-3,       # Same LR or lower than initial LR
+            annealing_epochs=10,
+            swa_epoch_start=5        # When to start SWA averaging
+        )
+        callbacks.append(swa_callback)
+    
+    if config.config["training"]["use_ema"]:
+        logger.info("Adding EMA callback")
+        ema_callback = EMAWeightAveraging(
+            decay=0.999,          # Higher decay => slower updates, smoother EMA
+            start_step=100,
+        )
+        callbacks.append(ema_callback)
+    
+    if config.config["model"]["loss_type"] == "pixel_switch_mse":
+        logger.info("Adding Pixel Switch Threshold callback")
+        pixel_switch_threshold_callback = PixelSwitchThresholdCallback(quantile=0.90)
+        callbacks.append(pixel_switch_threshold_callback)
+
+    if config.config["training"]["freeze_encoder_layers"]:
+        logger.info("Adding Freeze Encoder Layers callback")
+        freeze_encoder_callback = FreezeEncoderCallback(aggressive_freeze=config.config["training"]["aggressive_freeze"])
+        callbacks.append(freeze_encoder_callback)
 
     return callbacks
 
@@ -477,13 +569,6 @@ def main():
 
     train_loader, val_loader = create_data_loaders(config, fs)
 
-    # Test one batch
-    # logger.info("Testing data loading...")
-    # for batch in train_loader:
-    #     X, y, mask = batch
-    #     logger.info(f"X shape: {X.shape}, y shape: {y.shape}, mask shape: {mask.shape}")
-    #     break
-
     # Create model
     model_config = config.config["model"]
     logger.info(f"Creating model with {model_config['in_channels']} input channels")
@@ -504,17 +589,47 @@ def main():
         logger.info("LR Scheduler: None")
 
     local_predict_bias = config.config.get("data", {}).get("predict_bias", False)
-    model = WaveBiasCorrector(
-        in_channels=model_config["in_channels"],
-        lr=float(model_config["learning_rate"]),
-        loss_type=model_config["loss_type"],
-        lr_scheduler_config=model_config.get("lr_scheduler", {}),
-        predict_bias=local_predict_bias,
-        filters=model_config["filters"],
-        dropout=model_config.get("dropout", 0.2),
-        add_vhm0_residual=model_config.get("add_vhm0_residual", False),
-        vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
-    )
+
+    # Handle checkpoint resuming (local or S3)
+    resume_path = config.config["checkpoint"]["resume_from_checkpoint"]
+    if resume_path and resume_path.startswith("s3://"):
+        # Download S3 checkpoint to local first
+        resume_path = download_s3_checkpoint(
+            resume_path, config.config["checkpoint"]["checkpoint_dir"]
+        )
+    logger.info(f"Resume path: {resume_path}")
+
+    finetune_model = config.config["training"]["finetune_model"]
+    if finetune_model:
+        logger.info("Finetuning model")
+        model = WaveBiasCorrector.load_from_checkpoint(
+            resume_path,
+            loss_type=model_config["loss_type"],
+            lr=float(model_config["learning_rate"]),
+            lr_scheduler_config=model_config.get("lr_scheduler", {}),
+            dropout=model_config.get("dropout", 0.2),
+            add_vhm0_residual=model_config.get("add_vhm0_residual", False),
+            vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
+            weight_decay=float(model_config.get("weight_decay", 0)),
+            pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+        )
+    else:
+        logger.info("Training new model")
+        model = WaveBiasCorrector(
+            in_channels=model_config["in_channels"],
+            lr=float(model_config["learning_rate"]),
+            loss_type=model_config["loss_type"],
+            lr_scheduler_config=model_config.get("lr_scheduler", {}),
+            predict_bias=local_predict_bias,
+            filters=model_config["filters"],
+            dropout=model_config.get("dropout", 0.2),
+            add_vhm0_residual=model_config.get("add_vhm0_residual", False),
+            vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
+            weight_decay=float(model_config.get("weight_decay", 0)),
+            model_type=model_config.get("model_type", "nick"),  # Options: "nick", "geo", "enhanced"
+            upsample_mode=model_config.get("upsample_mode", "nearest"),
+            pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+        )
 
     # Create callbacks
     callbacks = create_callbacks(config)
@@ -586,24 +701,26 @@ def main():
         logger=loggers,
         fast_dev_run=training_config["fast_dev_run"],
         check_val_every_n_epoch=training_config["check_val_every_n_epoch"],
-        gradient_clip_val=1.0,  # Add gradient clipping
-        gradient_clip_algorithm="norm",
+        gradient_clip_val=training_config["gradient_clip_val"],  # Add gradient clipping
+        gradient_clip_algorithm=training_config["gradient_clip_algorithm"],
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
         benchmark=training_config["benchmark"],
         val_check_interval=training_config["val_check_interval"],
     )
 
-    # Handle checkpoint resuming (local or S3)
-    resume_path = config.config["checkpoint"]["resume_from_checkpoint"]
-    if resume_path and resume_path.startswith("s3://"):
-        # Download S3 checkpoint to local first
-        resume_path = download_s3_checkpoint(
-            resume_path, config.config["checkpoint"]["checkpoint_dir"]
-        )
-
     # Train model
     logger.info("Starting training...")
-    trainer.fit(model, train_loader, val_loader, ckpt_path=resume_path)
+    logger.info(f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches")
+    
+    # Only pass ckpt_path if we actually have a checkpoint to resume from
+    if config.config["training"]["finetune_model"]:
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    elif resume_path is not None:
+        logger.info(f"Resuming from checkpoint: {resume_path}")
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=resume_path)
+    else:
+        logger.info("Training from scratch (no checkpoint)")
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
     logger.info("Training completed!")
 

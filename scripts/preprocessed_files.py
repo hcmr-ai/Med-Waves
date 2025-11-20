@@ -3,16 +3,24 @@ import glob
 import torch
 import pyarrow.parquet as pq
 import numpy as np
+import fsspec
 
 # 📂 Input/output paths
-INPUT_DIR = "/mnt/ebs/year=2021"   # folder with WAVEAN*.parquet
-OUTPUT_DIR = "/opt/dlami/nvme/preprocessed_subsampled_step_5"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+INPUT_DIR = "s3://medwav-dev-data/parquet/hourly/year=2020/"   # folder with WAVEAN*.parquet
+OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_subsampled_step_5/"
+# Create directory only for local output paths
+if not OUTPUT_DIR.startswith("s3://"):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 🛠️ Helper to load parquet into dense tensor (T,H,W,C)
-def load_parquet_as_tensor(path, excluded_columns=None, subsample_step=5):
+def load_parquet_as_tensor(path, excluded_columns=None, subsample_step=5, is_s3_input=False):
     excluded_columns = excluded_columns or []
-    table = pq.read_table(path)
+    if is_s3_input:
+        # Open the S3 object to a real file-like handle for pyarrow
+        with fsspec.open(path, "rb") as fh:
+            table = pq.read_table(fh)
+    else:
+        table = pq.read_table(path)
 
     column_names = [field.name for field in table.schema]
     feature_cols = [col for col in column_names if col not in excluded_columns]
@@ -52,12 +60,26 @@ def process_file(path):
     out_path = os.path.join(OUTPUT_DIR, base)
     if os.path.exists(out_path):
         return f"Skipping {base}"
-    tensor, feature_cols = load_parquet_as_tensor(path)
-    torch.save({"tensor": tensor, "feature_cols": feature_cols}, out_path)
+    print(f"Processing {path}")
+    is_s3_input = path.startswith("s3://")
+    is_s3_output = out_path.startswith("s3://")
+    tensor, feature_cols = load_parquet_as_tensor(path, excluded_columns=None, subsample_step=5, is_s3_input=is_s3_input)
+    if is_s3_output:
+        with fsspec.open(out_path, "wb") as f:
+            torch.save({"tensor": tensor, "feature_cols": feature_cols}, f)
+    else:
+        torch.save({"tensor": tensor, "feature_cols": feature_cols}, out_path)
+    # torch.save({"tensor": tensor, "feature_cols": feature_cols}, out_path)
     return f"Done {base}"
 
 if __name__ == "__main__":
-    files = sorted(glob.glob(os.path.join(INPUT_DIR, "WAVEAN2021*.parquet")))
+    if INPUT_DIR.startswith("s3://"):
+        fs = fsspec.filesystem("s3")
+        files = sorted(fs.glob(INPUT_DIR.rstrip("/") + "/WAVEAN20200101*.parquet"))
+        # Ensure S3 scheme; some fsspec/S3FS methods may return paths without scheme
+        files = [p if p.startswith("s3://") else f"s3://{p}" for p in files]
+    else:
+        files = sorted(glob.glob(os.path.join(INPUT_DIR, "WAVEAN2021*.parquet")))
     with Pool(processes=cpu_count()//2) as pool:  # half CPU cores
         for msg in pool.imap_unordered(process_file, files):
             print(msg)
