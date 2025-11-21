@@ -937,7 +937,7 @@ class ModelEvaluator:
                 save_path=self.output_dir / 'rmse_improvement.png',
                 title='RMSE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap_div,
+                cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
             plot_spatial_rmse_map(
@@ -945,9 +945,109 @@ class ModelEvaluator:
                 save_path=self.output_dir / 'mae_improvement.png',
                 title='MAE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap_div,
+                cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
+    
+    def plot_model_better_percentage(self, sea_bin_metrics: Dict[str, Dict]):
+        """Plot percentage of samples where model is better than reference for each bin."""
+        print("Creating model better percentage plot...")
+        
+        # Prepare data
+        bin_labels = []
+        pct_better = []
+        counts = []
+        
+        # Sort bins by their min value
+        sorted_bins = sorted(self.sea_bins, key=lambda x: x["min"])
+        
+        for bin_config in sorted_bins:
+            bin_name = bin_config["name"]
+            if bin_name not in sea_bin_metrics:
+                continue
+            
+            metrics = sea_bin_metrics[bin_name]
+            if metrics.get('count', 0) == 0:
+                continue
+            
+            bin_labels.append(metrics.get('label', bin_config['label']))
+            pct_better.append(metrics.get('pct_model_better', 0))
+            counts.append(metrics.get('count', 0))
+        
+        if not bin_labels:
+            logger.warning("No data for model better percentage plot")
+            return
+        
+        # Create figure
+        _, ax = plt.subplots(figsize=(14, 8))
+        
+        # Color bars based on threshold (green if >50%, orange if <50%)
+        colors = ['#5cb85c' if pct >= 50 else '#f0ad4e' for pct in pct_better]
+        
+        # Create bars
+        _ = ax.bar(range(len(bin_labels)), pct_better, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+        
+        # Add 50% threshold line
+        ax.axhline(y=50, color='black', linestyle='--', linewidth=2, label='50% threshold', alpha=0.7)
+        
+        # Add value labels on bars
+        for i, (pct, count) in enumerate(zip(pct_better, counts)):
+            # Label with percentage and count
+            label_text = f'{pct:.1f}%\n(n={count:,})'
+            
+            # Position label above bar
+            y_pos = pct + 2
+            
+            ax.text(i, y_pos, label_text, ha='center', va='bottom', 
+                   fontsize=9, fontweight='bold')
+        
+        # Highlight overall statistics with boxes at the top
+        # Calculate overall percentage across all bins
+        total_better = 0
+        for bin_config in sorted_bins:
+            bin_name = bin_config["name"]
+            if bin_name in sea_bin_metrics and sea_bin_metrics[bin_name].get('count', 0) > 0:
+                total_better += sea_bin_metrics[bin_name].get('count_model_better', 0)
+        
+        total_count = sum(counts)
+        overall_pct = (total_better / total_count * 100) if total_count > 0 else 0
+        
+        # Find bins with highest and lowest performance
+        max_idx = pct_better.index(max(pct_better))
+        min_idx = pct_better.index(min(pct_better))
+        
+        # Add text boxes for best and worst performing bins
+        textstr = f'Best: {bin_labels[max_idx]}\n{pct_better[max_idx]:.1f}%'
+        props_best = dict(boxstyle='round', facecolor='#5cb85c', alpha=0.8, edgecolor='black', linewidth=2)
+        ax.text(0.12, 0.95, textstr, transform=ax.transAxes, fontsize=14,
+               verticalalignment='top', horizontalalignment='center', bbox=props_best, fontweight='bold')
+        
+        textstr_worst = f'Worst: {bin_labels[min_idx]}\n{pct_better[min_idx]:.1f}%'
+        props_worst = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
+        ax.text(0.88, 0.95, textstr_worst, transform=ax.transAxes, fontsize=14,
+               verticalalignment='top', horizontalalignment='center', bbox=props_worst, fontweight='bold')
+        
+        # Formatting
+        ax.set_title('Model Better Than Reference (% of Samples)', 
+                    fontsize=16, fontweight='bold', pad=20)
+        ax.set_xlabel('Wave Height Bin', fontsize=13, fontweight='bold')
+        ax.set_ylabel('% of Samples Where |Model Error| < |Reference Error|', 
+                     fontsize=13, fontweight='bold')
+        ax.set_xticks(range(len(bin_labels)))
+        ax.set_xticklabels(bin_labels, rotation=45, ha='right', fontsize=10)
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.legend(fontsize=11, loc='upper left')
+        
+        # Add overall percentage as subtitle
+        ax.text(0.5, 1.02, f'Overall: {overall_pct:.1f}% of samples show improvement',
+               transform=ax.transAxes, ha='center', fontsize=12, style='italic')
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "model_better_percentage.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved model better percentage plot to {self.output_dir / 'model_better_percentage.png'}")
     
     def plot_sea_bin_metrics(self, sea_bin_metrics: Dict[str, Dict]):
         """Create sea-bin performance metrics plot with baseline comparison."""
@@ -1737,9 +1837,10 @@ class ModelEvaluator:
         
         # Create plots using samples
         print("Creating plots...")
-        self.plot_vhm0_distributions()
         self.plot_sea_bin_metrics(sea_bin_metrics)
+        self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_vhm0_distributions()
         self.plot_error_distribution_histograms()
         self.plot_error_boxplots()
         # self.plot_error_violins()

@@ -347,7 +347,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=0.3  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
         )
     else:
         train_dataset = CachedWaveDataset(
@@ -373,7 +373,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             use_cache=False,
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=0.3  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
         )
     else:
         val_dataset = CachedWaveDataset(
@@ -390,28 +390,28 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalize_target=data_config.get("normalize_target", False)
         )
 
-    # Pre-compute wave bins for balanced sampling (if using patched dataset)
-    use_balanced_sampling = True  # Re-enable - filtering works perfectly!
-    if patch_size is not None and use_balanced_sampling:
-        logger.info("Pre-computing wave bins for balanced sampling...")
+    # Pre-compute wave bins and filter patches (if using patched dataset)
+    use_balanced_sampling = data_config.get("use_balanced_sampling", False)  # Set to False for uniform random sampling
+    
+    if patch_size is not None:
+        # ALWAYS compute bins to filter out invalid patches (regardless of balanced sampling)
+        logger.info("Computing wave bins and filtering invalid patches...")
         train_dataset.compute_all_bins()
         logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
         
-        # val_dataset.compute_all_bins()
-        # logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
+        # Also filter validation dataset
+        val_dataset.compute_all_bins()
+        logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
         
-        # # Show validation bin distribution too
-        # import numpy as np
-        # val_unique_bins = np.unique(val_dataset.patch_bins)
-        # print(f"Validation bins: {val_unique_bins}")
-        # for bin_id in val_unique_bins:
-        #     count = val_dataset.patch_bins.count(bin_id)
-        #     print(f"  Val Bin {bin_id}: {count} samples")
+        if len(val_dataset) == 0:
+            raise ValueError("Validation dataset is empty after filtering! Check val_year/val_months or lower min_valid_pixels threshold.")
         
-        # if len(val_dataset) == 0:
-        #     raise ValueError("Validation dataset is empty after filtering! Lower min_valid_pixels threshold.")
+        if use_balanced_sampling:
+            logger.info("Using balanced sampling (equal samples per wave height bin)")
+        else:
+            logger.info("Using uniform random sampling (shuffle=True, no sampler)")
 
-    # # Create data loaders
+    # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=training_config["batch_size"],

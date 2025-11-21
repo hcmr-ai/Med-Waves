@@ -7,10 +7,12 @@ data:
   file_pattern: "WAVEAN*.pt"
   train_year: [2017, 2018, 2019, 2020, 2021, 2022]
   val_year: [2023]
-  val_months: [1, 4, 6, 7, 9, 10]
+  val_months: [2, 5, 8, 11] # [1, 4, 6, 7, 9, 10]
   test_year: [2023]
-  test_months: [2, 5, 8, 11]
-  patch_size: [64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
+  test_months: [1, 4, 6, 7, 9, 10] # [2, 5, 8, 11]
+  patch_size: null #[64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
+  min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
+  use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null  # Data already subsampled in files, no additional runtime subsampling
@@ -78,10 +80,10 @@ training:
   mode: "min"
   fast_dev_run: false
   check_val_every_n_epoch: 1
-  num_sanity_val_steps: 0
+  num_sanity_val_steps: 2
   benchmark: false
   prefetch_factor: 1
-  val_check_interval: null
+  val_check_interval: 350
   use_swa: false
   use_ema: false
   finetune_model: false
@@ -92,7 +94,7 @@ training:
   aggressive_freeze: false
 # Checkpoint configuration
 checkpoint: 
-  resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  resume_from_checkpoint: /opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced/epoch=21-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
   checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # Local directory for fast access
   s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced" # S3 backup for spot instances
   save_last: true
