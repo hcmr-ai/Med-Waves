@@ -31,7 +31,7 @@ logger = setup_logging()
 # import pytorch_lightning as lightning
 import s3fs
 import torch
-from classifiers.bu_net import WaveBiasCorrector
+from classifiers.lightning_trainer import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback

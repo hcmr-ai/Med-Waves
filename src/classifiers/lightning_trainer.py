@@ -7,13 +7,13 @@ import torch
 import torch.optim as optim
 from transformers import get_cosine_schedule_with_warmup
 
-from src.classifiers.networks.bunet import (
+from classifiers.networks.bunet import (
     BU_Net_Geo,
     BU_Net_Geo_Nick,
     BU_Net_Geo_Nick_Enhanced,
 )
-from src.classifiers.networks.swin_unet import SwinUNet
-from src.classifiers.networks.trans_unet import TransUNetGeo
+from classifiers.networks.swin_unet import SwinUNet
+from classifiers.networks.trans_unet import TransUNetGeo
 
 # Add src to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -546,7 +546,7 @@ class WaveBiasCorrector(pl.LightningModule):
             return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
 
     def training_step(self, batch, batch_idx):
-        X, y, mask, vhm0_for_reconstruction, _ = batch  # _ is the bin_id we don't need
+        X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id we don't need
 
         y_pred = self(X)
         loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
@@ -606,7 +606,7 @@ class WaveBiasCorrector(pl.LightningModule):
             print(f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}")
 
         try:
-            X, y, mask, vhm0_for_reconstruction, _ = batch  # _ is the bin_id
+            X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id
             if batch_idx == 0:
                 print(f"Batch unpacked: X={X.shape}, y={y.shape}, mask={mask.shape}")
 
@@ -819,6 +819,33 @@ class WaveBiasCorrector(pl.LightningModule):
                     "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
                     "frequency": 1,
                 }}
+        elif scheduler_type == "LambdaLR":
+            import math
+            total_steps = self.trainer.estimated_stepping_batches
+
+            warmup_frac = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
+            warmup_steps = int(warmup_frac * total_steps)
+            print(f"Warmup steps: {warmup_steps}, Total steps: {total_steps}")
+
+            def lr_lambda(step):
+                # Warmup: linear increase
+                if step < warmup_steps:
+                    return step / max(1, warmup_steps)
+
+                # Cosine decay: smooth decrease
+                progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))
+                return 0.5 * (1 + math.cos(math.pi * progress))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                }
+            }
 
         else:
             # Unknown scheduler type, return optimizer only
