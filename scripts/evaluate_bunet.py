@@ -26,7 +26,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))  
 
 # Import your model and dataset classes
-from src.classifiers.bu_net import WaveBiasCorrector
+from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.pipelines.training.dnn_trainer import DNNConfig, get_file_list, split_files_by_year
 from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
@@ -1680,22 +1680,48 @@ class ModelEvaluator:
         y_pred = np.array(self.plot_samples['y_pred'])
         y_uncorrected = np.array(self.plot_samples['y_uncorrected'])
         
+        # Pre-compute KDE for each dataset once (reused across all 3 plots)
+        print("Computing KDEs (cached for reuse)...")
+        from scipy import stats
+        
+        # Create KDE objects
+        kde_true = stats.gaussian_kde(y_true, bw_method=0.5 * y_true.std() * len(y_true)**(-1/5))
+        kde_pred = stats.gaussian_kde(y_pred, bw_method=0.5 * y_pred.std() * len(y_pred)**(-1/5))
+        kde_uncorrected = stats.gaussian_kde(y_uncorrected, bw_method=0.5 * y_uncorrected.std() * len(y_uncorrected)**(-1/5))
+        
+        # Create evaluation grid
+        x_min = 0
+        x_max = 15
+        x_grid = np.linspace(x_min, x_max, 200)
+        
+        # Evaluate KDEs once
+        kde_true_values = kde_true(x_grid)
+        kde_pred_values = kde_pred(x_grid)
+        kde_uncorrected_values = kde_uncorrected(x_grid)
+        print("KDE computation complete!")
+        
+        # Plot 1: All three distributions
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
-                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
-                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        # Use cached KDE results
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+                color='blue', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
+        
+        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+                color='red', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
@@ -1711,20 +1737,23 @@ class ModelEvaluator:
         plt.close()
         print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions.png'}")
 
+        # Plot 2: Model vs Reference (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
-                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+                color='blue', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison (Model vs Reference)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
@@ -1740,21 +1769,23 @@ class ModelEvaluator:
         plt.close()
         print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_model_vs_reference.png'}")
 
-
+        # Plot 3: Reference vs Uncorrected (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
-                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+                color='red', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison (Reference vs Uncorrected)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"

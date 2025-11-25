@@ -7,17 +7,17 @@ import torch
 import torch.optim as optim
 from transformers import get_cosine_schedule_with_warmup
 
-from classifiers.networks.bunet import (
+# Add src to path for imports
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.classifiers.networks.bunet import (
     BU_Net_Geo,
     BU_Net_Geo_Nick,
     BU_Net_Geo_Nick_Enhanced,
 )
-from classifiers.networks.swin_unet import SwinUNet
-from classifiers.networks.trans_unet import TransUNetGeo
-
-# Add src to path for imports
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+from src.classifiers.networks.swin_unet import SwinUNet
+from src.classifiers.networks.trans_unet import TransUNetGeo
 from src.commons.losses import (
     masked_mse_loss,
     masked_multi_bin_weighted_mse,
