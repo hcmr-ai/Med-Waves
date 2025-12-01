@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.classifiers.networks.mdn import MDNHead
+
 
 def conv_block(in_channels, out_channels):
     return nn.Sequential(
@@ -339,7 +341,7 @@ class BU_Net_Geo_Nick(nn.Module):
 
 class BU_Net_Geo_Nick_Enhanced(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0, upsample_mode="nearest"
+        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0, upsample_mode="nearest", use_mdn=False
     ):
         """
         Enhanced BU-Net with geophysical padding and deeper architecture.
@@ -361,7 +363,7 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
         self.add_vhm0_residual = add_vhm0_residual
         self.vhm0_channel_index = vhm0_channel_index
         self.filters = filters
-
+        self.use_mdn = use_mdn
         # Encoder with GeoConv
         self.encoders = nn.ModuleList()
         self.pools = nn.ModuleList()
@@ -411,8 +413,10 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
             self.decoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
 
-        # Final 1×1 conv to output
-        self.final_conv = nn.Conv2d(filters[0], out_channels, kernel_size=1)
+        if use_mdn:
+            self.mdn_head = MDNHead(filters[-1], K=3)
+        else:
+            self.final_conv = nn.Conv2d(filters[0], out_channels, kernel_size=1)
 
     def forward(self, x):
         # Store VHM0 for residual connection
@@ -455,4 +459,7 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
                 )
             x = x + vhm0_input
 
-        return x
+        if self.use_mdn:
+            return self.mdn_head(x)
+        else:
+            return x

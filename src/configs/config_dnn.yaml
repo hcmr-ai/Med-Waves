@@ -40,13 +40,15 @@ model:
   model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual"
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
   vhm0_channel_index: 0
   weight_decay: 1e-4 #1e-4
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
+  optimizer_type: "Adam" # Options: "Adam", "AdamW", "SGD"
+  use_mdn: false # Options: true, false
   # Learning rate scheduler configuration
   lr_scheduler:
     type: LambdaLR # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts", "LambdaLR"

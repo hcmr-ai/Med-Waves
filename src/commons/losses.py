@@ -1,4 +1,8 @@
+import math
+
 import torch
+
+from src.classifiers.networks.mdn import mdn_expected_value
 
 
 def masked_smooth_l1_loss(y_pred, y_true, mask, criterion):
@@ -354,3 +358,50 @@ def masked_ssim_perceptual_loss(y_pred, y_true, mask, ssim_loss, perceptual_loss
         lambda_perceptual: weight for perceptual loss
     """
     return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss + lambda_perceptual * perceptual_loss(y_pred * mask, y_true * mask)
+
+def mdn_nll_loss(pi, mu, sigma, y, mask=None, eps=1e-9):
+    """
+    pi, mu, sigma: [B, K, H, W]
+    y:             [B, 1, H, W]
+    mask:          [B, 1, H, W]  (1=ocean, 0=land), optional
+
+    returns scalar NLL loss
+    """
+
+    # Expand y to match mixture dimension
+    y = y.expand_as(mu)    # [B, K, H, W]
+
+    # Gaussian density
+    normal = torch.exp(-0.5 * ((y - mu) / sigma)**2) / (sigma * math.sqrt(2 * math.pi))
+
+    # Weighted sum across mixture components
+    weighted = pi * normal          # [B, K, H, W]
+    likelihood = weighted.sum(dim=1)  # [B, H, W]
+
+    # Avoid log(0)
+    log_likelihood = torch.log(likelihood + eps)
+
+    # Apply mask
+    if mask is not None:
+        mask = mask.squeeze(1)
+        log_likelihood = log_likelihood * mask
+        denom = mask.sum() + eps
+    else:
+        denom = y.numel()
+
+    # NLL = -mean(log p)
+    return -log_likelihood.sum() / denom
+
+
+def masked_mse_mdn_loss(pi, mu, sigma, y, mask=None, eps=1e-9, lambda_mse=0.1, lambda_nll=1.0):
+    """
+    Masked MSE + MDN NLL loss.
+    Args:
+        pi, mu, sigma: [B, K, H, W]
+        y:             [B, 1, H, W]
+        mask:          [B, 1, H, W]  (1=ocean, 0=land), optional
+        lambda_mse:    weight for MSE loss
+        lambda_nll:    weight for NLL loss
+        returns scalar loss
+    """
+    return lambda_mse * masked_mse_loss(mdn_expected_value(pi, mu), y, mask) + lambda_nll * mdn_nll_loss(pi, mu, sigma, y, mask, eps)

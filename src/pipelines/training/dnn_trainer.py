@@ -29,30 +29,30 @@ def setup_logging(level=logging.INFO):
 logger = setup_logging()
 
 # import pytorch_lightning as lightning
+import lightning
 import s3fs
 import torch
 from classifiers.lightning_trainer import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
-from commons.callbacks.s3_callback import S3CheckpointSyncCallback
 from commons.callbacks.exponential_moving_average import EMAWeightAveraging
-from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
 from commons.callbacks.freeze_layers import FreezeEncoderCallback
+from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
+from commons.callbacks.s3_callback import S3CheckpointSyncCallback
 from commons.dataloaders import CachedWaveDataset
-from commons.datasets.samplers import WaveBinBalancedSampler
 from commons.datasets.grid_patched_dataset import GridPatchWaveDataset
+from commons.datasets.samplers import WaveBinBalancedSampler
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
-import lightning
 from lightning import Trainer
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
-    StochasticWeightAveraging
+    StochasticWeightAveraging,
 )
-
 from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
+
 
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
@@ -361,7 +361,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False)
         )
-    
+
     if data_config.get("patch_size", None) is not None:
         val_dataset = GridPatchWaveDataset(
             val_files,
@@ -392,20 +392,20 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
 
     # Pre-compute wave bins and filter patches (if using patched dataset)
     use_balanced_sampling = data_config.get("use_balanced_sampling", False)  # Set to False for uniform random sampling
-    
+
     if patch_size is not None:
         # ALWAYS compute bins to filter out invalid patches (regardless of balanced sampling)
         logger.info("Computing wave bins and filtering invalid patches...")
         train_dataset.compute_all_bins()
         logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
-        
+
         # Also filter validation dataset
         val_dataset.compute_all_bins()
         logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
-        
+
         if len(val_dataset) == 0:
             raise ValueError("Validation dataset is empty after filtering! Check val_year/val_months or lower min_valid_pixels threshold.")
-        
+
         if use_balanced_sampling:
             logger.info("Using balanced sampling (equal samples per wave height bin)")
         else:
@@ -433,7 +433,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         prefetch_factor=None,
         sampler=None
     )
-    
+
     logger.info(f"Train loader: {len(train_loader)} batches")
     logger.info(f"Val loader: {len(val_loader)} batches")
 
@@ -488,7 +488,7 @@ def create_callbacks(config: DNNConfig) -> list:
         logger.info("Adding Comet visualization callback")
         comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
         callbacks.append(comet_callback)
-    
+
     if config.config["training"]["use_swa"]:
         logger.info("Adding SWA callback")
         swa_callback = StochasticWeightAveraging(
@@ -497,7 +497,7 @@ def create_callbacks(config: DNNConfig) -> list:
             swa_epoch_start=5        # When to start SWA averaging
         )
         callbacks.append(swa_callback)
-    
+
     if config.config["training"]["use_ema"]:
         logger.info("Adding EMA callback")
         ema_callback = EMAWeightAveraging(
@@ -505,7 +505,7 @@ def create_callbacks(config: DNNConfig) -> list:
             start_step=100,
         )
         callbacks.append(ema_callback)
-    
+
     if config.config["model"]["loss_type"] == "pixel_switch_mse":
         logger.info("Adding Pixel Switch Threshold callback")
         pixel_switch_threshold_callback = PixelSwitchThresholdCallback(quantile=0.90)
@@ -612,6 +612,8 @@ def main():
             vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
             weight_decay=float(model_config.get("weight_decay", 0)),
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+            use_mdn=model_config.get("use_mdn", False),
+            optimizer_type=model_config.get("optimizer_type", "Adam"),
         )
     else:
         logger.info("Training new model")
@@ -629,6 +631,8 @@ def main():
             model_type=model_config.get("model_type", "nick"),  # Options: "nick", "geo", "enhanced"
             upsample_mode=model_config.get("upsample_mode", "nearest"),
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+            use_mdn=model_config.get("use_mdn", False),
+            optimizer_type=model_config.get("optimizer_type", "Adam"),
         )
 
     # Create callbacks
@@ -711,7 +715,7 @@ def main():
     # Train model
     logger.info("Starting training...")
     logger.info(f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches")
-    
+
     # Only pass ckpt_path if we actually have a checkpoint to resume from
     if config.config["training"]["finetune_model"]:
         trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)

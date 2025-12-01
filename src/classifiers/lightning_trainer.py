@@ -16,6 +16,7 @@ from src.classifiers.networks.bunet import (
     BU_Net_Geo_Nick,
     BU_Net_Geo_Nick_Enhanced,
 )
+from src.classifiers.networks.mdn import mdn_expected_value
 from src.classifiers.networks.swin_unet import SwinUNet
 from src.classifiers.networks.trans_unet import TransUNetGeo
 from src.commons.loss_functions.perceptual_loss import (
@@ -25,12 +26,14 @@ from src.commons.loss_functions.perceptual_loss import (
 from src.commons.loss_functions.ssim import SSIMLoss
 from src.commons.losses import (
     masked_mse_loss,
+    masked_mse_mdn_loss,
     masked_mse_perceptual_loss,
     masked_mse_ssim_loss,
     masked_multi_bin_weighted_mse,
     masked_multi_bin_weighted_smooth_l1,
     masked_smooth_l1_loss,
     masked_ssim_perceptual_loss,
+    mdn_nll_loss,
     pixel_switch_loss_stable,
 )
 
@@ -46,12 +49,24 @@ class WaveBiasCorrector(pl.LightningModule):
         model_type="nick",  # Options: "nick", "geo", "enhanced"
         upsample_mode="nearest",
         pixel_switch_threshold_m=0.45,
+        use_mdn=False,
+        optimizer_type="Adam",
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.pixel_switch_threshold_m = pixel_switch_threshold_m
-        self.perceptual_loss = PerceptualLoss(WaveFeatureExtractor(), layer_weights=[1.0, 1.0, 1.0])
-        self.ssim_loss = SSIMLoss()
+        self.loss_type = loss_type
+        if self.loss_type == "pixel_switch_mse":
+            self.pixel_switch_threshold_m = pixel_switch_threshold_m
+
+        if self.loss_type == "mse_perceptual" or self.loss_type == "mse_ssim_perceptual":
+            self.perceptual_loss = PerceptualLoss(WaveFeatureExtractor(), layer_weights=[1.0, 1.0, 1.0])
+
+        if self.loss_type == "mse_ssim_perceptual" or self.loss_type == "mse_ssim":
+            self.ssim_loss = SSIMLoss()
+
+        self.use_mdn = use_mdn
+        self.optimizer_type = optimizer_type
+
         # Select model architecture
         if model_type == "geo":
             self.model = BU_Net_Geo(
@@ -63,6 +78,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 in_channels=in_channels, filters=filters, dropout=dropout,
                 add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index,
                 upsample_mode=upsample_mode,
+                use_mdn=use_mdn,
             )
         elif model_type == "transunet":
             self.model = TransUNetGeo(
@@ -78,7 +94,6 @@ class WaveBiasCorrector(pl.LightningModule):
                 add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index
             )
 
-        self.loss_type = loss_type
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
         if loss_type == "smooth_l1" or loss_type == "multi_bin_weighted_smooth_l1":
@@ -89,7 +104,7 @@ class WaveBiasCorrector(pl.LightningModule):
         x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return self.model(x_clean)
 
-    def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction):
+    def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction, pi=None, mu=None, sigma=None):
         if self.loss_type == "mse":
             return masked_mse_loss(y_pred, y_true, mask)
         elif self.loss_type == "smooth_l1":
@@ -104,14 +119,22 @@ class WaveBiasCorrector(pl.LightningModule):
             return masked_mse_ssim_loss(y_pred, y_true, mask, ssim_loss=self.ssim_loss)
         elif self.loss_type == "mse_ssim_perceptual":
             return masked_ssim_perceptual_loss(y_pred, y_true, mask, self.ssim_loss, self.perceptual_loss)
+        elif self.loss_type == "mse_mdn":
+            return masked_mse_mdn_loss(pi, mu, sigma, y_true, mask, eps=1e-9, lambda_mse=0.1, lambda_nll=1.0)
+        elif self.loss_type == "mdn":
+            return mdn_nll_loss(pi, mu, sigma, y_true, mask, eps=1e-9)
         else:
             return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
 
     def training_step(self, batch, batch_idx):
         X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id we don't need
-
-        y_pred = self(X)
-        loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+        if self.use_mdn:
+            pi, mu, sigma = self(X)
+            y_pred = mdn_expected_value(pi, mu)
+            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
+        else:
+            y_pred = self(X)
+            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
 
         # Enhanced metrics for Comet
         with torch.no_grad():
@@ -172,8 +195,13 @@ class WaveBiasCorrector(pl.LightningModule):
             if batch_idx == 0:
                 print(f"Batch unpacked: X={X.shape}, y={y.shape}, mask={mask.shape}")
 
-            y_pred = self(X)
-            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+            if self.use_mdn:
+                pi, mu, sigma = self(X)
+                y_pred = mdn_expected_value(pi, mu)
+                loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
+            else:
+                y_pred = self(X)
+                loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
         except Exception as e:
             print(f"\n!!! ERROR IN VALIDATION_STEP: {e}")
             import traceback
@@ -300,7 +328,14 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def configure_optimizers(self):
         # lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
-        optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        if self.optimizer_type == "Adam":
+            optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        elif self.optimizer_type == "AdamW":
+            optimizer = optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        elif self.optimizer_type == "SGD":
+            optimizer = optim.SGD(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+        else:
+            raise ValueError(f"Invalid optimizer type: {self.optimizer_type}")
 
         # Store optimizer info to log later
         self.optimizer_info = {
