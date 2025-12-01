@@ -26,7 +26,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))  
 
 # Import your model and dataset classes
-from src.classifiers.bu_net import WaveBiasCorrector
+from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.pipelines.training.dnn_trainer import DNNConfig, get_file_list, split_files_by_year
 from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
@@ -937,7 +937,7 @@ class ModelEvaluator:
                 save_path=self.output_dir / 'rmse_improvement.png',
                 title='RMSE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap_div,
+                cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
             plot_spatial_rmse_map(
@@ -945,9 +945,109 @@ class ModelEvaluator:
                 save_path=self.output_dir / 'mae_improvement.png',
                 title='MAE Improvement (Reference - Model)',
                 vmin=-0.06, vmax=0.06,
-                cmap=cmap_div,
+                cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
+    
+    def plot_model_better_percentage(self, sea_bin_metrics: Dict[str, Dict]):
+        """Plot percentage of samples where model is better than reference for each bin."""
+        print("Creating model better percentage plot...")
+        
+        # Prepare data
+        bin_labels = []
+        pct_better = []
+        counts = []
+        
+        # Sort bins by their min value
+        sorted_bins = sorted(self.sea_bins, key=lambda x: x["min"])
+        
+        for bin_config in sorted_bins:
+            bin_name = bin_config["name"]
+            if bin_name not in sea_bin_metrics:
+                continue
+            
+            metrics = sea_bin_metrics[bin_name]
+            if metrics.get('count', 0) == 0:
+                continue
+            
+            bin_labels.append(metrics.get('label', bin_config['label']))
+            pct_better.append(metrics.get('pct_model_better', 0))
+            counts.append(metrics.get('count', 0))
+        
+        if not bin_labels:
+            logger.warning("No data for model better percentage plot")
+            return
+        
+        # Create figure
+        _, ax = plt.subplots(figsize=(14, 8))
+        
+        # Color bars based on threshold (green if >50%, orange if <50%)
+        colors = ['#5cb85c' if pct >= 50 else '#f0ad4e' for pct in pct_better]
+        
+        # Create bars
+        _ = ax.bar(range(len(bin_labels)), pct_better, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+        
+        # Add 50% threshold line
+        ax.axhline(y=50, color='black', linestyle='--', linewidth=2, label='50% threshold', alpha=0.7)
+        
+        # Add value labels on bars
+        for i, (pct, count) in enumerate(zip(pct_better, counts)):
+            # Label with percentage and count
+            label_text = f'{pct:.1f}%\n(n={count:,})'
+            
+            # Position label above bar
+            y_pos = pct + 2
+            
+            ax.text(i, y_pos, label_text, ha='center', va='bottom', 
+                   fontsize=9, fontweight='bold')
+        
+        # Highlight overall statistics with boxes at the top
+        # Calculate overall percentage across all bins
+        total_better = 0
+        for bin_config in sorted_bins:
+            bin_name = bin_config["name"]
+            if bin_name in sea_bin_metrics and sea_bin_metrics[bin_name].get('count', 0) > 0:
+                total_better += sea_bin_metrics[bin_name].get('count_model_better', 0)
+        
+        total_count = sum(counts)
+        overall_pct = (total_better / total_count * 100) if total_count > 0 else 0
+        
+        # Find bins with highest and lowest performance
+        max_idx = pct_better.index(max(pct_better))
+        min_idx = pct_better.index(min(pct_better))
+        
+        # Add text boxes for best and worst performing bins
+        textstr = f'Best: {bin_labels[max_idx]}\n{pct_better[max_idx]:.1f}%'
+        props_best = dict(boxstyle='round', facecolor='#5cb85c', alpha=0.8, edgecolor='black', linewidth=2)
+        ax.text(0.12, 0.95, textstr, transform=ax.transAxes, fontsize=14,
+               verticalalignment='top', horizontalalignment='center', bbox=props_best, fontweight='bold')
+        
+        textstr_worst = f'Worst: {bin_labels[min_idx]}\n{pct_better[min_idx]:.1f}%'
+        props_worst = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
+        ax.text(0.88, 0.95, textstr_worst, transform=ax.transAxes, fontsize=14,
+               verticalalignment='top', horizontalalignment='center', bbox=props_worst, fontweight='bold')
+        
+        # Formatting
+        ax.set_title('Model Better Than Reference (% of Samples)', 
+                    fontsize=16, fontweight='bold', pad=20)
+        ax.set_xlabel('Wave Height Bin', fontsize=13, fontweight='bold')
+        ax.set_ylabel('% of Samples Where |Model Error| < |Reference Error|', 
+                     fontsize=13, fontweight='bold')
+        ax.set_xticks(range(len(bin_labels)))
+        ax.set_xticklabels(bin_labels, rotation=45, ha='right', fontsize=10)
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+        ax.legend(fontsize=11, loc='upper left')
+        
+        # Add overall percentage as subtitle
+        ax.text(0.5, 1.02, f'Overall: {overall_pct:.1f}% of samples show improvement',
+               transform=ax.transAxes, ha='center', fontsize=12, style='italic')
+        
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "model_better_percentage.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved model better percentage plot to {self.output_dir / 'model_better_percentage.png'}")
     
     def plot_sea_bin_metrics(self, sea_bin_metrics: Dict[str, Dict]):
         """Create sea-bin performance metrics plot with baseline comparison."""
@@ -1580,22 +1680,48 @@ class ModelEvaluator:
         y_pred = np.array(self.plot_samples['y_pred'])
         y_uncorrected = np.array(self.plot_samples['y_uncorrected'])
         
+        # Pre-compute KDE for each dataset once (reused across all 3 plots)
+        print("Computing KDEs (cached for reuse)...")
+        from scipy import stats
+        
+        # Create KDE objects
+        kde_true = stats.gaussian_kde(y_true, bw_method=0.5 * y_true.std() * len(y_true)**(-1/5))
+        kde_pred = stats.gaussian_kde(y_pred, bw_method=0.5 * y_pred.std() * len(y_pred)**(-1/5))
+        kde_uncorrected = stats.gaussian_kde(y_uncorrected, bw_method=0.5 * y_uncorrected.std() * len(y_uncorrected)**(-1/5))
+        
+        # Create evaluation grid
+        x_min = 0
+        x_max = 15
+        x_grid = np.linspace(x_min, x_max, 200)
+        
+        # Evaluate KDEs once
+        kde_true_values = kde_true(x_grid)
+        kde_pred_values = kde_pred(x_grid)
+        kde_uncorrected_values = kde_uncorrected(x_grid)
+        print("KDE computation complete!")
+        
+        # Plot 1: All three distributions
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
-                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
-                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        # Use cached KDE results
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+                color='blue', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
+        
+        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+                color='red', linewidth=1.0, alpha=0.85)
+        ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
@@ -1611,20 +1737,23 @@ class ModelEvaluator:
         plt.close()
         print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions.png'}")
 
+        # Plot 2: Model vs Reference (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_pred, ax=ax, label='Model Prediction', 
-                    color='blue', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+                color='blue', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison (Model vs Reference)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
@@ -1640,21 +1769,23 @@ class ModelEvaluator:
         plt.close()
         print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_model_vs_reference.png'}")
 
-
+        # Plot 3: Reference vs Uncorrected (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        # Use seaborn for smooth KDE plots
-        sns.kdeplot(data=y_true, ax=ax, label='Corrected (Reference)', 
-                    color='green', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
-        sns.kdeplot(data=y_uncorrected, ax=ax, label='Uncorrected', 
-                    color='red', linewidth=1.0, alpha=0.85, bw_adjust=0.5)
+        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+                color='green', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
+        
+        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+                color='red', linewidth=1.0, alpha=0.85)
+        # ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
         ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
         ax.set_title('VHM0 Distribution Comparison (Reference vs Uncorrected)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, 15)
+        ax.set_xlim(x_min, x_max)
         
         # Add statistics text
         # stats_text = (f"Ground Truth:\n  Mean={np.mean(y_true):.2f}m, Std={np.std(y_true):.2f}m\n"
@@ -1737,9 +1868,10 @@ class ModelEvaluator:
         
         # Create plots using samples
         print("Creating plots...")
-        self.plot_vhm0_distributions()
         self.plot_sea_bin_metrics(sea_bin_metrics)
+        self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_vhm0_distributions()
         self.plot_error_distribution_histograms()
         self.plot_error_boxplots()
         # self.plot_error_violins()
