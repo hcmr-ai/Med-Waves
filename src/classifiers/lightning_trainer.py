@@ -26,10 +26,10 @@ from src.commons.loss_functions.ssim import SSIMLoss
 from src.commons.losses import (
     masked_mse_loss,
     masked_mse_perceptual_loss,
+    masked_mse_ssim_loss,
     masked_multi_bin_weighted_mse,
     masked_multi_bin_weighted_smooth_l1,
     masked_smooth_l1_loss,
-    masked_ssim_loss,
     masked_ssim_perceptual_loss,
     pixel_switch_loss_stable,
 )
@@ -100,8 +100,8 @@ class WaveBiasCorrector(pl.LightningModule):
             return pixel_switch_loss_stable(y_pred, y_true, mask, threshold_m=self.pixel_switch_threshold_m)
         elif self.loss_type == "mse_perceptual":
             return masked_mse_perceptual_loss(y_pred, y_true, mask, self.perceptual_loss)
-        elif self.loss_type == "ssim":
-            return masked_ssim_loss(y_pred, y_true, mask, ssim_loss=self.ssim_loss)
+        elif self.loss_type == "mse_ssim":
+            return masked_mse_ssim_loss(y_pred, y_true, mask, ssim_loss=self.ssim_loss)
         elif self.loss_type == "mse_ssim_perceptual":
             return masked_ssim_perceptual_loss(y_pred, y_true, mask, self.ssim_loss, self.perceptual_loss)
         else:

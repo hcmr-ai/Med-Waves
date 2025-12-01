@@ -332,7 +332,7 @@ def masked_mse_perceptual_loss(y_pred, y_true, mask, perceptual_loss, lambda_per
     """
     return masked_mse_loss(y_pred, y_true, mask) + lambda_perceptual * perceptual_loss(y_pred * mask, y_true * mask)
 
-def masked_ssim_loss(y_pred, y_true, mask, ssim_loss, lambda_ssim=0.1):
+def masked_mse_ssim_loss(y_pred, y_true, mask, ssim_loss, lambda_ssim=0.1):
     """
     Masked SSIM loss.
     Args:

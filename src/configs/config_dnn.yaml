@@ -7,15 +7,15 @@ data:
   file_pattern: "WAVEAN*.pt"
   train_year: [2017, 2018, 2019, 2020, 2021]
   val_year: [2022]
-  val_months: [1,2,3, 4,5, 6, 7, 8, 9, 10, 11, 12]
+  val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
-  test_months: [1,2,3, 4,5, 6, 7, 8, 9, 10, 11, 12]
+  test_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   patch_size: null #[64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
   min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
   use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
-  subsample_step: null  # Data already subsampled in files, no additional runtime subsampling
+  subsample_step: null # Data already subsampled in files, no additional runtime subsampling
   use_cache: false
 
   # Data preprocessing
@@ -37,14 +37,14 @@ data:
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based)
+  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse"
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
-  vhm0_channel_index: 0 
+  vhm0_channel_index: 0
   weight_decay: 1e-4 #1e-4
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
   # Learning rate scheduler configuration
@@ -93,7 +93,7 @@ training:
   gradient_clip_algorithm: "norm"
   aggressive_freeze: false
 # Checkpoint configuration
-checkpoint: 
+checkpoint:
   resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
   checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr" # Local directory for fast access
   s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr" # S3 backup for spot instances
