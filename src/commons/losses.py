@@ -93,7 +93,7 @@ def masked_multi_bin_weighted_mse(
 ):
     """
     Weighted MSE with physics-based binning using unnormalized VHM0.
-    
+
     Args:
         y_pred: (B, C, H, W) normalized model prediction
         y_true: (B, C, H, W) normalized target
@@ -123,7 +123,7 @@ def masked_multi_bin_weighted_mse(
     # Build weight mask based on real wave heights (in meters)
     weights = torch.zeros_like(vhm0_clean)
     prev_t = -float("inf")
-    for t, w in zip(bin_thresholds + [float("inf")], bin_weights):
+    for t, w in zip(bin_thresholds + [float("inf")], bin_weights, strict=False):
         weights += ((vhm0_clean >= prev_t) & (vhm0_clean < t)) * w
         prev_t = t
 
@@ -146,7 +146,7 @@ def masked_multi_bin_weighted_smooth_l1(
     """
     Physics-aware SmoothL1 loss with wave-height bin weighting.
     Applies SmoothL1 to (normalized) y_pred/y_true but uses *unnormalized* vhm0 to weight bins.
-    
+
     Args:
         y_pred: (B, C, H, W) normalized predictions
         y_true: (B, C, H, W) normalized targets
@@ -179,18 +179,18 @@ def masked_multi_bin_weighted_smooth_l1(
     # --- Build bin weights using real wave heights (meters) ---
     weights = torch.zeros_like(vhm0_clean)
     prev_t = -float("inf")
-    for t, w in zip(bin_thresholds + [float("inf")], bin_weights):
+    for t, w in zip(bin_thresholds + [float("inf")], bin_weights, strict=False):
         weights += ((vhm0_clean >= prev_t) & (vhm0_clean < t)) * w
         prev_t = t
-    
+
     # --- SmoothL1Loss per-pixel, but weighted by sea state ---
     loss_per_pixel = criterion(y_pred_clean, y_clean) * weights     # (B,1,H,W)
-    
+
     # Apply mask + normalize by total weight in mask
     num = loss_per_pixel[mask].sum()
     den = weights[mask].sum() + epsilon
     weighted_loss = num / den
-    
+
     return weighted_loss
 
 def pixel_switch_loss(
@@ -199,7 +199,7 @@ def pixel_switch_loss(
     mask,
     threshold_m=None,      # 1 meter threshold in real space
     std=None,             # std used during normalization (required!)
-    weight_normal=0.0,    
+    weight_normal=0.0,
     weight_hard=1.0,
 ):
     """
@@ -247,6 +247,7 @@ def pixel_switch_loss(
 
 
 import torch.nn as nn
+
 
 def pixel_switch_loss_stable(
     y_pred,
@@ -319,3 +320,37 @@ def pixel_switch_loss_stable(
     total_loss = (1 - smooth_mix) * pixel_switch_term + smooth_mix * smooth_l1_term
 
     return total_loss
+
+def masked_mse_perceptual_loss(y_pred, y_true, mask, perceptual_loss, lambda_perceptual=0.05):
+    """
+    Masked MSE perceptual loss.
+    Args:
+        y_pred: (B, 1, H, W) normalized model prediction
+        y_true: (B, 1, H, W) normalized target
+        mask:   (B, 1, H, W) bool mask of valid pixels
+        lambda_perceptual: weight for perceptual loss
+    """
+    return masked_mse_loss(y_pred, y_true, mask) + lambda_perceptual * perceptual_loss(y_pred * mask, y_true * mask)
+
+def masked_ssim_loss(y_pred, y_true, mask, ssim_loss, lambda_ssim=0.1):
+    """
+    Masked SSIM loss.
+    Args:
+        y_pred: (B, 1, H, W) normalized model prediction
+        y_true: (B, 1, H, W) normalized target
+        mask:   (B, 1, H, W) bool mask of valid pixels
+        lambda_ssim: weight for SSIM loss
+    """
+    return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss
+
+def masked_ssim_perceptual_loss(y_pred, y_true, mask, ssim_loss, perceptual_loss, lambda_ssim=0.1, lambda_perceptual=0.05):
+    """
+    Masked SSIM perceptual loss.
+    Args:
+        y_pred: (B, 1, H, W) normalized model prediction
+        y_true: (B, 1, H, W) normalized target
+        mask:   (B, 1, H, W) bool mask of valid pixels
+        lambda_ssim: weight for SSIM loss
+        lambda_perceptual: weight for perceptual loss
+    """
+    return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss + lambda_perceptual * perceptual_loss(y_pred * mask, y_true * mask)
