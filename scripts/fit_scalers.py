@@ -17,11 +17,11 @@ LOCAL_TMP = "data/scalers/"
 USE_S3 = True
 
 if USE_S3:
-    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2021", "s3://medwav-dev-data/parquet/hourly/year=2022"]
+    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2019", "s3://medwav-dev-data/parquet/hourly/year=2020", "s3://medwav-dev-data/parquet/hourly/year=2021"]
 else:
     DATA_PATHS = ["/Users/deeplab/Documents/projects/hcmr/data/hourly/"]
 
-FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
+FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
 def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
     """Load and stack all parquet files into numpy"""
     if USE_S3:
@@ -38,7 +38,7 @@ def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
                 df = pl.read_parquet(fh)
                 print(f"\nFile: {f}")
                 print(f"  Shape: {df.shape}")
-                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
+                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0", "corrected_VTM02"])
                 if features:
                     df = df.select(features)
                 dfs.append(df)
@@ -48,7 +48,7 @@ def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
                 df = pl.read_parquet(fh)
                 print(f"\nFile: {f}")
                 print(f"  Shape: {df.shape}")
-                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0"])
+                df = df.drop_nulls(subset=["VHM0", "corrected_VHM0", "corrected_VTM02"])
                 if features:
                     df = df.select(features)
                 print(df.head())
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     # Define configs
     configs = {
-        "BU24h_zscore_target_21_22": dict(mode="zscore"),
+        "BU24h_zscore_target_19_21_all": dict(mode="zscore"),
         # "BU48h_quantile_target_21_22": dict(mode="quantile"),
         # "BU72h_quantile_target_21_22": dict(mode="quantile"),
     }

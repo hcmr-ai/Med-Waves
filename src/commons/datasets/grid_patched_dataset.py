@@ -3,6 +3,8 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 class GridPatchWaveDataset(Dataset):
+    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
+    
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,
                  target_column="corrected_VHM0", excluded_columns=None, 
                  normalizer=None, subsample_step=None, predict_bias=False,
@@ -22,7 +24,11 @@ class GridPatchWaveDataset(Dataset):
         self.wave_bins = wave_bins  # m thresholds between bins
         self.min_valid_pixels = min_valid_pixels  # Filter patches with too much land
         self._cache = {}
-
+        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        if self.normalizer is not None:
+            print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
+            print(f"Features order: {self.normalizer.feature_order_}")
+            print(f"Features order expected: {self.FEATURES_ORDER}")
         # Load one file to infer dimensions
         sample_tensor, _ = self._load_file_pt(file_paths[0])
         self.H_full, self.W_full = sample_tensor.shape[1], sample_tensor.shape[2]
@@ -164,13 +170,8 @@ class GridPatchWaveDataset(Dataset):
         hour_data = tensor[hour_idx]
 
         # Select input features
-        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 
-                         'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 
-                         'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 
-                         'wave_dir_cos', 'corrected_VHM0']
-
         input_col_indices = [
-            feature_cols.index(feat) for feat in FEATURES_ORDER
+            feature_cols.index(feat) for feat in self.features_order
             if feat in feature_cols and feat not in self.excluded_columns and feat != self.target_column
         ]
 

@@ -189,6 +189,7 @@ from torch.utils.data import Dataset
 
 
 class CachedWaveDataset(Dataset):
+    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
@@ -211,6 +212,11 @@ class CachedWaveDataset(Dataset):
         self._cache = {}
         self.use_cache = use_cache
         self.normalize_target = normalize_target
+        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        if self.normalizer is not None:
+            print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
+            print(f"Features order: {self.normalizer.feature_order_}")
+            print(f"Features order expected: {self.FEATURES_ORDER}")
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -268,14 +274,13 @@ class CachedWaveDataset(Dataset):
             i for i, col in enumerate(feature_cols)
             if (col not in self.excluded_columns) and (col != self.target_column)
         ]
-        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
         
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X
         input_features = []
         input_col_indices = []
-        
-        for feat in FEATURES_ORDER:
+
+        for feat in self.features_order:
             if feat in self.excluded_columns or feat == self.target_column:
                 continue
             
