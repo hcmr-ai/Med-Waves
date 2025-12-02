@@ -82,7 +82,8 @@ class WaveBiasCorrector(pl.LightningModule):
             )
         elif model_type == "transunet":
             self.model = TransUNetGeo(
-                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8
+                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8, 
+                use_mdn=use_mdn,
             )
         elif model_type == "swinunet":
             self.model = SwinUNet(
