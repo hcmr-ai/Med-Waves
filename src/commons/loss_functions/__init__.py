@@ -1,10 +1,7 @@
 """
-Preprocessing utilities for the Med-WAV project.
+Loss functions for the Med-WAV project.
 
-This module contains preprocessing components and utilities for data transformation,
-scaling, and feature engineering.
+This module contains custom loss functions for training neural networks.
 """
 
-from .regional_scaler import RegionalScaler
-
-__all__ = ["RegionalScaler"]
+__all__ = []
