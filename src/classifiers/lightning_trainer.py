@@ -428,7 +428,7 @@ class WaveBiasCorrector(pl.LightningModule):
             def lr_lambda(step):
                 # Warmup: linear increase
                 if step < warmup_steps:
-                    return step / max(1, warmup_steps)
+                    return max(0.01, step / max(1, warmup_steps))
 
                 # Cosine decay: smooth decrease
                 progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))

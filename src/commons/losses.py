@@ -415,10 +415,14 @@ def mdn_nll_loss(pi, mu, sigma, y, mask=None, eps=1e-6):
         valid_mask = mask.bool()
         if not valid_mask.any():
             return torch.tensor(0.0, device=pi.device, requires_grad=True)
-        log_likelihood = log_likelihood[valid_mask]
-        nll = -log_likelihood.mean()
+        log_likelihood_masked = log_likelihood[valid_mask]
     else:
-        nll = -log_likelihood.mean()
+        log_likelihood_masked = log_likelihood
+    
+    # NLL: -mean(log p(y|x))
+    # Clamp log_likelihood to prevent negative loss
+    log_likelihood_masked = torch.clamp(log_likelihood_masked, max=0.0)
+    nll = -log_likelihood_masked.mean()
     
     # Check for NaN in output
     if torch.isnan(nll):

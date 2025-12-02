@@ -55,6 +55,9 @@ class PerceptualLoss(nn.Module):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.detach_target = detach_target
+        
+        # Set to eval mode (disables dropout, batchnorm updates, etc.)
+        self.feature_extractor.eval()
 
         # default equal weight for each feature map
         self.layer_weights = layer_weights
@@ -64,9 +67,15 @@ class PerceptualLoss(nn.Module):
         pred, target: [B, 1, H, W] (or [B, C, H, W] if you want)
         returns scalar perceptual loss
         """
-        # Extract multi-scale features
-        feats_pred = self.feature_extractor(pred)
-        with torch.no_grad() if self.detach_target else torch.enable_grad():
+        self.feature_extractor.eval()
+        with torch.no_grad():
+            feats_pred_no_grad = self.feature_extractor(pred)
+        
+        # Re-enable gradients by creating new tensors that require grad
+        feats_pred = [f.detach().requires_grad_(True) for f in feats_pred_no_grad]
+        
+        # Extract features from target - no gradients needed
+        with torch.no_grad():
             feats_tgt = self.feature_extractor(target)
 
         if self.layer_weights is None:
