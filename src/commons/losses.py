@@ -461,3 +461,21 @@ def masked_mse_mdn_loss(pi, mu, sigma, y, mask=None, eps=1e-6, lambda_mse=0.1, l
         return torch.tensor(0.0, device=pi.device, requires_grad=True)
     
     return total_loss
+
+
+def adversarial_loss_G(D_fake: torch.Tensor) -> torch.Tensor:
+    """
+    LSGAN generator loss: want D(fake) -> 1.
+    """
+    return torch.mean((D_fake - 1.0) ** 2)
+
+
+def adversarial_loss_D(D_real: torch.Tensor, D_fake: torch.Tensor) -> torch.Tensor:
+    """
+    LSGAN discriminator loss:
+      D(real) -> 1
+      D(fake) -> 0
+    """
+    loss_real = torch.mean((D_real - 1.0) ** 2)
+    loss_fake = torch.mean(D_fake ** 2)
+    return 0.5 * (loss_real + loss_fake)

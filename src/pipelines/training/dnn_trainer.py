@@ -614,6 +614,7 @@ def main():
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
             use_mdn=model_config.get("use_mdn", False),
             optimizer_type=model_config.get("optimizer_type", "Adam"),
+            lambda_adv=model_config.get("lambda_adv", 0.01),
         )
     else:
         logger.info("Training new model")
@@ -633,6 +634,7 @@ def main():
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
             use_mdn=model_config.get("use_mdn", False),
             optimizer_type=model_config.get("optimizer_type", "Adam"),
+            lambda_adv=model_config.get("lambda_adv", 0.01),
         )
 
     # Create callbacks
