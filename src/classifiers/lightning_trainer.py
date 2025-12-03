@@ -73,6 +73,8 @@ class WaveBiasCorrector(pl.LightningModule):
         self.lambda_adv = lambda_adv
         self.model_type = model_type
 
+        if model_type == "transunet_gan":
+            self.automatic_optimization = False
         # Select model architecture
         if model_type == "geo":
             self.model = BU_Net_Geo(
@@ -338,22 +340,99 @@ class WaveBiasCorrector(pl.LightningModule):
 
         return loss_D
 
-    def training_step(self, batch, batch_idx, optimizer_idx=None):
+    def training_step(self, batch, batch_idx):
         X, y, mask, vhm0_for_reconstruction = batch
 
+        # Non-GAN models use automatic optimization
         if self.model_type != "transunet_gan":
             return self._training_step_no_gan(X, y, mask, vhm0_for_reconstruction)
 
-        if optimizer_idx is None:
-            raise RuntimeError("GAN model requires optimizer_idx")
+        # GAN models use manual optimization
+        opt_g, opt_d = self.optimizers()
+        
+        # ========================================
+        # Train Generator
+        # ========================================
+        opt_g.zero_grad()
+        
+        if self.use_mdn:
+            pi, mu, sigma = self(X)
+            y_pred = mdn_expected_value(pi, mu)
+            base_loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
+        else:
+            y_pred = self(X)
+            base_loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
 
-        if optimizer_idx == 0:
-            loss_G = self._training_step_G(X, y, mask, vhm0_for_reconstruction)
-            return loss_G
+        # Adversarial loss for generator
+        y_pred_masked = (torch.nan_to_num(y_pred, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+        D_fake = self.model.D(y_pred_masked)
+        loss_adv = adversarial_loss_G(D_fake)
 
-        if optimizer_idx == 1:
-            loss_D = self._training_step_D(X, y, mask)
-            return loss_D
+        total_loss_g = base_loss + self.lambda_adv * loss_adv
+        
+        # Manual backward and step
+        self.manual_backward(total_loss_g)
+        opt_g.step()
+        
+        # Log generator metrics
+        with torch.no_grad():
+            min_h = min(y_pred.shape[2], y.shape[2])
+            min_w = min(y_pred.shape[3], y.shape[3])
+            y_pred_crop = y_pred[:, :, :min_h, :min_w]
+            y_crop = y[:, :, :min_h, :min_w]
+            mask_crop = mask[:, :, :min_h, :min_w]
+            
+            mae = torch.abs(y_pred_crop - y_crop)[mask_crop].mean()
+            mse = ((y_pred_crop - y_crop) ** 2)[mask_crop].mean()
+            rmse = torch.sqrt(mse)
+            
+            self.log("train/G_base_loss", base_loss, prog_bar=False, on_step=True, on_epoch=True)
+            self.log("train/G_adv_loss", loss_adv, prog_bar=False, on_step=True, on_epoch=True)
+            self.log("train/G_total_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True)
+            self.log("train_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True)
+            self.log("train_mae", mae, on_step=True, on_epoch=True)
+            self.log("train_rmse", rmse, on_step=True, on_epoch=True)
+
+        # ========================================
+        # Train Discriminator
+        # ========================================
+        opt_d.zero_grad()
+        
+        # Detach generator output for discriminator training
+        with torch.no_grad():
+            if self.use_mdn:
+                pi, mu, sigma = self(X)
+                y_pred_detached = mdn_expected_value(pi, mu)
+            else:
+                y_pred_detached = self(X)
+
+        y_real_masked = (torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+        y_pred_masked = (torch.nan_to_num(y_pred_detached, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+
+        D_real = self.model.D(y_real_masked)
+        D_fake = self.model.D(y_pred_masked)
+
+        loss_d = adversarial_loss_D(D_real, D_fake)
+        
+        # Manual backward and step
+        self.manual_backward(loss_d)
+        opt_d.step()
+        
+        self.log("train/D_loss", loss_d, prog_bar=True, on_step=True, on_epoch=True)
+        self.log("train/D_real_mean", D_real.mean(), on_step=True, on_epoch=True)
+        self.log("train/D_fake_mean", D_fake.mean(), on_step=True, on_epoch=True)
+        
+        # Manually step schedulers if they exist
+        sch_g = self.lr_schedulers()
+        if sch_g is not None:
+            if isinstance(sch_g, list):
+                # Only step generator scheduler
+                if len(sch_g) > 0 and sch_g[0] is not None:
+                    sch_g[0].step()
+            else:
+                sch_g.step()
+        
+        return total_loss_g
 
     def on_validation_epoch_start(self):
         print(f"\n>>> ON_VALIDATION_EPOCH_START CALLED - Epoch {self.current_epoch}")
@@ -456,12 +535,20 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.log(key, value)
 
     def on_train_epoch_end(self) -> None:
-        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        if self.model_type == "transunet_gan":
+            # Manual optimization - get first optimizer (generator)
+            lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        else:
+            # Automatic optimization
+            lr = self.trainer.optimizers[0].param_groups[0]['lr']
+    
         self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
 
     def on_after_backward(self):
-        total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-        self.log("grad_norm_clipped", total_norm, on_step=True, on_epoch=True, prog_bar=True)
+        # Only clip gradients in automatic optimization mode
+        if self.automatic_optimization:
+            total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            self.log("grad_norm_clipped", total_norm, on_step=True, on_epoch=True, prog_bar=True)
 
     def _log_sea_bin_metrics(self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str):
         """Log sea-bin metrics for different wave height ranges."""
@@ -537,17 +624,19 @@ class WaveBiasCorrector(pl.LightningModule):
                 # verbose=scheduler_config.get("verbose", True),
             )
             return {
-                "lr_scheduler": {
                     "scheduler": scheduler,
                     "monitor": scheduler_config.get("monitor", "val_loss"),
-                },
-            }
+                }
 
         elif scheduler_type == "CosineAnnealingLR":
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=int(scheduler_config.get("T_max", 50)), eta_min=get_float("eta_min", 1e-6),
             )
-            return {"lr_scheduler": scheduler}
+            return {
+                    "scheduler": scheduler,
+                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
+                    "frequency": 1,
+                }
 
         elif scheduler_type == "StepLR":
             scheduler = optim.lr_scheduler.StepLR(
@@ -555,13 +644,21 @@ class WaveBiasCorrector(pl.LightningModule):
                 step_size=int(scheduler_config.get("step_size", 10)),
                 gamma=get_float("gamma", 0.1),
             )
-            return {"lr_scheduler": scheduler}
+            return {
+                    "scheduler": scheduler,
+                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
+                    "frequency": 1,
+                }
 
         elif scheduler_type == "ExponentialLR":
             scheduler = optim.lr_scheduler.ExponentialLR(
                 optimizer, gamma=get_float("gamma", 0.1)
             )
-            return {"lr_scheduler": scheduler}
+            return {
+                    "scheduler": scheduler,
+                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
+                    "frequency": 1,
+                }
 
         elif scheduler_type == "CosineAnnealingWarmupRestarts":
             # Use PyTorch Lightning's estimated_stepping_batches
@@ -580,11 +677,11 @@ class WaveBiasCorrector(pl.LightningModule):
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
             )
-            return {"lr_scheduler": {
+            return {
                     "scheduler": scheduler,
                     "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
                     "frequency": 1,
-                }}
+                }
         elif scheduler_type == "LambdaLR":
             import math
             total_steps = self.trainer.estimated_stepping_batches
@@ -605,12 +702,10 @@ class WaveBiasCorrector(pl.LightningModule):
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
             return {
-                "lr_scheduler": {
                     "scheduler": scheduler,
                     "interval": "step",
                     "frequency": 1,
                 }
-            }
 
         else:
             # Unknown scheduler type, return optimizer only
