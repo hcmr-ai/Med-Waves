@@ -47,11 +47,9 @@ def mdn_sample(pi, mu, sigma):
     """
     Sample from MDN mixture.
     """
-    B, K, H, W = pi.shape
-
     # Choose component per pixel
     comp = torch.distributions.Categorical(pi.permute(0,2,3,1)).sample()
-    comp = comp.permute(0,3,1,2)  # [B, 1, H, W]
+    comp = comp.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
 
     # Gather selected component parameters
     mu_sel = torch.gather(mu, 1, comp)

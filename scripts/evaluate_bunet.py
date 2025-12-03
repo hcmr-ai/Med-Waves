@@ -30,6 +30,7 @@ from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.pipelines.training.dnn_trainer import DNNConfig, get_file_list, split_files_by_year
 from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
+from src.classifiers.networks.mdn import mdn_expected_value, mdn_sample
 import logging
 
 logger = logging.getLogger(__name__)
@@ -283,6 +284,7 @@ class ModelEvaluator:
         apply_binwise_correction_flag: bool = False,
         bias_loader: DataLoader = None,
         geo_bounds: dict = None,
+        use_mdn: bool = False,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -296,6 +298,7 @@ class ModelEvaluator:
         self.normalize_target = normalize_target
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
         self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
+        self.use_mdn = use_mdn
         # Sea-bin definitions
         self.sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
@@ -602,7 +605,11 @@ class ModelEvaluator:
                 mask = mask.to(self.device)
                 
                 # Get predictions
-                y_pred = self.model(X)
+                if self.use_mdn:
+                    pi, mu, sigma = self.model(X)
+                    y_pred = mdn_expected_value(pi, mu)
+                else:
+                    y_pred = self.model(X)
                 
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])
@@ -2079,7 +2086,8 @@ def main():
         subsample_step=5,
         apply_binwise_correction_flag=args.apply_binwise_correction,
         bias_loader=train_loader,  # Use train set to compute bin biases
-        geo_bounds=geo_bounds
+        geo_bounds=geo_bounds,
+        use_mdn=model.use_mdn
     )
     
     evaluator.evaluate()
