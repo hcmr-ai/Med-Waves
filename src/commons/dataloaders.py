@@ -213,10 +213,45 @@ class CachedWaveDataset(Dataset):
         self.use_cache = use_cache
         self.normalize_target = normalize_target
         self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        
         if self.normalizer is not None:
             print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
             print(f"Features order: {self.normalizer.feature_order_}")
             print(f"Features order expected: {self.FEATURES_ORDER}")
+
+            print(f"\n=== NORMALIZER DEBUG ===")
+            print(f"Target column in config: {self.target_column}")
+            print(f"Normalizer target_feature_name_: {self.normalizer.target_feature_name_}")
+            print(f"Feature order: {self.normalizer.feature_order_}")
+
+            if self.normalize_target and self.normalizer.feature_order_:
+                try:
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    print(f"✓ Found '{self.target_column}' at index {target_idx}")
+                    
+                    # Check what stats exist
+                    if target_idx in self.normalizer.stats_:
+                        stats = self.normalizer.stats_[target_idx]
+                        if isinstance(stats, tuple):
+                            mean, std = stats
+                            print(f"  Stats at index {target_idx}: mean={mean:.4f}, std={std:.4f}")
+                        else:
+                            print(f"  Stats at index {target_idx}: {type(stats)}")
+                        
+                        # Actually set it
+                        self.normalizer.target_stats_ = stats
+                        print(f"✓ Set target_stats_ to index {target_idx}")
+                    else:
+                        print(f"✗ Index {target_idx} not in stats_! Available: {list(self.normalizer.stats_.keys())}")
+                    
+                    if hasattr(stats, 'mean_') and hasattr(stats, 'scale_'):
+                        print(f"  StandardScaler mean_: {stats.mean_[0]:.4f}")
+                        print(f"  StandardScaler scale_ (std): {stats.scale_[0]:.4f}")
+                    else:
+                        print(f"  StandardScaler attributes: {dir(stats)}")
+                except (ValueError, KeyError) as e:
+                    print(f"✗ Error: {e}")
+            print(f"======================\n")
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -309,33 +344,28 @@ class CachedWaveDataset(Dataset):
                 X = X[i:i+ph, j:j+pw, :]
                 y = y[i:i+ph, j:j+pw, :]
 
+        # Subsample
+        if self.subsample_step is not None:
+            X = X[::self.subsample_step, ::self.subsample_step, :]
+            y = y[::self.subsample_step, ::self.subsample_step, :]
+            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
 
-        if self.enable_profiler:
-            with torch.profiler.record_function("normalize_and_subsample"):
-                # Subsample
-                if self.subsample_step is not None:
-                    X = X[::self.subsample_step, ::self.subsample_step, :]
-                    y = y[::self.subsample_step, ::self.subsample_step, :]
-                    vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+        if self.normalizer is not None:
+            if not hasattr(self, '_target_stats_verified'):
+                if self.normalize_target and self.normalizer.target_stats_ is None:
+                    print(f"⚠️ Worker: target_stats_ was None, re-setting")
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                self._target_stats_verified = True
 
-                if self.normalizer is not None:
-                    if self.normalize_target:
-                        X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
-                    else:
-                        X = self.normalizer.transform_torch(X, normalize_target=False)
-        else:
-            # Without profiler
-             # Subsample
-            if self.subsample_step is not None:
-                X = X[::self.subsample_step, ::self.subsample_step, :]
-                y = y[::self.subsample_step, ::self.subsample_step, :]
-                vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            # if self.normalize_target and self.normalizer.feature_order_:
+            #     target_idx = self.normalizer.feature_order_.index(self.target_column)
+            #     self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
 
-            if self.normalizer is not None:
-                if self.normalize_target:
-                    X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
-                else:
-                    X = self.normalizer.transform_torch(X, normalize_target=False)
+            if self.normalize_target:
+                X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
+            else:
+                X = self.normalizer.transform_torch(X, normalize_target=False)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()

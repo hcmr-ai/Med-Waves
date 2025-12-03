@@ -17,7 +17,7 @@ LOCAL_TMP = "data/scalers/"
 USE_S3 = True
 
 if USE_S3:
-    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2019", "s3://medwav-dev-data/parquet/hourly/year=2020", "s3://medwav-dev-data/parquet/hourly/year=2021"]
+    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2020", "s3://medwav-dev-data/parquet/hourly/year=2021"]
 else:
     DATA_PATHS = ["/Users/deeplab/Documents/projects/hcmr/data/hourly/"]
 
@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     # Define configs
     configs = {
-        "BU24h_zscore_target_19_21_all": dict(mode="zscore"),
+        "BU24h_zscore_target_20_21_all_with_corrected": dict(mode="zscore"),
         # "BU48h_quantile_target_21_22": dict(mode="quantile"),
         # "BU72h_quantile_target_21_22": dict(mode="quantile"),
     }
