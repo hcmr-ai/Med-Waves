@@ -37,10 +37,10 @@ data:
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based)
+  model_type: "transunet_gan" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse_mdn" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn"
+  loss_type: "mse_gan" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
@@ -48,7 +48,8 @@ model:
   weight_decay: 1e-4 #1e-4
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
   optimizer_type: "Adam" # Options: "Adam", "AdamW", "SGD"
-  use_mdn: true # Options: true, false
+  use_mdn: false # Options: true, false
+  lambda_adv: 0.01 # Weight for adversarial loss
   # Learning rate scheduler configuration
   lr_scheduler:
     type: LambdaLR # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts", "LambdaLR"
@@ -62,7 +63,7 @@ model:
     # Additional scheduler parameters
     T_max: 50 # For CosineAnnealingLR: max epochs
     eta_min: 1e-6
-    warmup_steps: 0.1 # For CosineAnnealingLR: warmup steps
+    warmup_steps: 0.01 # For CosineAnnealingLR: warmup steps
     step_size: 10 # For StepLR: epochs between LR reductions
     gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
 
@@ -97,15 +98,15 @@ training:
 # Checkpoint configuration
 checkpoint:
   resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_17-21_mse_mdn_64_lambda_lr" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_mdn_64_lambda_lr" # S3 backup for spot instances
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
   log_dir: "/opt/dlami/nvme/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_mdn_64_lambda_lr"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr"
   use_comet: true
-  comet_tags: ["wave_height", "transunet", "bias_correction", "lambda_lr", "mse_mdn"]
+  comet_tags: ["wave_height", "transunet_gan", "bias_correction", "lambda_lr", "mse"]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"
