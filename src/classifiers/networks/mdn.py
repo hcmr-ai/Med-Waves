@@ -29,7 +29,7 @@ class MDNHead(nn.Module):
         returns pi, mu, sigma
         """
         mdn_out = self.mdn_conv(x)                  # [B, 3K, H, W]
-        B, C, H, W = mdn_out.shape
+        # B, C, H, W = mdn_out.shape
 
         # Split into mixture components
         pi, mu, sigma_raw = torch.split(mdn_out, self.K, dim=1)
