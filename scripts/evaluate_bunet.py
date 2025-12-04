@@ -285,6 +285,7 @@ class ModelEvaluator:
         bias_loader: DataLoader = None,
         geo_bounds: dict = None,
         use_mdn: bool = False,
+        target_column: str = "corrected_VHM0",
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -299,6 +300,9 @@ class ModelEvaluator:
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
         self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
         self.use_mdn = use_mdn
+        self.target_column = target_column
+
+        self._configure_sea_bins()
         # Sea-bin definitions
         self.sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
@@ -383,6 +387,85 @@ class ModelEvaluator:
         
         self.spatial_rmse_accumulators = {}
     
+    def _configure_labels(self):
+        """Configure dynamic labels based on target_column."""
+        # Infer variable name and unit from target_column
+        target_map = {
+            'corrected_VHM0': {
+                'var_name': 'VHM0',
+                'var_name_full': 'Significant Wave Height',
+                'unit': 'm',
+                'corrected_label': 'Corrected (Reference)',
+                'uncorrected_label': 'Uncorrected',
+                'model_label': 'Model Prediction',
+            },
+            'corrected_VTM02': {
+                'var_name': 'VTM02',
+                'var_name_full': 'Wave Period',
+                'unit': 's',
+                'corrected_label': 'Corrected (Reference)',
+                'uncorrected_label': 'Uncorrected',
+                'model_label': 'Model Prediction',
+            }
+        }
+        
+        # Get configuration or use defaults
+        if self.target_column in target_map:
+            config = target_map[self.target_column]
+        else:
+            # Default fallback for unknown target columns
+            config = {
+                'var_name': self.target_column.replace('corrected_', '').replace('_', ' ').upper(),
+                'var_name_full': self.target_column.replace('_', ' ').title(),
+                'unit': 'units',
+                'corrected_label': 'Corrected (Reference)',
+                'uncorrected_label': 'Uncorrected',
+                'model_label': 'Model Prediction',
+            }
+        
+        # Store as instance variables for easy access
+        self.var_name = config['var_name']
+        self.var_name_full = config['var_name_full']
+        self.unit = config['unit']
+        self.corrected_label = config['corrected_label']
+        self.uncorrected_label = config['uncorrected_label']
+        self.model_label = config['model_label']
+        
+        logger.info(f"Configured labels for target '{self.target_column}': "
+                   f"{self.var_name} ({self.unit})")
+    
+    def _configure_sea_bins(self):
+        """Configure sea bins based on target column."""
+        if self.target_column == "corrected_VHM0":
+            self.sea_bins = [
+                {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
+                {"name": "light", "min": 1.0, "max": 2.0, "label": "1.0-2.0m"},
+                {"name": "moderate", "min": 2.0, "max": 3.0, "label": "2.0-3.0m"},
+                {"name": "rough", "min": 3.0, "max": 4.0, "label": "3.0-4.0m"},
+                {"name": "very_rough", "min": 4.0, "max": 5.0, "label": "4.0-5.0m"},
+                {"name": "extreme_5_6", "min": 5.0, "max": 6.0, "label": "5.0-6.0m"},
+                {"name": "extreme_6_7", "min": 6.0, "max": 7.0, "label": "6.0-7.0m"},
+                {"name": "extreme_7_8", "min": 7.0, "max": 8.0, "label": "7.0-8.0m"},
+                {"name": "extreme_8_9", "min": 8.0, "max": 9.0, "label": "8.0-9.0m"},
+                {"name": "extreme_9_10", "min": 9.0, "max": 10.0, "label": "9.0-10.0m"},
+                {"name": "extreme_10_11", "min": 10.0, "max": 11.0, "label": "10.0-11.0m"},
+                {"name": "extreme_11_12", "min": 11.0, "max": 12.0, "label": "11.0-12.0m"},
+                {"name": "extreme_12_13", "min": 12.0, "max": 13.0, "label": "12.0-13.0m"},
+                {"name": "extreme_13_14", "min": 13.0, "max": 14.0, "label": "13.0-14.0m"},
+                {"name": "extreme_14_15", "min": 14.0, "max": 15.0, "label": "14.0-15.0m"},
+            ]
+        elif self.target_column == "corrected_VTM02":
+            self.sea_bins = [
+                {"name": "very_short", "min": 0.0, "max": 3.0, "label": "0.0-3.0s"},      # Wind waves/choppy
+                {"name": "short", "min": 3.0, "max": 5.0, "label": "3.0-5.0s"},           # Young wind seas
+                {"name": "moderate_short", "min": 5.0, "max": 7.0, "label": "5.0-7.0s"},  # Developed wind seas
+                {"name": "moderate", "min": 7.0, "max": 9.0, "label": "7.0-9.0s"},        # Mature seas
+                {"name": "moderate_long", "min": 9.0, "max": 11.0, "label": "9.0-11.0s"}, # Swell influence
+                {"name": "long", "min": 11.0, "max": 13.0, "label": "11.0-13.0s"},        # Swell dominated
+                {"name": "very_long", "min": 13.0, "max": 15.0, "label": "13.0-15.0s"},   # Long period swell
+                {"name": "extreme_long", "min": 15.0, "max": 20.0, "label": "15.0-20.0s"}, # Extreme long swell
+            ]
+            
     def _load_geographic_mask(self):
         """Load coordinate grid and create geographic filtering mask."""
         try:
@@ -991,10 +1074,10 @@ class ModelEvaluator:
         _, ax = plt.subplots(figsize=(14, 8))
         
         # Color bars based on threshold (green if >50%, orange if <50%)
-        colors = ['#5cb85c' if pct >= 50 else '#f0ad4e' for pct in pct_better]
+        colors = ['green' if pct >= 50 else 'yellow' for pct in pct_better]
         
         # Create bars
-        _ = ax.bar(range(len(bin_labels)), pct_better, color=colors, alpha=0.8, edgecolor='black', linewidth=1.2)
+        _ = ax.bar(range(len(bin_labels)), pct_better, color=colors, alpha=0.8)
         
         # Add 50% threshold line
         ax.axhline(y=50, color='black', linestyle='--', linewidth=2, label='50% threshold', alpha=0.7)
@@ -1026,31 +1109,33 @@ class ModelEvaluator:
         min_idx = pct_better.index(min(pct_better))
         
         # Add text boxes for best and worst performing bins
-        textstr = f'Best: {bin_labels[max_idx]}\n{pct_better[max_idx]:.1f}%'
-        props_best = dict(boxstyle='round', facecolor='#5cb85c', alpha=0.8, edgecolor='black', linewidth=2)
+        # Calculate how many samples are in bins where pct_better > 50%
+        samples_above_50 = sum(count for pct, count in zip(pct_better, counts) if pct >= 50)
+        bins_above_50 = sum(1 for pct in pct_better if pct > 50)
+        textstr = f'Bins >50%: {bins_above_50}/{len(bin_labels)}\nSamples: {samples_above_50:,}'
+        props_info = dict(boxstyle='round', facecolor='#5bc0de', alpha=0.85, edgecolor='black', linewidth=2)
         ax.text(0.12, 0.95, textstr, transform=ax.transAxes, fontsize=14,
-               verticalalignment='top', horizontalalignment='center', bbox=props_best, fontweight='bold')
+                verticalalignment='top', horizontalalignment='center', bbox=props_info, fontweight='bold')
         
-        textstr_worst = f'Worst: {bin_labels[min_idx]}\n{pct_better[min_idx]:.1f}%'
-        props_worst = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
-        ax.text(0.88, 0.95, textstr_worst, transform=ax.transAxes, fontsize=14,
-               verticalalignment='top', horizontalalignment='center', bbox=props_worst, fontweight='bold')
+        # Calculate how many samples are in bins where pct_better < 50%
+        samples_below_50 = sum(count for pct, count in zip(pct_better, counts) if pct < 50)
+        bins_below_50 = sum(1 for pct in pct_better if pct < 50)
+        textstr_below_50 = f'Bins <50%: {bins_below_50}/{len(bin_labels)}\nSamples: {samples_below_50:,}'
+        props_below_50 = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
+        ax.text(0.88, 0.95, textstr_below_50, transform=ax.transAxes, fontsize=14,
+                verticalalignment='top', horizontalalignment='center', bbox=props_below_50, fontweight='bold')
         
         # Formatting
         ax.set_title('Model Better Than Reference (% of Samples)', 
                     fontsize=16, fontweight='bold', pad=20)
-        ax.set_xlabel('Wave Height Bin', fontsize=13, fontweight='bold')
+        ax.set_xlabel(f'{self.var_name_full} Bin', fontsize=13, fontweight='bold')
         ax.set_ylabel('% of Samples Where |Model Error| < |Reference Error|', 
                      fontsize=13, fontweight='bold')
         ax.set_xticks(range(len(bin_labels)))
         ax.set_xticklabels(bin_labels, rotation=45, ha='right', fontsize=10)
         ax.set_ylim(0, 105)
         ax.grid(True, alpha=0.3, axis='y', linestyle='--')
-        ax.legend(fontsize=11, loc='upper left')
-        
-        # Add overall percentage as subtitle
-        ax.text(0.5, 1.02, f'Overall: {overall_pct:.1f}% of samples show improvement',
-               transform=ax.transAxes, ha='center', fontsize=12, style='italic')
+        # ax.legend(fontsize=11, loc='upper left')
         
         plt.tight_layout()
         plt.savefig(self.output_dir / "model_better_percentage.png", dpi=300, bbox_inches='tight')
@@ -1143,7 +1228,7 @@ class ModelEvaluator:
         )
 
         axes[0, 0].set_title("RMSE by Sea State", fontweight="bold")
-        axes[0, 0].set_ylabel("RMSE (m)")
+        axes[0, 0].set_ylabel(f"RMSE ({self.unit})")
         axes[0, 0].set_xticks(x)
         axes[0, 0].set_xticklabels(bin_labels, rotation=45, ha='right')
         axes[0, 0].legend()
@@ -1191,7 +1276,7 @@ class ModelEvaluator:
         )
 
         axes[0, 1].set_title("MAE by Sea State", fontweight="bold")
-        axes[0, 1].set_ylabel("MAE (m)")
+        axes[0, 1].set_ylabel(f"MAE ({self.unit})")
         axes[0, 1].set_xticks(x)
         axes[0, 1].set_xticklabels(bin_labels, rotation=45, ha='right')
         axes[0, 1].legend()
@@ -1331,7 +1416,7 @@ class ModelEvaluator:
             
             # Formatting
             ax.set_title(f'{bin_label}', fontweight='bold', fontsize=11)
-            ax.set_xlabel('Error (m)', fontsize=9)
+            ax.set_xlabel(f'Error ({self.unit})', fontsize=9)
             ax.set_ylabel('Density', fontsize=9)
             ax.legend(fontsize=7, loc='upper right')
             ax.grid(True, alpha=0.3)
@@ -1440,7 +1525,7 @@ class ModelEvaluator:
         
         ax2.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
         ax2.set_title("Model vs Baseline Comparison", fontweight='bold', fontsize=14)
-        ax2.set_ylabel("Error (m)", fontsize=12)
+        ax2.set_ylabel(f"Error ({self.unit})", fontsize=12)
         ax2.set_xlabel("Sea State", fontsize=12)
         
         # Set x-ticks at the center of each pair
@@ -1540,7 +1625,7 @@ class ModelEvaluator:
             
             # Formatting
             ax.set_title(f'{bin_label}', fontweight='bold', fontsize=11)
-            ax.set_ylabel('Error (m)', fontsize=9)
+            ax.set_ylabel(f'Error ({self.unit})', fontsize=9)
             ax.set_xticks(range(len(plot_labels)))
             ax.set_xticklabels(plot_labels, fontsize=9)
             ax.grid(True, alpha=0.3, axis='y')
@@ -1611,7 +1696,7 @@ class ModelEvaluator:
                         color=colors[idx], linewidth=2, alpha=0.8)
         
         ax1.axvline(0, color='black', linestyle='--', linewidth=1, alpha=0.5, label='Zero error')
-        ax1.set_xlabel('Error (m)', fontsize=12)
+        ax1.set_xlabel(f'Error ({self.unit})', fontsize=12)
         ax1.set_ylabel('Cumulative Probability', fontsize=12)
         ax1.set_title('Model Error CDFs', fontweight='bold', fontsize=14)
         ax1.grid(True, alpha=0.3)
@@ -1653,7 +1738,7 @@ class ModelEvaluator:
                         linewidth=2, linestyle='--', alpha=0.7)
         
         ax2.axvline(0, color='black', linestyle='--', linewidth=1, alpha=0.5)
-        ax2.set_xlabel('Error (m)', fontsize=12)
+        ax2.set_xlabel(f'Error ({self.unit})', fontsize=12)
         ax2.set_ylabel('Cumulative Probability', fontsize=12)
         ax2.set_title('Model vs Baseline CDF Comparison (Selected Bins)', 
                      fontweight='bold', fontsize=14)
@@ -1713,21 +1798,21 @@ class ModelEvaluator:
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
         # Use cached KDE results
-        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+        ax.plot(x_grid, kde_true_values, label=self.corrected_label, 
                 color='green', linewidth=1.0, alpha=0.85)
         ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
         
-        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+        ax.plot(x_grid, kde_pred_values, label=self.model_label, 
                 color='blue', linewidth=1.0, alpha=0.85)
         ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
         
-        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+        ax.plot(x_grid, kde_uncorrected_values, label=self.uncorrected_label, 
                 color='red', linewidth=1.0, alpha=0.85)
         ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
-        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_xlabel(f'{self.var_name} ({self.unit})', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
-        ax.set_title('VHM0 Distribution Comparison', fontsize=14, fontweight='bold')
+        ax.set_title(f'{self.var_name_full}', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
         ax.set_xlim(x_min, x_max)
@@ -1741,25 +1826,25 @@ class ModelEvaluator:
                 # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
         plt.tight_layout()
-        plt.savefig(self.output_dir / "vhm0_distributions.png",
+        plt.savefig(self.output_dir / f"{self.var_name}_distributions.png",
                    dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions.png'}")
+        print(f"Saved VHM0 distribution plot to {self.output_dir / f'{self.var_name}_distributions.png'}")
 
         # Plot 2: Model vs Reference (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+        ax.plot(x_grid, kde_true_values, label=self.corrected_label, 
                 color='green', linewidth=1.0, alpha=0.85)
         # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
         
-        ax.plot(x_grid, kde_pred_values, label='Model Prediction', 
+        ax.plot(x_grid, kde_pred_values, label=self.model_label, 
                 color='blue', linewidth=1.0, alpha=0.85)
         # ax.fill_between(x_grid, kde_pred_values, alpha=0.2, color='blue')
         
-        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_xlabel(f'{self.var_name} ({self.unit})', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
-        ax.set_title('VHM0 Distribution Comparison (Model vs Reference)', fontsize=14, fontweight='bold')
+        ax.set_title(f'{self.var_name_full} Distribution Comparison (Model vs Reference)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
         ax.set_xlim(x_min, x_max)
@@ -1773,25 +1858,25 @@ class ModelEvaluator:
                 # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
         plt.tight_layout()
-        plt.savefig(self.output_dir / "vhm0_distributions_model_vs_reference.png",
+        plt.savefig(self.output_dir / f"{self.var_name}_distributions_model_vs_reference.png",
                    dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_model_vs_reference.png'}")
+        print(f"Saved VHM0 distribution plot to {self.output_dir / '{self.var_name}_distributions_model_vs_reference.png'}")
 
         # Plot 3: Reference vs Uncorrected (reusing cached KDEs)
         _, ax = plt.subplots(1, 1, figsize=(10, 6))
         
-        ax.plot(x_grid, kde_true_values, label='Corrected (Reference)', 
+        ax.plot(x_grid, kde_true_values, label=self.corrected_label, 
                 color='green', linewidth=1.0, alpha=0.85)
         # ax.fill_between(x_grid, kde_true_values, alpha=0.2, color='green')
         
-        ax.plot(x_grid, kde_uncorrected_values, label='Uncorrected', 
+        ax.plot(x_grid, kde_uncorrected_values, label=self.uncorrected_label, 
                 color='red', linewidth=1.0, alpha=0.85)
         # ax.fill_between(x_grid, kde_uncorrected_values, alpha=0.2, color='red')
         
-        ax.set_xlabel('VHM0 (m)', fontsize=12, fontweight='bold')
+        ax.set_xlabel(f'{self.var_name} ({self.unit})', fontsize=12, fontweight='bold')
         ax.set_ylabel('Density', fontsize=12, fontweight='bold')
-        ax.set_title('VHM0 Distribution Comparison (Reference vs Uncorrected)', fontsize=14, fontweight='bold')
+        ax.set_title(f'{self.var_name_full} Distribution Comparison (Reference vs Uncorrected)', fontsize=14, fontweight='bold')
         ax.legend(fontsize=11, framealpha=0.9, loc='upper right')
         ax.grid(True, alpha=0.3)
         ax.set_xlim(x_min, x_max)
@@ -1805,10 +1890,10 @@ class ModelEvaluator:
                 # fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
         plt.tight_layout()
-        plt.savefig(self.output_dir / "vhm0_distributions_reference_vs_uncorrected.png",
+        plt.savefig(self.output_dir / f"{self.var_name}_distributions_reference_vs_uncorrected.png",
                    dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved VHM0 distribution plot to {self.output_dir / 'vhm0_distributions_reference_vs_uncorrected.png'}")
+        print(f"Saved VHM0 distribution plot to {self.output_dir / f'{self.var_name}_distributions_reference_vs_uncorrected.png'}")
     
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
@@ -1913,6 +1998,7 @@ def main():
     training_config = config.config["training"]
     data_config = config.config["data"]
     predict_bias = data_config.get("predict_bias", False)
+    target_column = data_config.get("target_column", "corrected_VHM0")
     
     # Get file list (same as training)
     files = get_file_list(
@@ -2089,7 +2175,8 @@ def main():
         apply_binwise_correction_flag=args.apply_binwise_correction,
         bias_loader=train_loader,  # Use train set to compute bin biases
         geo_bounds=geo_bounds,
-        use_mdn=model.use_mdn
+        use_mdn=model.use_mdn,
+        target_column=target_column
     )
     
     evaluator.evaluate()
