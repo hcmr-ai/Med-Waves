@@ -615,6 +615,8 @@ def main():
             use_mdn=model_config.get("use_mdn", False),
             optimizer_type=model_config.get("optimizer_type", "Adam"),
             lambda_adv=model_config.get("lambda_adv", 0.01),
+            n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
+            discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
         )
     else:
         logger.info("Training new model")
@@ -635,6 +637,8 @@ def main():
             use_mdn=model_config.get("use_mdn", False),
             optimizer_type=model_config.get("optimizer_type", "Adam"),
             lambda_adv=model_config.get("lambda_adv", 0.01),
+            n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
+            discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
         )
 
     # Create callbacks

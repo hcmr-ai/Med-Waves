@@ -55,10 +55,14 @@ class WaveBiasCorrector(pl.LightningModule):
         use_mdn=False,
         optimizer_type="Adam",
         lambda_adv=0.01,
+        n_discriminator_updates=3,
+        discriminator_lr_multiplier=1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.loss_type = loss_type
+        self.n_discriminator_updates = n_discriminator_updates
+        self.discriminator_lr_multiplier = discriminator_lr_multiplier
         if self.loss_type == "pixel_switch_mse":
             self.pixel_switch_threshold_m = pixel_switch_threshold_m
 
@@ -394,43 +398,46 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("train_rmse", rmse, on_step=True, on_epoch=True)
 
         # ========================================
-        # Train Discriminator
+        # Train Discriminator (multiple times to strengthen it)
         # ========================================
-        opt_d.zero_grad()
-        
-        # Detach generator output for discriminator training
-        with torch.no_grad():
-            if self.use_mdn:
-                pi, mu, sigma = self(X)
-                y_pred_detached = mdn_expected_value(pi, mu)
-            else:
-                y_pred_detached = self(X)
+        for d_iter in range(self.n_discriminator_updates):
+            opt_d.zero_grad()
+            
+            # Detach generator output for discriminator training
+            with torch.no_grad():
+                if self.use_mdn:
+                    pi, mu, sigma = self(X)
+                    y_pred_detached = mdn_expected_value(pi, mu)
+                else:
+                    y_pred_detached = self(X)
 
-        y_real_masked = (torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0) * mask)
-        y_pred_masked = (torch.nan_to_num(y_pred_detached, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+            y_real_masked = (torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+            y_pred_masked = (torch.nan_to_num(y_pred_detached, nan=0.0, posinf=0.0, neginf=0.0) * mask)
 
-        D_real = self.model.D(y_real_masked)
-        D_fake = self.model.D(y_pred_masked)
+            D_real = self.model.D(y_real_masked)
+            D_fake = self.model.D(y_pred_masked)
 
-        loss_d = adversarial_loss_D(D_real, D_fake)
+            loss_d = adversarial_loss_D(D_real, D_fake)
+            
+            # Manual backward and step
+            self.manual_backward(loss_d)
+            opt_d.step()
         
-        # Manual backward and step
-        self.manual_backward(loss_d)
-        opt_d.step()
-        
+        # Log only the last iteration to avoid cluttering logs
         self.log("train/D_loss", loss_d, prog_bar=True, on_step=True, on_epoch=True)
         self.log("train/D_real_mean", D_real.mean(), on_step=True, on_epoch=True)
         self.log("train/D_fake_mean", D_fake.mean(), on_step=True, on_epoch=True)
         
         # Manually step schedulers if they exist
-        sch_g = self.lr_schedulers()
-        if sch_g is not None:
-            if isinstance(sch_g, list):
-                # Only step generator scheduler
-                if len(sch_g) > 0 and sch_g[0] is not None:
-                    sch_g[0].step()
+        schedulers = self.lr_schedulers()
+        if schedulers is not None:
+            if isinstance(schedulers, list):
+                # Step both generator and discriminator schedulers
+                for sch in schedulers:
+                    if sch is not None:
+                        sch.step()
             else:
-                sch_g.step()
+                schedulers.step()
         
         return total_loss_g
 
@@ -727,16 +734,20 @@ class WaveBiasCorrector(pl.LightningModule):
                 "lr_scheduler": self._build_scheduler(opt_g)
             }
 
+        # Discriminator uses separate (potentially higher) learning rate
+        d_lr = self.hparams.lr * self.discriminator_lr_multiplier
+        
         if self.optimizer_type == "Adam":
-            opt_d = optim.Adam(self.model.D.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.Adam(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
         elif self.optimizer_type == "AdamW":
-            opt_d = optim.AdamW(self.model.D.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.AdamW(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
         else:
-            opt_d = optim.SGD(self.model.D.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.SGD(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
         
         self.optimizer_info = {
             "optimizer_weight_decay": self.hparams.weight_decay,
-            "optimizer_lr": self.hparams.lr
+            "optimizer_lr_G": self.hparams.lr,
+            "optimizer_lr_D": d_lr
         }
 
         return [
@@ -744,8 +755,9 @@ class WaveBiasCorrector(pl.LightningModule):
                 "optimizer": opt_g,
                 "lr_scheduler": self._build_scheduler(opt_g)
             },
-            {  # Discriminator optimizer (NO scheduler - recommended)
-                "optimizer": opt_d
+            {  # Discriminator optimizer + scheduler (keeps G/D ratio constant)
+                "optimizer": opt_d,
+                "lr_scheduler": self._build_scheduler(opt_d)
             }
         ]
 
