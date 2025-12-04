@@ -19,7 +19,7 @@ data:
   use_cache: false
 
   # Data preprocessing
-  target_column: "corrected_VHM0" # Target variable
+  target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
   predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
   normalize_target: true
   excluded_columns: [
@@ -33,7 +33,7 @@ data:
       "VMDR",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "scalers/BU24h_zscore_target_21_22_with_corrected.pkl"
+  normalizer_path: "scalers/BU24h_zscore_target_20_21_all_with_corrected.pkl"
 
 # Model configuration
 model:
@@ -49,7 +49,9 @@ model:
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
   optimizer_type: "Adam" # Options: "Adam", "AdamW", "SGD"
   use_mdn: false # Options: true, false
-  lambda_adv: 0.01 # Weight for adversarial loss
+  lambda_adv: 0.1 # Weight for adversarial loss
+  n_discriminator_updates: 3 # Number of times to update discriminator per generator update (for GAN training)
+  discriminator_lr_multiplier: 2.0 # Multiplier for discriminator learning rate (e.g., 2.0 = 2x generator LR)
   # Learning rate scheduler configuration
   lr_scheduler:
     type: LambdaLR # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts", "LambdaLR"
@@ -98,15 +100,15 @@ training:
 # Checkpoint configuration
 checkpoint:
   resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr" # S3 backup for spot instances
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
   log_dir: "/opt/dlami/nvme/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_64_lambda_lr"
+  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0"
   use_comet: true
-  comet_tags: ["wave_height", "transunet_gan", "bias_correction", "lambda_lr", "mse"]
+  comet_tags: ["wave_height", "transunet_gan", "bias_correction", "lambda_lr", "mse_gan"]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"
