@@ -326,7 +326,13 @@ class CachedWaveDataset(Dataset):
                 input_col_indices.append(idx_in_feature_cols)
         X = hour_data[..., input_col_indices]  # (H, W, C_in)
 
-        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        # vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        # Extract uncorrected version based on target_column
+        # e.g., "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+        uncorrected_column = self.target_column.replace("corrected_", "")
+        vhm0 = hour_data[..., feature_cols.index(uncorrected_column):feature_cols.index(uncorrected_column)+1]
+
+# Same fix for GridPatchWaveDataset (around line 481)
 
         if self.predict_bias:
             corrected = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]

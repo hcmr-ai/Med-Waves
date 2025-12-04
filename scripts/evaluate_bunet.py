@@ -943,7 +943,8 @@ class ModelEvaluator:
                 lat_grid, lon_grid, improvement,
                 save_path=self.output_dir / 'rmse_improvement.png',
                 title='RMSE Improvement (Reference - Model)',
-                vmin=-0.06, vmax=0.06,
+                # vmin=-0.06, vmax=0.06,
+                vmin=np.nanpercentile(improvement, 2), vmax=np.nanpercentile(improvement, 98),
                 cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
@@ -951,7 +952,8 @@ class ModelEvaluator:
                 lat_grid, lon_grid, improvement_mae,
                 save_path=self.output_dir / 'mae_improvement.png',
                 title='MAE Improvement (Reference - Model)',
-                vmin=-0.06, vmax=0.06,
+                # vmin=-0.06, vmax=0.06,
+                vmin=np.nanpercentile(improvement_mae, 2), vmax=np.nanpercentile(improvement_mae, 98),
                 cmap=cmap,
                 geo_bounds=self.geo_bounds
             )
