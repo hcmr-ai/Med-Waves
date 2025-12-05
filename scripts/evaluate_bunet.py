@@ -125,6 +125,7 @@ def plot_spatial_rmse_map(
     vmax: float = None,
     cmap: str = "YlOrRd",
     geo_bounds: dict = None,
+    unit: str = "m",
 ):
     """
     Plot a spatial RMSE heatmap with coastlines and proper projection.
@@ -171,7 +172,7 @@ def plot_spatial_rmse_map(
     
     # Add colorbar
     _ = plt.colorbar(im, ax=ax, orientation="vertical", 
-                       label='RMSE (m)', pad=0.05, shrink=0.8)
+                       label=f'RMSE ({unit})', pad=0.05, shrink=0.8)
     
     # Set extent based on geo_bounds or data bounds
     if geo_bounds is not None:
@@ -303,24 +304,25 @@ class ModelEvaluator:
         self.target_column = target_column
 
         self._configure_sea_bins()
+        self._configure_labels()
         # Sea-bin definitions
-        self.sea_bins = [
-            {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
-            {"name": "light", "min": 1.0, "max": 2.0, "label": "1.0-2.0m"},
-            {"name": "moderate", "min": 2.0, "max": 3.0, "label": "2.0-3.0m"},
-            {"name": "rough", "min": 3.0, "max": 4.0, "label": "3.0-4.0m"},
-            {"name": "very_rough", "min": 4.0, "max": 5.0, "label": "4.0-5.0m"},
-            {"name": "extreme_5_6", "min": 5.0, "max": 6.0, "label": "5.0-6.0m"},
-            {"name": "extreme_6_7", "min": 6.0, "max": 7.0, "label": "6.0-7.0m"},
-            {"name": "extreme_7_8", "min": 7.0, "max": 8.0, "label": "7.0-8.0m"},
-            {"name": "extreme_8_9", "min": 8.0, "max": 9.0, "label": "8.0-9.0m"},
-            {"name": "extreme_9_10", "min": 9.0, "max": 10.0, "label": "9.0-10.0m"},
-            {"name": "extreme_10_11", "min": 10.0, "max": 11.0, "label": "10.0-11.0m"},
-            {"name": "extreme_11_12", "min": 11.0, "max": 12.0, "label": "11.0-12.0m"},
-            {"name": "extreme_12_13", "min": 12.0, "max": 13.0, "label": "12.0-13.0m"},
-            {"name": "extreme_13_14", "min": 13.0, "max": 14.0, "label": "13.0-14.0m"},
-            {"name": "extreme_14_15", "min": 14.0, "max": 15.0, "label": "14.0-15.0m"},
-        ]
+        # self.sea_bins = [
+        #     {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
+        #     {"name": "light", "min": 1.0, "max": 2.0, "label": "1.0-2.0m"},
+        #     {"name": "moderate", "min": 2.0, "max": 3.0, "label": "2.0-3.0m"},
+        #     {"name": "rough", "min": 3.0, "max": 4.0, "label": "3.0-4.0m"},
+        #     {"name": "very_rough", "min": 4.0, "max": 5.0, "label": "4.0-5.0m"},
+        #     {"name": "extreme_5_6", "min": 5.0, "max": 6.0, "label": "5.0-6.0m"},
+        #     {"name": "extreme_6_7", "min": 6.0, "max": 7.0, "label": "6.0-7.0m"},
+        #     {"name": "extreme_7_8", "min": 7.0, "max": 8.0, "label": "7.0-8.0m"},
+        #     {"name": "extreme_8_9", "min": 8.0, "max": 9.0, "label": "8.0-9.0m"},
+        #     {"name": "extreme_9_10", "min": 9.0, "max": 10.0, "label": "9.0-10.0m"},
+        #     {"name": "extreme_10_11", "min": 10.0, "max": 11.0, "label": "10.0-11.0m"},
+        #     {"name": "extreme_11_12", "min": 11.0, "max": 12.0, "label": "11.0-12.0m"},
+        #     {"name": "extreme_12_13", "min": 12.0, "max": 13.0, "label": "12.0-13.0m"},
+        #     {"name": "extreme_13_14", "min": 13.0, "max": 14.0, "label": "13.0-14.0m"},
+        #     {"name": "extreme_14_15", "min": 14.0, "max": 15.0, "label": "14.0-15.0m"},
+        # ]
         self.test_files = test_files
         self.subsample_step = subsample_step
         
@@ -773,7 +775,7 @@ class ModelEvaluator:
         # Compute global bin biases
         self.global_bin_biases = {}
         print("\nGlobal bin-wise correction biases (from train/val set):")
-        print(f"{'Bin':<12} {'Count':<15} {'Bias (m)':<12}")
+        print(f"{'Bin':<12} {'Count':<15} {'Bias ({self.unit})':<12}")
         print("-" * 39)
         
         for bin_label, residual_list in all_residuals_by_bin.items():
@@ -971,7 +973,8 @@ class ModelEvaluator:
             title='Model RMSE',
             vmin=0, vmax=vmax_combined,
             cmap=cmap,
-            geo_bounds=self.geo_bounds
+            geo_bounds=self.geo_bounds,
+            unit=self.unit
         )
         plot_spatial_rmse_map(
             lat_grid, lon_grid, mae_model,
@@ -979,7 +982,8 @@ class ModelEvaluator:
             title='Model MAE',
             vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
             cmap=cmap,
-            geo_bounds=self.geo_bounds
+            geo_bounds=self.geo_bounds,
+            unit=self.unit
         )
         # fig1, ax1 = plt.subplots(figsize=(10, 6))
         # im1 = ax1.pcolormesh(lon_grid, lat_grid, rmse_model, 
@@ -1002,7 +1006,8 @@ class ModelEvaluator:
                 title='Reference RMSE',
                 vmin=0, vmax=vmax_combined,
                 cmap=cmap,
-                geo_bounds=self.geo_bounds
+                geo_bounds=self.geo_bounds,
+                unit=self.unit
             )
             plot_spatial_rmse_map(
                 lat_grid, lon_grid, mae_baseline,
@@ -1010,7 +1015,8 @@ class ModelEvaluator:
                 title='Reference MAE',
                 vmin=0, vmax=max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)),
                 cmap=cmap,
-                geo_bounds=self.geo_bounds
+                geo_bounds=self.geo_bounds,
+                unit=self.unit
             )
             # ========== PLOT 3: Improvement (separate figure) ==========
             improvement = rmse_baseline - rmse_model
@@ -1029,7 +1035,8 @@ class ModelEvaluator:
                 # vmin=-0.06, vmax=0.06,
                 vmin=np.nanpercentile(improvement, 2), vmax=np.nanpercentile(improvement, 98),
                 cmap=cmap,
-                geo_bounds=self.geo_bounds
+                geo_bounds=self.geo_bounds,
+                unit=self.unit
             )
             plot_spatial_rmse_map(
                 lat_grid, lon_grid, improvement_mae,
@@ -1038,7 +1045,8 @@ class ModelEvaluator:
                 # vmin=-0.06, vmax=0.06,
                 vmin=np.nanpercentile(improvement_mae, 2), vmax=np.nanpercentile(improvement_mae, 98),
                 cmap=cmap,
-                geo_bounds=self.geo_bounds
+                geo_bounds=self.geo_bounds,
+                unit=self.unit
             )
     
     def plot_model_better_percentage(self, sea_bin_metrics: Dict[str, Dict]):
@@ -1074,7 +1082,7 @@ class ModelEvaluator:
         _, ax = plt.subplots(figsize=(14, 8))
         
         # Color bars based on threshold (green if >50%, orange if <50%)
-        colors = ['green' if pct >= 50 else 'yellow' for pct in pct_better]
+        colors = ['#5cb85c' if pct >= 50 else '#f0ad4e' for pct in pct_better]
         
         # Create bars
         _ = ax.bar(range(len(bin_labels)), pct_better, color=colors, alpha=0.8)
@@ -1110,20 +1118,20 @@ class ModelEvaluator:
         
         # Add text boxes for best and worst performing bins
         # Calculate how many samples are in bins where pct_better > 50%
-        samples_above_50 = sum(count for pct, count in zip(pct_better, counts) if pct >= 50)
-        bins_above_50 = sum(1 for pct in pct_better if pct > 50)
-        textstr = f'Bins >50%: {bins_above_50}/{len(bin_labels)}\nSamples: {samples_above_50:,}'
-        props_info = dict(boxstyle='round', facecolor='#5bc0de', alpha=0.85, edgecolor='black', linewidth=2)
-        ax.text(0.12, 0.95, textstr, transform=ax.transAxes, fontsize=14,
-                verticalalignment='top', horizontalalignment='center', bbox=props_info, fontweight='bold')
+        # percentage_above_50 = sum(count for pct, count in zip(pct_better, counts) if pct >= 50) / sum(counts) * 100 if counts else 0
+        # bins_above_50 = sum(1 for pct in pct_better if pct > 50)
+        # textstr = f'{percentage_above_50:.1f}%'
+        # props_info = dict(boxstyle='round', facecolor='#00c853', alpha=0.85, edgecolor='black', linewidth=2)
+        # ax.text(0.12, 0.95, textstr, transform=ax.transAxes, fontsize=14,
+        #         verticalalignment='top', horizontalalignment='center', bbox=props_info, fontweight='bold')
         
-        # Calculate how many samples are in bins where pct_better < 50%
-        samples_below_50 = sum(count for pct, count in zip(pct_better, counts) if pct < 50)
-        bins_below_50 = sum(1 for pct in pct_better if pct < 50)
-        textstr_below_50 = f'Bins <50%: {bins_below_50}/{len(bin_labels)}\nSamples: {samples_below_50:,}'
-        props_below_50 = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
-        ax.text(0.88, 0.95, textstr_below_50, transform=ax.transAxes, fontsize=14,
-                verticalalignment='top', horizontalalignment='center', bbox=props_below_50, fontweight='bold')
+        # # Calculate how many samples are in bins where pct_better < 50%
+        # percentage_below_50 = sum(count for pct, count in zip(pct_better, counts) if pct < 50) / sum(counts) * 100 if counts else 0
+        # bins_below_50 = sum(1 for pct in pct_better if pct < 50)
+        # textstr_below_50 = f'{percentage_below_50:.1f}%'
+        # props_below_50 = dict(boxstyle='round', facecolor='#f0ad4e', alpha=0.8, edgecolor='black', linewidth=2)
+        # ax.text(0.68, 0.95, textstr_below_50, transform=ax.transAxes, fontsize=14,
+        #         verticalalignment='top', horizontalalignment='center', bbox=props_below_50, fontweight='bold')
         
         # Formatting
         ax.set_title('Model Better Than Reference (% of Samples)', 
@@ -1204,7 +1212,7 @@ class ModelEvaluator:
         # Create subplots
         fig, axes = plt.subplots(2, 2, figsize=(18, 12))
         fig.suptitle(
-            "Sea-Bin Performance Analysis (Model vs Reference)",
+            "Period Range Performance Analysis (Model vs Reference)" if self.target_column == "corrected_VTM02" else "Sea-Bin Performance Analysis (Model vs Reference)",
             fontsize=16,
             fontweight="bold",
         )
@@ -1227,7 +1235,7 @@ class ModelEvaluator:
             x + width / 2, rmse_values, width, label="Model", color="skyblue", alpha=0.8
         )
 
-        axes[0, 0].set_title("RMSE by Sea State", fontweight="bold")
+        axes[0, 0].set_title("RMSE by Period Range" if self.target_column == "corrected_VTM02" else "RMSE by Sea State", fontweight="bold")
         axes[0, 0].set_ylabel(f"RMSE ({self.unit})")
         axes[0, 0].set_xticks(x)
         axes[0, 0].set_xticklabels(bin_labels, rotation=45, ha='right')
@@ -1275,7 +1283,7 @@ class ModelEvaluator:
             alpha=0.8,
         )
 
-        axes[0, 1].set_title("MAE by Sea State", fontweight="bold")
+        axes[0, 1].set_title("MAE by Period Range" if self.target_column == "corrected_VTM02" else "MAE by Sea State", fontweight="bold")
         axes[0, 1].set_ylabel(f"MAE ({self.unit})")
         axes[0, 1].set_xticks(x)
         axes[0, 1].set_xticklabels(bin_labels, rotation=45, ha='right')
@@ -1309,7 +1317,7 @@ class ModelEvaluator:
         colors = ['green' if v > 0 else 'red' for v in improvement_rmse_values]
         axes[1, 0].bar(bin_labels, improvement_rmse_values, color=colors, alpha=0.7)
         axes[1, 0].axhline(y=0, color='black', linestyle='--', linewidth=1)
-        axes[1, 0].set_title("RMSE Improvement by Sea State", fontweight="bold")
+        axes[1, 0].set_title("RMSE Improvement by Period Range" if self.target_column == "corrected_VTM02" else "RMSE Improvement by Sea State", fontweight="bold")
         axes[1, 0].set_ylabel("Improvement (%)")
         axes[1, 0].tick_params(axis="x", rotation=45)
         axes[1, 0].grid(True, alpha=0.3, axis='y')
@@ -1326,7 +1334,7 @@ class ModelEvaluator:
         
         # Plot 4: Sample distribution by sea state
         axes[1, 1].bar(bin_labels, percentages, color="gold", alpha=0.7)
-        axes[1, 1].set_title("Sample Distribution by Sea State", fontweight="bold")
+        axes[1, 1].set_title("Sample Distribution by Period Range" if self.target_column == "corrected_VTM02" else "Sample Distribution by Sea State", fontweight="bold")
         axes[1, 1].set_ylabel("Percentage of Samples (%)")
         axes[1, 1].tick_params(axis="x", rotation=45)
         axes[1, 1].grid(True, alpha=0.3, axis='y')
@@ -1371,7 +1379,7 @@ class ModelEvaluator:
         n_rows = int(np.ceil(n_bins / n_cols))
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-        fig.suptitle("Error Distribution by Sea State (Model vs Baseline)", 
+        fig.suptitle("Error Distribution by Period Range" if self.target_column == "corrected_VTM02" else "Error Distribution by Sea State", 
                      fontsize=16, fontweight='bold', y=0.995)
         
         # Flatten axes for easier iteration
@@ -1467,7 +1475,7 @@ class ModelEvaluator:
         
         # Create figure with two subplots
         fig, axes = plt.subplots(2, 1, figsize=(16, 12))
-        fig.suptitle("Error Distribution Box Plots by Sea State", 
+        fig.suptitle("Error Distribution Box Plots by Period Range" if self.target_column == "corrected_VTM02" else "Error Distribution Box Plots by Sea State", 
                      fontsize=16, fontweight='bold')
         
         # Plot 1: Model errors
@@ -1484,7 +1492,7 @@ class ModelEvaluator:
         
         ax1.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
         ax1.set_title("Model Errors", fontweight='bold', fontsize=14)
-        ax1.set_ylabel("Error (m)", fontsize=12)
+        ax1.set_ylabel(f"Error ({self.unit})", fontsize=12)
         ax1.tick_params(axis='x', rotation=45)
         ax1.grid(True, alpha=0.3, axis='y')
         
@@ -1575,7 +1583,7 @@ class ModelEvaluator:
         n_rows = int(np.ceil(n_bins / n_cols))
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-        fig.suptitle("Error Distribution Violin Plots by Sea State", 
+        fig.suptitle("Error Distribution Violin Plots by Period Range" if self.target_column == "corrected_VTM02" else "Error Distribution Violin Plots by Sea State", 
                      fontsize=16, fontweight='bold', y=0.995)
         
         # Flatten axes for easier iteration
@@ -1675,7 +1683,7 @@ class ModelEvaluator:
         
         # Create figure with subplots - one for model, one for model vs baseline
         fig, axes = plt.subplots(2, 1, figsize=(16, 12))
-        fig.suptitle("Cumulative Distribution Functions of Errors by Sea State",
+        fig.suptitle("Cumulative Distribution Functions of Errors by Period Range" if self.target_column == "corrected_VTM02" else "Cumulative Distribution Functions of Errors by Sea State",
                      fontsize=16, fontweight='bold')
         
         # Plot 1: Model errors only (all bins)
