@@ -17,7 +17,7 @@ from src.classifiers.networks.bunet import (
     BU_Net_Geo_Nick_Enhanced,
 )
 from src.classifiers.networks.mdn import mdn_expected_value
-from src.classifiers.networks.swin_unet import SwinUNet
+from src.classifiers.networks.swin_unet import SwinUNetAgnostic
 from src.classifiers.networks.trans_unet_gan import WaveTransUNetGAN
 from src.classifiers.networks.trans_unet import TransUNetGeo
 from src.commons.loss_functions.perceptual_loss import (
@@ -98,8 +98,15 @@ class WaveBiasCorrector(pl.LightningModule):
                 use_mdn=use_mdn,
             )
         elif model_type == "swinunet":
-            self.model = SwinUNet(
-                in_channels=in_channels, out_channels=1, embed_dim=64, depths=(2,2,2,2), num_heads=(2,4,8,8), window_size=4, mlp_ratio=4.
+            self.model = SwinUNetAgnostic(
+                img_size=(64, 64),
+                in_chans=in_channels,
+                num_classes=1,
+                embed_dim=64,
+                depths=(2,2,2,2),
+                num_heads=(2,4,8,8),
+                window_size=4,
+                mlp_ratio=4.,
             )
         elif model_type == "transunet_gan":
             self.model = WaveTransUNetGAN(

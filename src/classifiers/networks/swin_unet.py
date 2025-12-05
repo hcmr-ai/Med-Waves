@@ -36,11 +36,22 @@ def window_reverse(windows, window_size, H, W):
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
-def pad_to_swin_size(x, patch_size=4, window_size=4):
+def pad_to_swin_size(x, patch_size=4, window_size=4, num_downsample_stages=3):
     """
-    Pads input tensor to make H and W divisible by:
-      - patch_size (from PatchEmbed)
-      - window_size (from Swin blocks)
+    Pads input tensor to make H and W divisible appropriately for Swin-UNet.
+    
+    Requirements:
+    1. After patch embedding (stride=patch_size), resolution = H//patch_size × W//patch_size
+    2. After N downsampling stages (each /2), resolution = H//(patch_size*2^N) × W//(patch_size*2^N)
+    3. At each stage, resolution must be divisible by window_size
+    
+    Therefore: H and W must be divisible by patch_size * window_size * (2^num_downsample_stages)
+
+    Args:
+        x: input tensor [B, C, H, W]
+        patch_size: patch embedding stride (default 4)
+        window_size: window size for attention (default 4)
+        num_downsample_stages: number of downsampling stages (default 3 for standard Swin-UNet)
 
     Returns:
       x_pad: padded tensor
@@ -48,8 +59,10 @@ def pad_to_swin_size(x, patch_size=4, window_size=4):
     """
     B, C, H, W = x.shape
 
-    # Required multiples
-    req = torch.lcm(torch.tensor(patch_size), torch.tensor(window_size)).item()
+    # After patch_size downsampling and num_downsample_stages of /2, we need:
+    # (H // patch_size) // (2^num_downsample_stages) to be divisible by window_size
+    # So H must be divisible by: patch_size * (2^num_downsample_stages) * window_size
+    req = patch_size * (2 ** num_downsample_stages) * window_size
 
     H_pad = (req - H % req) % req
     W_pad = (req - W % req) % req
@@ -178,8 +191,29 @@ class SwinBlock(nn.Module):
         x: [B, H*W, C]
         """
         B, L, C = x.shape
-        H, W = self.input_resolution
-        assert L == H * W, "Input feature has wrong size"
+        H_ref, W_ref = self.input_resolution
+        
+        # Dynamically compute H and W from actual sequence length
+        if L != H_ref * W_ref:
+            import math
+            # Maintain aspect ratio from reference resolution
+            aspect_ratio = W_ref / H_ref
+            H = int(math.sqrt(L / aspect_ratio))
+            
+            # Find H that is divisible by window_size and gives valid W
+            while H > 0:
+                if L % H == 0:
+                    W = L // H
+                    # Check if both H and W are divisible by window_size
+                    if H % self.window_size == 0 and W % self.window_size == 0:
+                        break
+                H -= 1
+            
+            # If no valid H found, use reference
+            if H == 0 or H * W != L:
+                H, W = H_ref, W_ref
+        else:
+            H, W = H_ref, W_ref
 
         # [B, H, W, C]
         x = x.view(B, H, W, C)
@@ -223,8 +257,30 @@ class PatchMerging(nn.Module):
         x: [B, H*W, C]
         """
         B, L, C = x.shape
-        H, W = self.input_resolution
-        assert L == H * W
+        H_ref, W_ref = self.input_resolution
+        
+        # Dynamically compute H and W from actual sequence length
+        if L != H_ref * W_ref:
+            import math
+            # Maintain aspect ratio from reference resolution
+            aspect_ratio = W_ref / H_ref
+            H = int(math.sqrt(L / aspect_ratio))
+            
+            # Find H that gives valid W (need both divisible by 2 for merging)
+            while H > 0:
+                if L % H == 0:
+                    W = L // H
+                    # Check if we can find valid dimensions
+                    # After padding, H and W should work
+                    if H > 0 and W > 0:
+                        break
+                H -= 1
+            
+            # If no valid H found, use reference
+            if H == 0 or H * W != L:
+                H, W = H_ref, W_ref
+        else:
+            H, W = H_ref, W_ref
 
         x = x.view(B, H, W, C)
 
@@ -264,8 +320,24 @@ class PatchExpand(nn.Module):
 
     def forward(self, x):
         B, L, C = x.shape
-        H, W = self.input_resolution
-        assert L == H * W
+        H_ref, W_ref = self.input_resolution
+        
+        # Dynamically compute H and W from actual sequence length
+        if L != H_ref * W_ref:
+            import math
+            # Maintain aspect ratio from reference resolution
+            aspect_ratio = W_ref / H_ref
+            H = int(math.sqrt(L / aspect_ratio))
+            W = L // H
+            # Ensure exact match
+            while H * W != L and H > 0:
+                H -= 1
+                W = L // H
+            if H * W != L:
+                # Fallback to reference
+                H, W = H_ref, W_ref
+        else:
+            H, W = H_ref, W_ref
 
         x = self.expand(x)  # [B, L, 4*C']
         x = x.view(B, H, W, 2, 2, -1)  # [B,H,W,2,2,C']
@@ -473,13 +545,19 @@ class SwinUNetAgnostic(nn.Module):
         # Store patch and window sizes for padding logic
         self.patch_size = 4                     # PatchEmbed uses stride=4
         self.window_size = kwargs.get("window_size", 4)
+        
+        # Number of downsampling stages = number of depth stages - 1
+        # (last stage is bottleneck, no further downsampling)
+        depths = kwargs.get("depths", (2, 2, 2, 2))
+        self.num_downsample_stages = len(depths) - 1
 
     def forward(self, x):
-        # 1) Pad
+        # 1) Pad to ensure compatibility with all downsampling stages
         x_pad, pad = pad_to_swin_size(
             x,
             patch_size=self.patch_size,
-            window_size=self.window_size
+            window_size=self.window_size,
+            num_downsample_stages=self.num_downsample_stages
         )
 
         # 2) Run SwinUNet on padded input
