@@ -18,14 +18,16 @@ from src.classifiers.networks.bunet import (
 )
 from src.classifiers.networks.mdn import mdn_expected_value
 from src.classifiers.networks.swin_unet import SwinUNetAgnostic
-from src.classifiers.networks.trans_unet_gan import WaveTransUNetGAN
 from src.classifiers.networks.trans_unet import TransUNetGeo
+from src.classifiers.networks.trans_unet_gan import WaveTransUNetGAN
 from src.commons.loss_functions.perceptual_loss import (
     PerceptualLoss,
     WaveFeatureExtractor,
 )
 from src.commons.loss_functions.ssim import SSIMLoss
 from src.commons.losses import (
+    adversarial_loss_D,
+    adversarial_loss_G,
     masked_mse_loss,
     masked_mse_mdn_loss,
     masked_mse_perceptual_loss,
@@ -34,10 +36,9 @@ from src.commons.losses import (
     masked_multi_bin_weighted_smooth_l1,
     masked_smooth_l1_loss,
     masked_ssim_perceptual_loss,
+    masked_weighted_mse,
     mdn_nll_loss,
     pixel_switch_loss_stable,
-    adversarial_loss_G,
-    adversarial_loss_D,
 )
 
 
@@ -94,7 +95,7 @@ class WaveBiasCorrector(pl.LightningModule):
             )
         elif model_type == "transunet":
             self.model = TransUNetGeo(
-                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8, 
+                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8,
                 use_mdn=use_mdn,
             )
         elif model_type == "swinunet":
@@ -110,7 +111,7 @@ class WaveBiasCorrector(pl.LightningModule):
             )
         elif model_type == "transunet_gan":
             self.model = WaveTransUNetGAN(
-                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8, 
+                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8,
                 use_mdn=use_mdn,
             )
         else:  # "nick" or default
@@ -134,6 +135,8 @@ class WaveBiasCorrector(pl.LightningModule):
             return masked_mse_loss(y_pred, y_true, mask)
         elif self.loss_type == "smooth_l1":
             return masked_smooth_l1_loss(y_pred, y_true, mask, self.criterion)
+        elif self.loss_type == "weighted_mse":
+            return masked_weighted_mse(y_pred, y_true, mask, threshold=6.0, high_weight=5.0, epsilon=1e-6)
         elif self.loss_type == "multi_bin_weighted_smooth_l1":
             return masked_multi_bin_weighted_smooth_l1(y_pred, y_true, mask, vhm0_for_reconstruction, self.criterion)
         elif self.loss_type == "pixel_switch_mse":
@@ -209,7 +212,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "train_baseline")
 
         return loss
-    
+
     def _training_step_no_gan(self, X, y, mask, vhm0_for_reconstruction):
         if self.use_mdn:
             pi, mu, sigma = self(X)
@@ -360,12 +363,12 @@ class WaveBiasCorrector(pl.LightningModule):
 
         # GAN models use manual optimization
         opt_g, opt_d = self.optimizers()
-        
+
         # ========================================
         # Train Generator
         # ========================================
         opt_g.zero_grad()
-        
+
         if self.use_mdn:
             pi, mu, sigma = self(X)
             y_pred = mdn_expected_value(pi, mu)
@@ -380,11 +383,11 @@ class WaveBiasCorrector(pl.LightningModule):
         loss_adv = adversarial_loss_G(D_fake)
 
         total_loss_g = base_loss + self.lambda_adv * loss_adv
-        
+
         # Manual backward and step
         self.manual_backward(total_loss_g)
         opt_g.step()
-        
+
         # Log generator metrics
         with torch.no_grad():
             min_h = min(y_pred.shape[2], y.shape[2])
@@ -392,11 +395,11 @@ class WaveBiasCorrector(pl.LightningModule):
             y_pred_crop = y_pred[:, :, :min_h, :min_w]
             y_crop = y[:, :, :min_h, :min_w]
             mask_crop = mask[:, :, :min_h, :min_w]
-            
+
             mae = torch.abs(y_pred_crop - y_crop)[mask_crop].mean()
             mse = ((y_pred_crop - y_crop) ** 2)[mask_crop].mean()
             rmse = torch.sqrt(mse)
-            
+
             self.log("train/G_base_loss", base_loss, prog_bar=False, on_step=True, on_epoch=True)
             self.log("train/G_adv_loss", loss_adv, prog_bar=False, on_step=True, on_epoch=True)
             self.log("train/G_total_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True)
@@ -407,9 +410,9 @@ class WaveBiasCorrector(pl.LightningModule):
         # ========================================
         # Train Discriminator (multiple times to strengthen it)
         # ========================================
-        for d_iter in range(self.n_discriminator_updates):
+        for _ in range(self.n_discriminator_updates):
             opt_d.zero_grad()
-            
+
             # Detach generator output for discriminator training
             with torch.no_grad():
                 if self.use_mdn:
@@ -425,16 +428,16 @@ class WaveBiasCorrector(pl.LightningModule):
             D_fake = self.model.D(y_pred_masked)
 
             loss_d = adversarial_loss_D(D_real, D_fake)
-            
+
             # Manual backward and step
             self.manual_backward(loss_d)
             opt_d.step()
-        
+
         # Log only the last iteration to avoid cluttering logs
         self.log("train/D_loss", loss_d, prog_bar=True, on_step=True, on_epoch=True)
         self.log("train/D_real_mean", D_real.mean(), on_step=True, on_epoch=True)
         self.log("train/D_fake_mean", D_fake.mean(), on_step=True, on_epoch=True)
-        
+
         # Manually step schedulers if they exist
         schedulers = self.lr_schedulers()
         if schedulers is not None:
@@ -445,7 +448,7 @@ class WaveBiasCorrector(pl.LightningModule):
                         sch.step()
             else:
                 schedulers.step()
-        
+
         return total_loss_g
 
     def on_validation_epoch_start(self):
@@ -472,11 +475,11 @@ class WaveBiasCorrector(pl.LightningModule):
                 with torch.no_grad():
                     y_pred_masked = y_pred * mask
                     y_real_masked = y * mask
-                    
+
                     # Get discriminator scores
                     D_real = self.model.D(y_real_masked)
                     D_fake = self.model.D(y_pred_masked)
-                    
+
                     # Log discriminator metrics
                     self.log("val_D_real_mean", D_real.mean(), on_step=False, on_epoch=True)
                     self.log("val_D_fake_mean", D_fake.mean(), on_step=False, on_epoch=True)
@@ -555,7 +558,7 @@ class WaveBiasCorrector(pl.LightningModule):
         else:
             # Automatic optimization
             lr = self.trainer.optimizers[0].param_groups[0]['lr']
-    
+
         self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
 
     def on_after_backward(self):
@@ -613,7 +616,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.log(f"{prefix}_{bin_name}_rmse", rmse, on_epoch=True)
                 self.log(f"{prefix}_{bin_name}_bias", bias, on_epoch=True)
                 self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
-    
+
     def _build_scheduler(self, optimizer):
         def get_float(key, default):
             val = scheduler_config.get(key, default)
@@ -724,7 +727,7 @@ class WaveBiasCorrector(pl.LightningModule):
         else:
             # Unknown scheduler type, return optimizer only
             return {}
-    
+
     def configure_optimizers(self):
         if self.optimizer_type == "Adam":
             opt_g = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
@@ -743,14 +746,14 @@ class WaveBiasCorrector(pl.LightningModule):
 
         # Discriminator uses separate (potentially higher) learning rate
         d_lr = self.hparams.lr * self.discriminator_lr_multiplier
-        
+
         if self.optimizer_type == "Adam":
             opt_d = optim.Adam(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
         elif self.optimizer_type == "AdamW":
             opt_d = optim.AdamW(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
         else:
             opt_d = optim.SGD(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
-        
+
         self.optimizer_info = {
             "optimizer_weight_decay": self.hparams.weight_decay,
             "optimizer_lr_G": self.hparams.lr,
@@ -778,7 +781,7 @@ class WaveBiasCorrector(pl.LightningModule):
             optimizer = optim.SGD(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
         else:
             raise ValueError(f"Invalid optimizer type: {self.optimizer_type}")
-        
+
         if self.model_type == "transunet_gan":
             optimizer_g = optim.Adam(self.model.G.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
             optimizer_d = optim.Adam(self.model.D.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
