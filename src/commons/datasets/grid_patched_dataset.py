@@ -1,6 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
+import s3fs
 
 class GridPatchWaveDataset(Dataset):
     FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
@@ -9,7 +10,7 @@ class GridPatchWaveDataset(Dataset):
                  target_column="corrected_VHM0", excluded_columns=None, 
                  normalizer=None, subsample_step=None, predict_bias=False,
                  use_cache=True, normalize_target=False, wave_bins=[1, 2, 3, 4, 5],
-                 min_valid_pixels=0.3):  # Minimum fraction of valid (non-NaN) pixels
+                 min_valid_pixels=0.3, fs=None):  # Minimum fraction of valid (non-NaN) pixels
         
         self.file_paths = file_paths
         self.patch_size = patch_size
@@ -25,6 +26,8 @@ class GridPatchWaveDataset(Dataset):
         self.min_valid_pixels = min_valid_pixels  # Filter patches with too much land
         self._cache = {}
         self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
+        self._fs = None
         if self.normalizer is not None:
             print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
             print(f"Features order: {self.normalizer.feature_order_}")
@@ -138,9 +141,21 @@ class GridPatchWaveDataset(Dataset):
                   f"75%={np.percentile(sample_arr, 75):.2f}m, 90%={np.percentile(sample_arr, 90):.2f}m")
         
         print(f"Completed: {len(self.index_map)} valid patches after filtering")
+    
+    @property
+    def fs(self):
+        """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
+        if self._fs is None:
+            self._fs = s3fs.S3FileSystem()
+        return self._fs
 
     def _load_file_pt(self, path):
-        data = torch.load(path, map_location="cpu")
+        # Handle S3 paths
+        if isinstance(path, str) and path.startswith("s3://"):
+            with self.fs.open(path, "rb") as f:
+                data = torch.load(f, map_location="cpu")
+        else:
+            data = torch.load(path, map_location="cpu")
         return data["tensor"], data["feature_cols"]
     
     def _get_file_tensor(self, path):
