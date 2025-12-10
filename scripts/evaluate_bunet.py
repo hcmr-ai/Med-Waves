@@ -1092,6 +1092,7 @@ class ModelEvaluator:
                     "rmse_improvement_pct": float(rmse_improvement)
                     if rmse_improvement is not None
                     else None,
+                    "count_model_better": int(bin_data["count_model_better"]),
                     "pct_model_better": float(pct_model_better)
                     if pct_model_better is not None
                     else None,
@@ -1323,7 +1324,7 @@ class ModelEvaluator:
 
             bin_labels.append(metrics.get("label", bin_config["label"]))
             pct_better.append(metrics.get("pct_model_better", 0))
-            counts.append(metrics.get("count", 0))
+            counts.append(metrics.get("count_model_better", 0))
 
         if not bin_labels:
             logger.warning("No data for model better percentage plot")
