@@ -193,7 +193,7 @@ class CachedWaveDataset(Dataset):
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True, normalize_target=False):
+                 enable_profiler=False, use_cache=True, normalize_target=False, fs=None):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -213,6 +213,8 @@ class CachedWaveDataset(Dataset):
         self.use_cache = use_cache
         self.normalize_target = normalize_target
         self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
+        self._fs = None
         
         if self.normalizer is not None:
             print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
@@ -253,6 +255,21 @@ class CachedWaveDataset(Dataset):
                     print(f"✗ Error: {e}")
             print(f"======================\n")
 
+    @property
+    def fs(self):
+        """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
+        if self._fs is None:
+            import os
+            import time
+            # Stagger S3 connection creation across workers to avoid thundering herd
+            worker_id = os.getpid() % 8  # Simple worker ID based on PID
+            if worker_id > 0:
+                time.sleep(worker_id * 0.1)  # 0-0.7s delay
+            print(f"[Worker PID {os.getpid()}] Initializing S3FileSystem...")
+            self._fs = s3fs.S3FileSystem()
+            print(f"[Worker PID {os.getpid()}] S3FileSystem initialized ✓")
+        return self._fs
+
     def _load_file(self, path):
         table = pq.read_table(path)
 
@@ -283,7 +300,16 @@ class CachedWaveDataset(Dataset):
         return tensor, feature_cols
 
     def _load_file_pt(self, path):
-        data = torch.load(path, map_location="cpu")   # {"tensor": (T,H,W,C), "feature_cols": [...]}
+        import os
+        # Handle S3 paths
+        if isinstance(path, str) and path.startswith("s3://"):
+            print(f"[Worker PID {os.getpid()}] Opening S3 file: {os.path.basename(path)}")
+            with self.fs.open(path, "rb") as f:
+                print(f"[Worker PID {os.getpid()}] File opened, loading with torch...")
+                data = torch.load(f, map_location="cpu")
+            print(f"[Worker PID {os.getpid()}] Torch load complete ✓")
+        else:
+            data = torch.load(path, map_location="cpu")
         return data["tensor"], data["feature_cols"]
 
     def _get_file_tensor(self, path):
@@ -298,8 +324,13 @@ class CachedWaveDataset(Dataset):
             return tensor, feature_cols
 
     def __getitem__(self, idx):
+        import os
+        if idx < 5:  # Only log first few calls to avoid spam
+            print(f"[Worker PID {os.getpid()}] __getitem__ called with idx={idx}")
         file_idx, hour_idx = self.index_map[idx]
         path = self.file_paths[file_idx]
+        if idx < 5:
+            print(f"[Worker PID {os.getpid()}] Loading file: {os.path.basename(path)}")
 
         tensor, feature_cols = self._get_file_tensor(path)
 
@@ -396,7 +427,7 @@ class GridPatchWaveDataset(Dataset):
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,
                  target_column="corrected_VHM0", excluded_columns=None, 
                  normalizer=None, subsample_step=None, predict_bias=False,
-                 use_cache=True, normalize_target=False):
+                 use_cache=True, normalize_target=False, fs=None):
         """
         Args:
             patch_size: (H, W) size of each patch
@@ -414,12 +445,18 @@ class GridPatchWaveDataset(Dataset):
         self.use_cache = use_cache
         self.normalize_target = normalize_target
         self._cache = {}
+        # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
+        self._fs = None
         
         # Image dimensions - detect from actual stored data
         # Load a sample file to get actual dimensions (handles pre-subsampled data)
         sample_tensor, _ = self._load_file_pt(file_paths[0])
         self.H_full, self.W_full = sample_tensor.shape[1], sample_tensor.shape[2]
         print(f"Detected data dimensions: {self.H_full} x {self.W_full}")
+        
+        # IMPORTANT: Reset S3FileSystem after loading sample file
+        # This prevents fork-safety issues when workers are created
+        self._fs = None
         
         # Calculate grid dimensions
         ph, pw = self.patch_size
@@ -448,8 +485,28 @@ class GridPatchWaveDataset(Dataset):
         print(f"  Grid: {self.n_patches_h} x {self.n_patches_w} = {patches_per_hour} patches/hour")
         print(f"  Total samples: {len(self.index_map)}")
     
+    @property
+    def fs(self):
+        """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
+        if self._fs is None:
+            import os
+            import time
+            # Stagger S3 connection creation across workers to avoid thundering herd
+            worker_id = os.getpid() % 8  # Simple worker ID based on PID
+            if worker_id > 0:
+                time.sleep(worker_id * 0.1)  # 0-0.7s delay
+            print(f"[Worker PID {os.getpid()}] Initializing S3FileSystem...")
+            self._fs = s3fs.S3FileSystem()
+            print(f"[Worker PID {os.getpid()}] S3FileSystem initialized ✓")
+        return self._fs
+    
     def _load_file_pt(self, path):
-        data = torch.load(path, map_location="cpu")
+        # Handle S3 paths
+        if isinstance(path, str) and path.startswith("s3://"):
+            with self.fs.open(path, "rb") as f:
+                data = torch.load(f, map_location="cpu")
+        else:
+            data = torch.load(path, map_location="cpu")
         return data["tensor"], data["feature_cols"]
     
     def _get_file_tensor(self, path):

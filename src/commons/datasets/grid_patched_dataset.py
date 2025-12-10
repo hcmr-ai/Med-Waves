@@ -35,6 +35,10 @@ class GridPatchWaveDataset(Dataset):
         # Load one file to infer dimensions
         sample_tensor, _ = self._load_file_pt(file_paths[0])
         self.H_full, self.W_full = sample_tensor.shape[1], sample_tensor.shape[2]
+        
+        # IMPORTANT: Reset S3FileSystem after loading sample file
+        # This prevents fork-safety issues when workers are created
+        self._fs = None
 
         ph, pw = self.patch_size
         sh, sw = self.stride
@@ -141,12 +145,24 @@ class GridPatchWaveDataset(Dataset):
                   f"75%={np.percentile(sample_arr, 75):.2f}m, 90%={np.percentile(sample_arr, 90):.2f}m")
         
         print(f"Completed: {len(self.index_map)} valid patches after filtering")
+        
+        # IMPORTANT: Reset S3FileSystem after computing bins
+        # This prevents fork-safety issues when DataLoader workers are created
+        self._fs = None
     
     @property
     def fs(self):
         """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
         if self._fs is None:
+            import os
+            import time
+            # Stagger S3 connection creation across workers to avoid thundering herd
+            worker_id = os.getpid() % 8  # Simple worker ID based on PID
+            if worker_id > 0:
+                time.sleep(worker_id * 0.1)  # 0-0.7s delay
+            print(f"[Worker PID {os.getpid()}] Initializing S3FileSystem...")
             self._fs = s3fs.S3FileSystem()
+            print(f"[Worker PID {os.getpid()}] S3FileSystem initialized ✓")
         return self._fs
 
     def _load_file_pt(self, path):

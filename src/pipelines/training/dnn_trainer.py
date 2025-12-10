@@ -191,8 +191,18 @@ def get_file_list(
     """Get list of files from S3 or local path"""
     if data_path.startswith("s3://"):
         fs = s3fs.S3FileSystem()
-        # Use recursive glob to search in subdirectories
-        files = fs.glob(f"{data_path}**/{file_pattern}")
+        # Search in both the directory itself and subdirectories
+        data_path_clean = data_path.rstrip("/")
+        pattern = f"{data_path_clean}/{file_pattern}"
+        print(f"Searching S3 with pattern: {pattern}")
+        files = fs.glob(pattern)
+        # Also add files from subdirectories
+        pattern_recursive = f"{data_path_clean}/**/{file_pattern}"
+        files_recursive = fs.glob(pattern_recursive)
+        # Combine and deduplicate
+        files = list(set(files + files_recursive))
+        # Ensure s3:// prefix
+        files = [f if f.startswith("s3://") else f"s3://{f}" for f in files]
     else:
         files = list(Path(data_path).glob(f"**/{file_pattern}"))
         files = [str(f) for f in files]
@@ -347,7 +357,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
+            fs=fs
         )
     else:
         train_dataset = CachedWaveDataset(
@@ -359,7 +370,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             enable_profiler=True,
             use_cache=data_config.get("use_cache", False),
-            normalize_target=data_config.get("normalize_target", False)
+            normalize_target=data_config.get("normalize_target", False),
+            fs=fs
         )
 
     if data_config.get("patch_size", None) is not None:
@@ -373,12 +385,12 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             use_cache=False,
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
+            fs=fs
         )
     else:
         val_dataset = CachedWaveDataset(
             val_files,
-            # fs=fs,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
             target_column=target_column,
@@ -387,7 +399,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             enable_profiler=True,
             use_cache=False,
-            normalize_target=data_config.get("normalize_target", False)
+            normalize_target=data_config.get("normalize_target", False),
+            fs=fs
         )
 
     # Pre-compute wave bins and filter patches (if using patched dataset)
@@ -420,7 +433,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=training_config["prefetch_factor"],
-        sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None
+        sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None,
+        timeout=300  # 5 minute timeout for S3 loading
     )
 
     val_loader = DataLoader(
@@ -431,7 +445,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         pin_memory=training_config["pin_memory"],
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=None,
-        sampler=None
+        sampler=None,
+        timeout=300  # 5 minute timeout for S3 loading
     )
 
     logger.info(f"Train loader: {len(train_loader)} batches")

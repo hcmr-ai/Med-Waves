@@ -5,7 +5,7 @@
 data:
   data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.pt"
-  train_year: [2017, 2018, 2019, 2020, 2021]
+  train_year: [2019, 2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
@@ -37,10 +37,10 @@ data:
 
 # Model configuration
 model:
-  model_type: "transunet_gan" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
+  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse_gan" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
@@ -99,16 +99,16 @@ training:
   aggressive_freeze: false
 # Checkpoint configuration
 checkpoint:
-  resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0" # S3 backup for spot instances
+  resume_from_checkpoint: null # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_full_19-21_mse_64_lambda_lr" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_full_19-21_mse_64_lambda_lr" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_gan_17-21_mse_gan_64_lambda_lr_VHM0"
+  log_dir: "/opt/dlami/nvme/logs_full_19-21_mse_64_lambda_lr"
+  experiment_name: "dnn_training_full_19-21_mse_64_lambda_lr"
   use_comet: true
-  comet_tags: ["wave_height", "transunet_gan", "bias_correction", "lambda_lr", "mse_gan"]
+  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset"]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"
