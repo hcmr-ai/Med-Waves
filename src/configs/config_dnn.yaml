@@ -3,8 +3,8 @@
 
 # Data configuration
 data:
-  data_path: "/mnt/ebs/preprocessed" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*.pt"
+  data_path: "/mnt/ebs_new/preprocessed/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*_h*.pt"
   train_year: [2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -17,7 +17,8 @@ data:
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: 2 # Data already subsampled in files, no additional runtime subsampling
-  use_cache: true  # Cache files in memory (24x faster than reloading)
+  use_cache: true  # Cache files in memory (reduces repeated I/O)
+  max_cache_size: 20  # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
 
   # Data preprocessing
   target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
@@ -38,11 +39,11 @@ data:
 
 # Model configuration
 model:
-  model_type: "enhanced" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
+  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
   loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
-  filters: [64, 128, 256, 512]
+  filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
   vhm0_channel_index: 0
@@ -74,7 +75,8 @@ model:
 training:
   batch_size: 256  # Larger batches for 64x64 patches (4x smaller than 128x128)
   max_epochs: 100
-  num_workers: 4  # Reduced from 8 to save memory (4 × 1.1GB = 4.4GB cached data)
+  num_workers: 2
+  persistent_workers: true  # Not needed with num_workers=0
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1

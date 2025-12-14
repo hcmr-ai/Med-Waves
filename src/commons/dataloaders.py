@@ -193,7 +193,8 @@ class CachedWaveDataset(Dataset):
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True, normalize_target=False, fs=None):
+                 enable_profiler=False, use_cache=True, normalize_target=False, fs=None,
+                 max_cache_size=20):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -203,18 +204,44 @@ class CachedWaveDataset(Dataset):
         self.subsample_step = subsample_step
         self.predict_bias = predict_bias
         self.enable_profiler = enable_profiler
-        self.index_map = [
-            (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
-        ]
+        # self.index_map = [
+        #     (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
+        # ]
         self.H, self.W = 380, 1307
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
-        # worker-local cache
-        self._cache = {}
+        # worker-local cache with LRU eviction
+        from collections import OrderedDict
+        self._cache = OrderedDict()
         self.use_cache = use_cache
+        self.max_cache_size = max_cache_size  # Number of files to keep in cache
         self.normalize_target = normalize_target
         self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
+
+         # Auto-detect file type (hourly vs daily)
+        if len(file_paths) > 0:
+            print(f"Detecting file format from: {file_paths[0]}")
+            sample_tensor, _ = self._load_file_pt(file_paths[0])
+            self.is_hourly = (sample_tensor.ndim == 3)  # 3D=hourly, 4D=daily
+            print(f"  Tensor shape: {sample_tensor.shape}")
+            print(f"  File type: {'HOURLY' if self.is_hourly else 'DAILY'}")
+            self._fs = None  # Reset after sample load
+            self._cache.clear()
+        else:
+            self.is_hourly = False
+        
+        # Create index_map based on file type
+        if self.is_hourly:
+            # Hourly files: one sample per file
+            self.index_map = [(f_idx, 0) for f_idx in range(len(file_paths))]
+            print(f"  Index map: {len(self.index_map)} samples (1 per file)")
+        else:
+            # Daily files: 24 samples per file
+            self.index_map = [
+                (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
+            ]
+            print(f"  Index map: {len(self.index_map)} samples (24 per file)")
         
         if self.normalizer is not None:
             print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
@@ -309,19 +336,29 @@ class CachedWaveDataset(Dataset):
                 data = torch.load(f, map_location="cpu")
             print(f"[Worker PID {os.getpid()}] Torch load complete ✓")
         else:
-            data = torch.load(path, map_location="cpu")
+            data = torch.load(path, map_location="cpu", weights_only=False)
         return data["tensor"], data["feature_cols"]
 
     def _get_file_tensor(self, path):
         if self.use_cache:
             # Check if file is in cache
             if path in self._cache:
+                # Move to end (mark as recently used for LRU)
+                self._cache.move_to_end(path)
                 return self._cache[path]
             else:
-                # Load and cache (keep only 1 file in memory per worker)
-                self._cache.clear()
+                # Load new file
                 tensor, feature_cols = self._load_file_pt(path)
+                
+                # Add to cache
                 self._cache[path] = (tensor, feature_cols)
+                
+                # Evict oldest if cache is full (LRU eviction)
+                if len(self._cache) > self.max_cache_size:
+                    # Remove oldest (first) item
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                
                 return tensor, feature_cols
         else:
             # No caching - reload every time
@@ -339,7 +376,12 @@ class CachedWaveDataset(Dataset):
 
         tensor, feature_cols = self._get_file_tensor(path)
 
-        hour_data = tensor[hour_idx]
+         # Auto-detect file type (hourly vs daily)
+        if self.is_hourly:
+            hour_data = tensor  # Already single hour: (H, W, C)
+        else:
+            hour_data = tensor[hour_idx] 
+
         # Select input cols
         input_col_indices = [
             i for i, col in enumerate(feature_cols)
@@ -436,12 +478,13 @@ class GridPatchWaveDataset(Dataset):
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,
                  target_column="corrected_VHM0", excluded_columns=None, 
                  normalizer=None, subsample_step=None, predict_bias=False,
-                 use_cache=True, normalize_target=False, fs=None):
+                 use_cache=True, normalize_target=False, fs=None, max_cache_size=20):
         """
         Args:
             patch_size: (H, W) size of each patch
             stride: step size for patch extraction. If None, uses patch_size (no overlap)
                    If smaller than patch_size, creates overlapping patches
+            max_cache_size: Maximum number of files to keep in cache (default: 20)
         """
         self.file_paths = file_paths
         self.patch_size = patch_size
@@ -453,7 +496,10 @@ class GridPatchWaveDataset(Dataset):
         self.predict_bias = predict_bias
         self.use_cache = use_cache
         self.normalize_target = normalize_target
-        self._cache = {}
+        # worker-local cache with LRU eviction
+        from collections import OrderedDict
+        self._cache = OrderedDict()
+        self.max_cache_size = max_cache_size
         self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
@@ -516,18 +562,34 @@ class GridPatchWaveDataset(Dataset):
             with self.fs.open(path, "rb") as f:
                 data = torch.load(f, map_location="cpu")
         else:
-            data = torch.load(path, map_location="cpu")
+            data = torch.load(path, map_location="cpu", weights_only=False)
         return data["tensor"], data["feature_cols"]
     
     def _get_file_tensor(self, path):
-        if self.use_cache and path in self._cache:
-            return self._cache[path]
-        
-        tensor, feature_cols = self._load_file_pt(path)
         if self.use_cache:
-            self._cache.clear()  # Keep only 1 file in memory
-            self._cache[path] = (tensor, feature_cols)
-        return tensor, feature_cols
+            # Check if file is in cache
+            if path in self._cache:
+                # Move to end (mark as recently used for LRU)
+                self._cache.move_to_end(path)
+                return self._cache[path]
+            else:
+                # Load new file
+                tensor, feature_cols = self._load_file_pt(path)
+                
+                # Add to cache
+                self._cache[path] = (tensor, feature_cols)
+                
+                # Evict oldest if cache is full (LRU eviction)
+                if len(self._cache) > self.max_cache_size:
+                    # Remove oldest (first) item
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                
+                return tensor, feature_cols
+        else:
+            # No caching - reload every time
+            tensor, feature_cols = self._load_file_pt(path)
+            return tensor, feature_cols
     
     def __getitem__(self, idx):
         file_idx, hour_idx, patch_i, patch_j = self.index_map[idx]

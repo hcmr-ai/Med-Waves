@@ -358,6 +358,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
             min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
+            max_cache_size=data_config.get("max_cache_size", 20),
             fs=fs
         )
     else:
@@ -372,7 +373,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             enable_profiler=True,
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            fs=fs
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
 
     if data_config.get("patch_size_deactivate", None) is not None:
@@ -385,10 +387,11 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
-            use_cache=False,
+            use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
             min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
-            fs=fs
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
     else:
         val_dataset = CachedWaveDataset(
@@ -400,9 +403,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             subsample_step=subsample_step,
             normalizer=normalizer,
             enable_profiler=True,
-            use_cache=False,
+            use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            fs=fs
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
 
     # Pre-compute wave bins and filter patches (if using patched dataset)
@@ -433,7 +437,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=True if patch_size is None or not use_balanced_sampling else False,  # Don't shuffle when using sampler
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config.get("persistent_workers", training_config["num_workers"] > 0),
         prefetch_factor=training_config["prefetch_factor"],
         sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None,
         # timeout=300  # 5 minute timeout for S3 loading
@@ -445,7 +449,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=False,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config.get("persistent_workers", training_config["num_workers"] > 0),
         prefetch_factor=None,
         sampler=None,
         # timeout=300  # 5 minute timeout for S3 loading
