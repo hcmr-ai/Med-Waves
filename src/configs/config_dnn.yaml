@@ -3,20 +3,21 @@
 
 # Data configuration
 data:
-  data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  data_path: "/mnt/ebs/preprocessed" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.pt"
-  train_year: [2019, 2020, 2021]
+  train_year: [2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
   test_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-  patch_size: null #[64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
+  patch_size: [64, 64] # Smaller patches = faster training (was [128, 128])
+  stride: [64, 64] # Stride for sliding window
   min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
   use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
-  subsample_step: null # Data already subsampled in files, no additional runtime subsampling
-  use_cache: false
+  subsample_step: 2 # Data already subsampled in files, no additional runtime subsampling
+  use_cache: true  # Cache files in memory (24x faster than reloading)
 
   # Data preprocessing
   target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
@@ -37,11 +38,11 @@ data:
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
+  model_type: "enhanced" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
   loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
-  filters: [64, 128, 256]
+  filters: [64, 128, 256, 512]
   dropout: 0
   add_vhm0_residual: false
   vhm0_channel_index: 0
@@ -71,9 +72,9 @@ model:
 
 # Training configuration
 training:
-  batch_size: 64
+  batch_size: 256  # Larger batches for 64x64 patches (4x smaller than 128x128)
   max_epochs: 100
-  num_workers: 8
+  num_workers: 4  # Reduced from 8 to save memory (4 × 1.1GB = 4.4GB cached data)
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1
@@ -87,7 +88,7 @@ training:
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
   benchmark: false
-  prefetch_factor: 1
+  prefetch_factor: 2  # Increased from 1: prefetch 2 batches per worker (helps with I/O)
   val_check_interval: null
   use_swa: false
   use_ema: false
@@ -100,15 +101,15 @@ training:
 # Checkpoint configuration
 checkpoint:
   resume_from_checkpoint: null # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_full_19-21_mse_64_lambda_lr" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_full_19-21_mse_64_lambda_lr" # S3 backup for spot instances
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_full_20-21_mse_64_lambda_lr_128" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_full_20-21_mse_64_lambda_lr_128" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/logs_full_19-21_mse_64_lambda_lr"
-  experiment_name: "dnn_training_full_19-21_mse_64_lambda_lr"
+  log_dir: "/opt/dlami/nvme/logs_full_20-21_mse_64_lambda_lr_128"
+  experiment_name: "dnn_training_full_20-21_mse_64_lambda_lr_128"
   use_comet: true
-  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset"]
+  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset", "128_patch_size"]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"

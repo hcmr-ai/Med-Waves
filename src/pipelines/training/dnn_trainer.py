@@ -346,7 +346,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    if data_config.get("patch_size", None) is not None:
+    if data_config.get("patch_size_deactivate", None) is not None:
         train_dataset = GridPatchWaveDataset(
             train_files,
             patch_size=patch_size,
@@ -363,6 +363,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     else:
         train_dataset = CachedWaveDataset(
             train_files,
+            patch_size=patch_size,
             excluded_columns=excluded_columns,
             target_column=target_column,
             predict_bias=predict_bias,
@@ -374,10 +375,11 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             fs=fs
         )
 
-    if data_config.get("patch_size", None) is not None:
+    if data_config.get("patch_size_deactivate", None) is not None:
         val_dataset = GridPatchWaveDataset(
             val_files,
             patch_size=patch_size,
+            stride=data_config.get("stride", None),
             excluded_columns=excluded_columns,
             target_column=target_column,
             predict_bias=predict_bias,
@@ -408,12 +410,12 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
 
     if patch_size is not None:
         # ALWAYS compute bins to filter out invalid patches (regardless of balanced sampling)
-        logger.info("Computing wave bins and filtering invalid patches...")
-        train_dataset.compute_all_bins()
-        logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
+        # logger.info("Computing wave bins and filtering invalid patches...")
+        # train_dataset.compute_all_bins()
+        # logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
 
         # Also filter validation dataset
-        val_dataset.compute_all_bins()
+        # val_dataset.compute_all_bins()
         logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
 
         if len(val_dataset) == 0:
@@ -434,7 +436,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=training_config["prefetch_factor"],
         sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None,
-        timeout=300  # 5 minute timeout for S3 loading
+        # timeout=300  # 5 minute timeout for S3 loading
     )
 
     val_loader = DataLoader(
@@ -446,7 +448,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         persistent_workers=training_config["num_workers"] > 0,
         prefetch_factor=None,
         sampler=None,
-        timeout=300  # 5 minute timeout for S3 loading
+        # timeout=300  # 5 minute timeout for S3 loading
     )
 
     logger.info(f"Train loader: {len(train_loader)} batches")

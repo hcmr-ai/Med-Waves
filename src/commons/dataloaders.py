@@ -313,24 +313,29 @@ class CachedWaveDataset(Dataset):
         return data["tensor"], data["feature_cols"]
 
     def _get_file_tensor(self, path):
-        if self.use_cache and path not in self._cache:
-            # Drop any previously cached file (keep only 1 in memory)
-            # self._cache.clear()
-            tensor, feature_cols = self._load_file_pt(path)
-            self._cache[path] = (tensor, feature_cols)
-            return tensor, feature_cols
+        if self.use_cache:
+            # Check if file is in cache
+            if path in self._cache:
+                return self._cache[path]
+            else:
+                # Load and cache (keep only 1 file in memory per worker)
+                self._cache.clear()
+                tensor, feature_cols = self._load_file_pt(path)
+                self._cache[path] = (tensor, feature_cols)
+                return tensor, feature_cols
         else:
+            # No caching - reload every time
             tensor, feature_cols = self._load_file_pt(path)
             return tensor, feature_cols
 
     def __getitem__(self, idx):
         import os
-        if idx < 5:  # Only log first few calls to avoid spam
-            print(f"[Worker PID {os.getpid()}] __getitem__ called with idx={idx}")
+        # if idx < 5:  # Only log first few calls to avoid spam
+        #     print(f"[Worker PID {os.getpid()}] __getitem__ called with idx={idx}")
         file_idx, hour_idx = self.index_map[idx]
         path = self.file_paths[file_idx]
-        if idx < 5:
-            print(f"[Worker PID {os.getpid()}] Loading file: {os.path.basename(path)}")
+        # if idx < 5:
+        #     print(f"[Worker PID {os.getpid()}] Loading file: {os.path.basename(path)}")
 
         tensor, feature_cols = self._get_file_tensor(path)
 
@@ -371,7 +376,14 @@ class CachedWaveDataset(Dataset):
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
         mask = ~torch.isnan(y)
-        # Patch sampling
+
+        # Subsample
+        if self.subsample_step is not None:
+            X = X[::self.subsample_step, ::self.subsample_step, :]
+            y = y[::self.subsample_step, ::self.subsample_step, :]
+            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+        
+         # Patch sampling
         if self.patch_size is not None:
             H, W, _ = X.shape
             ph, pw = self.patch_size
@@ -380,12 +392,8 @@ class CachedWaveDataset(Dataset):
                 j = random.randint(0, W - pw)
                 X = X[i:i+ph, j:j+pw, :]
                 y = y[i:i+ph, j:j+pw, :]
-
-        # Subsample
-        if self.subsample_step is not None:
-            X = X[::self.subsample_step, ::self.subsample_step, :]
-            y = y[::self.subsample_step, ::self.subsample_step, :]
-            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+                vhm0 = vhm0[i:i+ph, j:j+pw, :]
+                mask = mask[i:i+ph, j:j+pw, :]
 
         if self.normalizer is not None:
             if not hasattr(self, '_target_stats_verified'):
@@ -423,6 +431,7 @@ class CachedWaveDataset(Dataset):
 
 class GridPatchWaveDataset(Dataset):
     """Dataset that samples patches in a systematic grid to cover the entire image."""
+    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
     
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,
                  target_column="corrected_VHM0", excluded_columns=None, 
@@ -445,6 +454,7 @@ class GridPatchWaveDataset(Dataset):
         self.use_cache = use_cache
         self.normalize_target = normalize_target
         self._cache = {}
+        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
         
@@ -527,21 +537,21 @@ class GridPatchWaveDataset(Dataset):
         tensor, feature_cols = self._get_file_tensor(path)
         hour_data = tensor[hour_idx]  # (H, W, C)
         
-        # Select input features
-        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 
-                         'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 
-                         'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 
-                         'wave_dir_cos', 'corrected_VHM0']
-        
+        # Select input features in FEATURES_ORDER to match scaler's stats_ indices
+        # This ensures stats_[c] applies to channel c in X
         input_col_indices = []
-        for feat in FEATURES_ORDER:
+        for feat in self.features_order:
             if feat in self.excluded_columns or feat == self.target_column:
                 continue
             if feat in feature_cols:
                 input_col_indices.append(feature_cols.index(feat))
         
         X = hour_data[..., input_col_indices]
-        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        
+        # Extract uncorrected version based on target_column
+        # e.g., "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+        uncorrected_column = self.target_column.replace("corrected_", "")
+        vhm0 = hour_data[..., feature_cols.index(uncorrected_column):feature_cols.index(uncorrected_column)+1]
         
         # Get target
         if self.predict_bias:
@@ -550,11 +560,15 @@ class GridPatchWaveDataset(Dataset):
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
         
+        # Create mask early (before patching)
+        mask = ~torch.isnan(y)
+        
         # Apply subsampling BEFORE patch extraction
         if self.subsample_step is not None:
             X = X[::self.subsample_step, ::self.subsample_step, :]
             y = y[::self.subsample_step, ::self.subsample_step, :]
             vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            mask = mask[::self.subsample_step, ::self.subsample_step, :]
         
         # Extract patch at grid location
         ph, pw = self.patch_size
@@ -565,9 +579,18 @@ class GridPatchWaveDataset(Dataset):
         X = X[i_start:i_start+ph, j_start:j_start+pw, :]
         y = y[i_start:i_start+ph, j_start:j_start+pw, :]
         vhm0 = vhm0[i_start:i_start+ph, j_start:j_start+pw, :]
+        mask = mask[i_start:i_start+ph, j_start:j_start+pw, :]
         
         # Normalize
         if self.normalizer is not None:
+            # Verify target_stats_ is set (for multiprocessing worker safety)
+            if not hasattr(self, '_target_stats_verified'):
+                if self.normalize_target and self.normalizer.target_stats_ is None:
+                    print(f"⚠️ Worker: target_stats_ was None, re-setting")
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                self._target_stats_verified = True
+            
             if self.normalize_target:
                 X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
             else:
@@ -577,7 +600,7 @@ class GridPatchWaveDataset(Dataset):
         X = X.permute(2, 0, 1).contiguous()
         y = y.permute(2, 0, 1).contiguous()
         vhm0 = vhm0.permute(2, 0, 1).contiguous()
-        mask = ~torch.isnan(y).contiguous()  # y is already (C, H, W), no need to permute
+        mask = mask.permute(2, 0, 1).contiguous()  # Convert mask to (C, H, W) to match y
         
         return X, y, mask, vhm0
     
