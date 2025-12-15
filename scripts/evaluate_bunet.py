@@ -399,6 +399,7 @@ class ModelEvaluator:
                 "sum_baseline_mse": 0.0,
                 "sum_baseline_bias": 0.0,
                 "count_model_better": 0,  # Count of samples where |model_error| < |baseline_error|
+                "count_model_worse": 0,  # Count of samples where |model_error| > |baseline_error|
             }
             for bin_config in self.sea_bins
         }
@@ -790,9 +791,14 @@ class ModelEvaluator:
                         )
 
                         # Count samples where model has better (lower) absolute error than baseline
-                        model_better = np.abs(bin_errors) < np.abs(baseline_bin_errors)
+                        model_better = np.abs(bin_errors) <= np.abs(baseline_bin_errors)
                         self.sea_bin_accumulators[bin_name]["count_model_better"] += (
                             np.sum(model_better)
+                        )
+
+                        model_worse = np.abs(bin_errors) > np.abs(baseline_bin_errors)
+                        self.sea_bin_accumulators[bin_name]["count_model_worse"] += (
+                            np.sum(model_worse)
                         )
 
                         # Store all baseline error samples
@@ -811,6 +817,16 @@ class ModelEvaluator:
         print("Running inference on test set...")
         self.model.eval()
         self._reset_accumulators()
+
+        def pad_to_multiple(x, multiple=16, mode="reflect"):
+            import torch.nn.functional as F
+
+            _, _, H, W = x.shape
+            pad_h = (multiple - H % multiple) % multiple
+            pad_w = (multiple - W % multiple) % multiple
+            if pad_h > 0 or pad_w > 0:
+                x = F.pad(x, (0, pad_w, 0, pad_h), mode=mode)
+            return x, (H, W)
 
         # If binwise correction is enabled, compute biases from bias_loader first
         if self.apply_binwise_correction_flag:
@@ -834,6 +850,17 @@ class ModelEvaluator:
                         vhm0_batch.to(self.device) if vhm0_batch is not None else None
                     )
 
+                X, orig_size = pad_to_multiple(X, multiple=16)
+
+                if y is not None:
+                    y, _ = pad_to_multiple(y, multiple=16)
+                mask_float = mask.float()
+                mask, _ = pad_to_multiple(mask_float, multiple=16)
+                mask = mask.bool()
+
+                if vhm0 is not None:
+                    vhm0, _ = pad_to_multiple(vhm0, multiple=16)
+                
                 X = X.to(self.device)
                 y = y.to(self.device)
                 mask = mask.to(self.device)
@@ -848,6 +875,7 @@ class ModelEvaluator:
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])
                 min_w = min(y_pred.shape[3], y.shape[3])
+                min_h, min_w = orig_size
                 y_pred = y_pred[:, :, :min_h, :min_w]
                 y = y[:, :, :min_h, :min_w]
                 mask = mask[:, :, :min_h, :min_w]
@@ -1070,6 +1098,9 @@ class ModelEvaluator:
                     pct_model_better = (
                         bin_data["count_model_better"] / bin_count
                     ) * 100
+                    pct_model_worse = (
+                        bin_data["count_model_worse"] / bin_count
+                    ) * 100
 
                 sea_bin_metrics[bin_name] = {
                     "label": bin_config["label"],
@@ -1095,6 +1126,10 @@ class ModelEvaluator:
                     "count_model_better": int(bin_data["count_model_better"]),
                     "pct_model_better": float(pct_model_better)
                     if pct_model_better is not None
+                    else None,
+                    "count_model_worse": int(bin_data["count_model_worse"]),
+                    "pct_model_worse": float(pct_model_worse)
+                    if pct_model_worse is not None
                     else None,
                 }
 
@@ -1238,7 +1273,7 @@ class ModelEvaluator:
             improvement_mae = mae_baseline - mae_model
             # Symmetric scale around zero for diverging colormap
             imp_abs_max = np.nanpercentile(np.abs(improvement), 98)
-            imp_mae_abs_max = np.nanpercentile(np.abs(improvement_mae), 98)
+            imp_mae_abs_max = np.nanpercentile(np.abs(improvement_mae), 95)
 
             # For improvement plots: Blue for <0 (worse), Red for >=0 (better)
             from matplotlib.colors import LinearSegmentedColormap, BoundaryNorm
@@ -1267,7 +1302,7 @@ class ModelEvaluator:
                 improvement,
                 save_path=self.output_dir / "rmse_improvement_symmetric.png",
                 title="RMSE Improvement (Reference - Model)",
-                vmin=-imp_abs_max,
+                vmin=np.nanpercentile(improvement, 2),
                 vmax=imp_abs_max,  # Symmetric around zero
                 cmap=cmap,
                 geo_bounds=self.geo_bounds,
@@ -1308,7 +1343,9 @@ class ModelEvaluator:
         # Prepare data
         bin_labels = []
         pct_better = []
-        counts = []
+        counts_better = []
+        pct_worse = []
+        counts_worse = []
 
         # Sort bins by their min value
         sorted_bins = sorted(self.sea_bins, key=lambda x: x["min"])
@@ -1324,7 +1361,9 @@ class ModelEvaluator:
 
             bin_labels.append(metrics.get("label", bin_config["label"]))
             pct_better.append(metrics.get("pct_model_better", 0))
-            counts.append(metrics.get("count_model_better", 0))
+            pct_worse.append(metrics.get("pct_model_worse", 0))
+            counts_better.append(metrics.get("count_model_better", 0))
+            counts_worse.append(metrics.get("count_model_worse", 0))
 
         if not bin_labels:
             logger.warning("No data for model better percentage plot")
@@ -1350,7 +1389,7 @@ class ModelEvaluator:
         )
 
         # Add value labels on bars
-        for i, (pct, count) in enumerate(zip(pct_better, counts)):
+        for i, (pct, count) in enumerate(zip(pct_better, counts_better)):
             # Label with percentage and count
             label_text = f"{pct:.1f}%\n(n={count:,})"
 
@@ -1378,8 +1417,8 @@ class ModelEvaluator:
             ):
                 total_better += sea_bin_metrics[bin_name].get("count_model_better", 0)
 
-        total_count = sum(counts)
-        overall_pct = (total_better / total_count * 100) if total_count > 0 else 0
+        total_count = sum(counts_better)
+        overall_pct_better = (total_better / total_count * 100) if total_count > 0 else 0
 
         # Find bins with highest and lowest performance
         max_idx = pct_better.index(max(pct_better))
@@ -1431,6 +1470,73 @@ class ModelEvaluator:
 
         print(
             f"Saved model better percentage plot to {self.output_dir / 'model_better_percentage.png'}"
+        )
+        
+         # Create figure
+        _, ax = plt.subplots(figsize=(14, 8))
+
+        # Color bars based on threshold (green if >50%, orange if <50%)
+        colors = ["#5cb85c" if pct >= 50 else "#f0ad4e" for pct in pct_worse]
+
+        # Create bars
+        _ = ax.bar(range(len(bin_labels)), pct_worse, color=colors, alpha=0.8)
+
+        # Add 50% threshold line
+        ax.axhline(
+            y=50,
+            color="black",
+            linestyle="--",
+            linewidth=2,
+            label="50% threshold",
+            alpha=0.7,
+        )
+
+        # Add value labels on bars
+        for i, (pct, count) in enumerate(zip(pct_worse, counts_worse)):
+            # Label with percentage and count
+            label_text = f"{pct:.1f}%\n(n={count:,})"
+
+            # Position label above bar
+            y_pos = pct + 2
+
+            ax.text(
+                i,
+                y_pos,
+                label_text,
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+            )
+        # Formatting
+        ax.set_title(
+            "Model Worse Than Reference (% of Samples)",
+            fontsize=16,
+            fontweight="bold",
+            pad=20,
+        )
+        ax.set_xlabel(f"{self.var_name_full} Bin", fontsize=13, fontweight="bold")
+        ax.set_ylabel(
+            "% of Samples Where |Model Error| > |Reference Error|",
+            fontsize=13,
+            fontweight="bold",
+        )
+        ax.set_xticks(range(len(bin_labels)))
+        ax.set_xticklabels(bin_labels, rotation=45, ha="right", fontsize=10)
+        ax.set_ylim(0, 105)
+        ax.grid(True, alpha=0.3, axis="y", linestyle="--")
+        # ax.legend(fontsize=11, loc='upper left')
+
+        plt.tight_layout()
+        plt.savefig(
+            self.output_dir / "model_worse_percentage.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close()
+
+        print(
+            f"Saved model worse percentage plot to {self.output_dir / 'model_worse_percentage.png'}"
         )
 
     def plot_sea_bin_metrics(self, sea_bin_metrics: Dict[str, Dict]):
@@ -2666,7 +2772,7 @@ def main():
     target_column = data_config.get("target_column", "corrected_VHM0")
     subsample_step = data_config.get("subsample_step", None)
 
-    if patch_size is not None:
+    if None is True:
         test_dataset = GridPatchWaveDataset(
             test_files,
             patch_size=patch_size,
@@ -2799,7 +2905,7 @@ def main():
         normalizer=normalizer,
         normalize_target=data_config.get("normalize_target", False),
         test_files=test_files_parq,
-        subsample_step=5,
+        subsample_step=1,
         apply_binwise_correction_flag=args.apply_binwise_correction,
         bias_loader=train_loader,  # Use train set to compute bin biases
         geo_bounds=geo_bounds,
