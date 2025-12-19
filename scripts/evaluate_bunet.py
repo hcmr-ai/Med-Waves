@@ -2673,9 +2673,9 @@ class ModelEvaluator:
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
-        self.plot_vhm0_distributions()
-        self.plot_error_distribution_histograms()
-        self.plot_error_boxplots()
+        # self.plot_vhm0_distributions()
+        # self.plot_error_distribution_histograms()
+        # self.plot_error_boxplots()
         # self.plot_error_violins()
         # self.plot_error_cdfs()
 
@@ -2729,8 +2729,8 @@ def main():
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
     )
     _test_files_parq = get_file_list(
-        "s3://medwav-dev-data/parquet/hourly/year=2023/",
-        "WAVEAN2023*.parquet",
+        f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
+        f"WAVEAN{data_config.get('test_year', [2023])[0]}*.parquet",
     )
 
     _, _, test_files_parq = split_files_by_year(
