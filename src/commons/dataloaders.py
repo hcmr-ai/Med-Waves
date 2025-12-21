@@ -189,10 +189,12 @@ from torch.utils.data import Dataset
 
 
 class CachedWaveDataset(Dataset):
+    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
     def __init__(self, file_paths, target_column="corrected_VHM0",
                  excluded_columns=None, normalizer=None,
                  patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True, normalize_target=False):
+                 enable_profiler=False, use_cache=True, normalize_target=False, fs=None,
+                 max_cache_size=20):
         self.file_paths = file_paths
         # self.index_map = index_map   # list of (file_idx, hour_idx)
         self.target_column = target_column
@@ -202,15 +204,98 @@ class CachedWaveDataset(Dataset):
         self.subsample_step = subsample_step
         self.predict_bias = predict_bias
         self.enable_profiler = enable_profiler
-        self.index_map = [
-            (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
-        ]
+        # self.index_map = [
+        #     (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
+        # ]
         self.H, self.W = 380, 1307
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
-        # worker-local cache
-        self._cache = {}
+        # worker-local cache with LRU eviction
+        from collections import OrderedDict
+        self._cache = OrderedDict()
         self.use_cache = use_cache
+        self.max_cache_size = max_cache_size  # Number of files to keep in cache
         self.normalize_target = normalize_target
+        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
+        self._fs = None
+
+         # Auto-detect file type (hourly vs daily)
+        if len(file_paths) > 0:
+            print(f"Detecting file format from: {file_paths[0]}")
+            sample_tensor, _ = self._load_file_pt(file_paths[0])
+            self.is_hourly = (sample_tensor.ndim == 3)  # 3D=hourly, 4D=daily
+            print(f"  Tensor shape: {sample_tensor.shape}")
+            print(f"  File type: {'HOURLY' if self.is_hourly else 'DAILY'}")
+            self._fs = None  # Reset after sample load
+            self._cache.clear()
+        else:
+            self.is_hourly = False
+        
+        # Create index_map based on file type
+        if self.is_hourly:
+            # Hourly files: one sample per file
+            self.index_map = [(f_idx, 0) for f_idx in range(len(file_paths))]
+            print(f"  Index map: {len(self.index_map)} samples (1 per file)")
+        else:
+            # Daily files: 24 samples per file
+            self.index_map = [
+                (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
+            ]
+            print(f"  Index map: {len(self.index_map)} samples (24 per file)")
+        
+        if self.normalizer is not None:
+            print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
+            print(f"Features order: {self.normalizer.feature_order_}")
+            print(f"Features order expected: {self.FEATURES_ORDER}")
+
+            print(f"\n=== NORMALIZER DEBUG ===")
+            print(f"Target column in config: {self.target_column}")
+            print(f"Normalizer target_feature_name_: {self.normalizer.target_feature_name_}")
+            print(f"Feature order: {self.normalizer.feature_order_}")
+
+            if self.normalize_target and self.normalizer.feature_order_:
+                try:
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    print(f"✓ Found '{self.target_column}' at index {target_idx}")
+                    
+                    # Check what stats exist
+                    if target_idx in self.normalizer.stats_:
+                        stats = self.normalizer.stats_[target_idx]
+                        if isinstance(stats, tuple):
+                            mean, std = stats
+                            print(f"  Stats at index {target_idx}: mean={mean:.4f}, std={std:.4f}")
+                        else:
+                            print(f"  Stats at index {target_idx}: {type(stats)}")
+                        
+                        # Actually set it
+                        self.normalizer.target_stats_ = stats
+                        print(f"✓ Set target_stats_ to index {target_idx}")
+                    else:
+                        print(f"✗ Index {target_idx} not in stats_! Available: {list(self.normalizer.stats_.keys())}")
+                    
+                    if hasattr(stats, 'mean_') and hasattr(stats, 'scale_'):
+                        print(f"  StandardScaler mean_: {stats.mean_[0]:.4f}")
+                        print(f"  StandardScaler scale_ (std): {stats.scale_[0]:.4f}")
+                    else:
+                        print(f"  StandardScaler attributes: {dir(stats)}")
+                except (ValueError, KeyError) as e:
+                    print(f"✗ Error: {e}")
+            print(f"======================\n")
+
+    @property
+    def fs(self):
+        """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
+        if self._fs is None:
+            import os
+            import time
+            # Stagger S3 connection creation across workers to avoid thundering herd
+            worker_id = os.getpid() % 8  # Simple worker ID based on PID
+            if worker_id > 0:
+                time.sleep(worker_id * 0.1)  # 0-0.7s delay
+            print(f"[Worker PID {os.getpid()}] Initializing S3FileSystem...")
+            self._fs = s3fs.S3FileSystem()
+            print(f"[Worker PID {os.getpid()}] S3FileSystem initialized ✓")
+        return self._fs
 
     def _load_file(self, path):
         table = pq.read_table(path)
@@ -242,40 +327,73 @@ class CachedWaveDataset(Dataset):
         return tensor, feature_cols
 
     def _load_file_pt(self, path):
-        data = torch.load(path, map_location="cpu")   # {"tensor": (T,H,W,C), "feature_cols": [...]}
+        import os
+        # Handle S3 paths
+        if isinstance(path, str) and path.startswith("s3://"):
+            print(f"[Worker PID {os.getpid()}] Opening S3 file: {os.path.basename(path)}")
+            with self.fs.open(path, "rb") as f:
+                print(f"[Worker PID {os.getpid()}] File opened, loading with torch...")
+                data = torch.load(f, map_location="cpu")
+            print(f"[Worker PID {os.getpid()}] Torch load complete ✓")
+        else:
+            data = torch.load(path, map_location="cpu", weights_only=False)
         return data["tensor"], data["feature_cols"]
 
     def _get_file_tensor(self, path):
-        if self.use_cache and path not in self._cache:
-            # Drop any previously cached file (keep only 1 in memory)
-            # self._cache.clear()
-            tensor, feature_cols = self._load_file_pt(path)
-            self._cache[path] = (tensor, feature_cols)
-            return tensor, feature_cols
+        if self.use_cache:
+            # Check if file is in cache
+            if path in self._cache:
+                # Move to end (mark as recently used for LRU)
+                self._cache.move_to_end(path)
+                return self._cache[path]
+            else:
+                # Load new file
+                tensor, feature_cols = self._load_file_pt(path)
+                
+                # Add to cache
+                self._cache[path] = (tensor, feature_cols)
+                
+                # Evict oldest if cache is full (LRU eviction)
+                if len(self._cache) > self.max_cache_size:
+                    # Remove oldest (first) item
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                
+                return tensor, feature_cols
         else:
+            # No caching - reload every time
             tensor, feature_cols = self._load_file_pt(path)
             return tensor, feature_cols
 
     def __getitem__(self, idx):
+        import os
+        # if idx < 5:  # Only log first few calls to avoid spam
+        #     print(f"[Worker PID {os.getpid()}] __getitem__ called with idx={idx}")
         file_idx, hour_idx = self.index_map[idx]
         path = self.file_paths[file_idx]
+        # if idx < 5:
+        #     print(f"[Worker PID {os.getpid()}] Loading file: {os.path.basename(path)}")
 
         tensor, feature_cols = self._get_file_tensor(path)
 
-        hour_data = tensor[hour_idx]
+         # Auto-detect file type (hourly vs daily)
+        if self.is_hourly:
+            hour_data = tensor  # Already single hour: (H, W, C)
+        else:
+            hour_data = tensor[hour_idx] 
+
         # Select input cols
         input_col_indices = [
             i for i, col in enumerate(feature_cols)
             if (col not in self.excluded_columns) and (col != self.target_column)
         ]
-        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0']
         
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X
         input_features = []
         input_col_indices = []
-        
-        for feat in FEATURES_ORDER:
+
+        for feat in self.features_order:
             if feat in self.excluded_columns or feat == self.target_column:
                 continue
             
@@ -286,7 +404,13 @@ class CachedWaveDataset(Dataset):
                 input_col_indices.append(idx_in_feature_cols)
         X = hour_data[..., input_col_indices]  # (H, W, C_in)
 
-        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        # vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        # Extract uncorrected version based on target_column
+        # e.g., "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+        uncorrected_column = self.target_column.replace("corrected_", "")
+        vhm0 = hour_data[..., feature_cols.index(uncorrected_column):feature_cols.index(uncorrected_column)+1]
+
+# Same fix for GridPatchWaveDataset (around line 481)
 
         if self.predict_bias:
             corrected = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
@@ -294,7 +418,14 @@ class CachedWaveDataset(Dataset):
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
         mask = ~torch.isnan(y)
-        # Patch sampling
+
+        # Subsample
+        if self.subsample_step is not None:
+            X = X[::self.subsample_step, ::self.subsample_step, :]
+            y = y[::self.subsample_step, ::self.subsample_step, :]
+            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+        
+         # Patch sampling
         if self.patch_size is not None:
             H, W, _ = X.shape
             ph, pw = self.patch_size
@@ -303,34 +434,25 @@ class CachedWaveDataset(Dataset):
                 j = random.randint(0, W - pw)
                 X = X[i:i+ph, j:j+pw, :]
                 y = y[i:i+ph, j:j+pw, :]
+                vhm0 = vhm0[i:i+ph, j:j+pw, :]
+                mask = mask[i:i+ph, j:j+pw, :]
 
+        if self.normalizer is not None:
+            if not hasattr(self, '_target_stats_verified'):
+                if self.normalize_target and self.normalizer.target_stats_ is None:
+                    print(f"⚠️ Worker: target_stats_ was None, re-setting")
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                self._target_stats_verified = True
 
-        if self.enable_profiler:
-            with torch.profiler.record_function("normalize_and_subsample"):
-                # Subsample
-                if self.subsample_step is not None:
-                    X = X[::self.subsample_step, ::self.subsample_step, :]
-                    y = y[::self.subsample_step, ::self.subsample_step, :]
-                    vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            # if self.normalize_target and self.normalizer.feature_order_:
+            #     target_idx = self.normalizer.feature_order_.index(self.target_column)
+            #     self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
 
-                if self.normalizer is not None:
-                    if self.normalize_target:
-                        X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
-                    else:
-                        X = self.normalizer.transform_torch(X, normalize_target=False)
-        else:
-            # Without profiler
-             # Subsample
-            if self.subsample_step is not None:
-                X = X[::self.subsample_step, ::self.subsample_step, :]
-                y = y[::self.subsample_step, ::self.subsample_step, :]
-                vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
-
-            if self.normalizer is not None:
-                if self.normalize_target:
-                    X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
-                else:
-                    X = self.normalizer.transform_torch(X, normalize_target=False)
+            if self.normalize_target:
+                X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
+            else:
+                X = self.normalizer.transform_torch(X, normalize_target=False)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
@@ -351,16 +473,18 @@ class CachedWaveDataset(Dataset):
 
 class GridPatchWaveDataset(Dataset):
     """Dataset that samples patches in a systematic grid to cover the entire image."""
+    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
     
     def __init__(self, file_paths, patch_size=(128, 128), stride=None,
                  target_column="corrected_VHM0", excluded_columns=None, 
                  normalizer=None, subsample_step=None, predict_bias=False,
-                 use_cache=True, normalize_target=False):
+                 use_cache=True, normalize_target=False, fs=None, max_cache_size=20):
         """
         Args:
             patch_size: (H, W) size of each patch
             stride: step size for patch extraction. If None, uses patch_size (no overlap)
                    If smaller than patch_size, creates overlapping patches
+            max_cache_size: Maximum number of files to keep in cache (default: 20)
         """
         self.file_paths = file_paths
         self.patch_size = patch_size
@@ -372,13 +496,23 @@ class GridPatchWaveDataset(Dataset):
         self.predict_bias = predict_bias
         self.use_cache = use_cache
         self.normalize_target = normalize_target
-        self._cache = {}
+        # worker-local cache with LRU eviction
+        from collections import OrderedDict
+        self._cache = OrderedDict()
+        self.max_cache_size = max_cache_size
+        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
+        self._fs = None
         
         # Image dimensions - detect from actual stored data
         # Load a sample file to get actual dimensions (handles pre-subsampled data)
         sample_tensor, _ = self._load_file_pt(file_paths[0])
         self.H_full, self.W_full = sample_tensor.shape[1], sample_tensor.shape[2]
         print(f"Detected data dimensions: {self.H_full} x {self.W_full}")
+        
+        # IMPORTANT: Reset S3FileSystem after loading sample file
+        # This prevents fork-safety issues when workers are created
+        self._fs = None
         
         # Calculate grid dimensions
         ph, pw = self.patch_size
@@ -407,19 +541,55 @@ class GridPatchWaveDataset(Dataset):
         print(f"  Grid: {self.n_patches_h} x {self.n_patches_w} = {patches_per_hour} patches/hour")
         print(f"  Total samples: {len(self.index_map)}")
     
+    @property
+    def fs(self):
+        """Lazy-initialize S3FileSystem per worker process (not fork-safe)"""
+        if self._fs is None:
+            import os
+            import time
+            # Stagger S3 connection creation across workers to avoid thundering herd
+            worker_id = os.getpid() % 8  # Simple worker ID based on PID
+            if worker_id > 0:
+                time.sleep(worker_id * 0.1)  # 0-0.7s delay
+            print(f"[Worker PID {os.getpid()}] Initializing S3FileSystem...")
+            self._fs = s3fs.S3FileSystem()
+            print(f"[Worker PID {os.getpid()}] S3FileSystem initialized ✓")
+        return self._fs
+    
     def _load_file_pt(self, path):
-        data = torch.load(path, map_location="cpu")
+        # Handle S3 paths
+        if isinstance(path, str) and path.startswith("s3://"):
+            with self.fs.open(path, "rb") as f:
+                data = torch.load(f, map_location="cpu")
+        else:
+            data = torch.load(path, map_location="cpu", weights_only=False)
         return data["tensor"], data["feature_cols"]
     
     def _get_file_tensor(self, path):
-        if self.use_cache and path in self._cache:
-            return self._cache[path]
-        
-        tensor, feature_cols = self._load_file_pt(path)
         if self.use_cache:
-            self._cache.clear()  # Keep only 1 file in memory
-            self._cache[path] = (tensor, feature_cols)
-        return tensor, feature_cols
+            # Check if file is in cache
+            if path in self._cache:
+                # Move to end (mark as recently used for LRU)
+                self._cache.move_to_end(path)
+                return self._cache[path]
+            else:
+                # Load new file
+                tensor, feature_cols = self._load_file_pt(path)
+                
+                # Add to cache
+                self._cache[path] = (tensor, feature_cols)
+                
+                # Evict oldest if cache is full (LRU eviction)
+                if len(self._cache) > self.max_cache_size:
+                    # Remove oldest (first) item
+                    oldest_key = next(iter(self._cache))
+                    del self._cache[oldest_key]
+                
+                return tensor, feature_cols
+        else:
+            # No caching - reload every time
+            tensor, feature_cols = self._load_file_pt(path)
+            return tensor, feature_cols
     
     def __getitem__(self, idx):
         file_idx, hour_idx, patch_i, patch_j = self.index_map[idx]
@@ -429,21 +599,21 @@ class GridPatchWaveDataset(Dataset):
         tensor, feature_cols = self._get_file_tensor(path)
         hour_data = tensor[hour_idx]  # (H, W, C)
         
-        # Select input features
-        FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 
-                         'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 
-                         'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 
-                         'wave_dir_cos', 'corrected_VHM0']
-        
+        # Select input features in FEATURES_ORDER to match scaler's stats_ indices
+        # This ensures stats_[c] applies to channel c in X
         input_col_indices = []
-        for feat in FEATURES_ORDER:
+        for feat in self.features_order:
             if feat in self.excluded_columns or feat == self.target_column:
                 continue
             if feat in feature_cols:
                 input_col_indices.append(feature_cols.index(feat))
         
         X = hour_data[..., input_col_indices]
-        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        
+        # Extract uncorrected version based on target_column
+        # e.g., "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+        uncorrected_column = self.target_column.replace("corrected_", "")
+        vhm0 = hour_data[..., feature_cols.index(uncorrected_column):feature_cols.index(uncorrected_column)+1]
         
         # Get target
         if self.predict_bias:
@@ -452,11 +622,15 @@ class GridPatchWaveDataset(Dataset):
         else:
             y = hour_data[..., feature_cols.index(self.target_column):feature_cols.index(self.target_column)+1]
         
+        # Create mask early (before patching)
+        mask = ~torch.isnan(y)
+        
         # Apply subsampling BEFORE patch extraction
         if self.subsample_step is not None:
             X = X[::self.subsample_step, ::self.subsample_step, :]
             y = y[::self.subsample_step, ::self.subsample_step, :]
             vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            mask = mask[::self.subsample_step, ::self.subsample_step, :]
         
         # Extract patch at grid location
         ph, pw = self.patch_size
@@ -467,9 +641,18 @@ class GridPatchWaveDataset(Dataset):
         X = X[i_start:i_start+ph, j_start:j_start+pw, :]
         y = y[i_start:i_start+ph, j_start:j_start+pw, :]
         vhm0 = vhm0[i_start:i_start+ph, j_start:j_start+pw, :]
+        mask = mask[i_start:i_start+ph, j_start:j_start+pw, :]
         
         # Normalize
         if self.normalizer is not None:
+            # Verify target_stats_ is set (for multiprocessing worker safety)
+            if not hasattr(self, '_target_stats_verified'):
+                if self.normalize_target and self.normalizer.target_stats_ is None:
+                    print(f"⚠️ Worker: target_stats_ was None, re-setting")
+                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                self._target_stats_verified = True
+            
             if self.normalize_target:
                 X, y = self.normalizer.transform_torch(X, normalize_target=True, target=y)
             else:
@@ -479,7 +662,7 @@ class GridPatchWaveDataset(Dataset):
         X = X.permute(2, 0, 1).contiguous()
         y = y.permute(2, 0, 1).contiguous()
         vhm0 = vhm0.permute(2, 0, 1).contiguous()
-        mask = ~torch.isnan(y).contiguous()  # y is already (C, H, W), no need to permute
+        mask = mask.permute(2, 0, 1).contiguous()  # Convert mask to (C, H, W) to match y
         
         return X, y, mask, vhm0
     

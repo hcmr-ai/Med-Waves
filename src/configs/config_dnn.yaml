@@ -3,23 +3,25 @@
 
 # Data configuration
 data:
-  data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*.pt"
-  train_year: [2017, 2018, 2019, 2020, 2021]
+  data_path: "/opt/dlami/nvme/preprocessed/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*_h*.pt"
+  train_year: [2020, 2021]
   val_year: [2022]
-  val_months: [1,2,3, 4,5, 6, 7, 8, 9, 10, 11, 12]
+  val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
-  test_months: [1,2,3, 4,5, 6, 7, 8, 9, 10, 11, 12]
-  patch_size: null #[64, 64] #[64, 64] #[128, 128] # Reduced to fit PRE-subsampled data (76x261 stored in files)
+  test_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  patch_size: [256, 256] # Smaller patches = faster training (was [128, 128])
+  stride: [256, 256] # Stride for sliding window
   min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
   use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
-  subsample_step: null  # Data already subsampled in files, no additional runtime subsampling
-  use_cache: false
+  subsample_step: null # Data already subsampled in files, no additional runtime subsampling
+  use_cache: false  # Cache files in memory (reduces repeated I/O)
+  max_cache_size: 20  # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
 
   # Data preprocessing
-  target_column: "corrected_VHM0" # Target variable
+  target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
   predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
   normalize_target: true
   excluded_columns: [
@@ -33,20 +35,25 @@ data:
       "VMDR",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "scalers/BU24h_zscore_target_21_22_with_corrected.pkl"
+  normalizer_path: "scalers/BU24h_zscore_target_20_21_all_with_corrected.pkl"
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based)
+  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse"
+  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
-  vhm0_channel_index: 0 
+  vhm0_channel_index: 0
   weight_decay: 1e-4 #1e-4
   upsample_mode: "nearest" # Options: "nearest" (bilinear interpolation), "transpose" (convolutional transpose)
+  optimizer_type: "Adam" # Options: "Adam", "AdamW", "SGD"
+  use_mdn: false # Options: true, false
+  lambda_adv: 0.1 # Weight for adversarial loss
+  n_discriminator_updates: 3 # Number of times to update discriminator per generator update (for GAN training)
+  discriminator_lr_multiplier: 2.0 # Multiplier for discriminator learning rate (e.g., 2.0 = 2x generator LR)
   # Learning rate scheduler configuration
   lr_scheduler:
     type: LambdaLR # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts", "LambdaLR"
@@ -60,15 +67,17 @@ model:
     # Additional scheduler parameters
     T_max: 50 # For CosineAnnealingLR: max epochs
     eta_min: 1e-6
-    warmup_steps: 0.1 # For CosineAnnealingLR: warmup steps
+    warmup_steps: 0.01 # For CosineAnnealingLR: warmup steps
     step_size: 10 # For StepLR: epochs between LR reductions
     gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
 
 # Training configuration
 training:
-  batch_size: 64
+  batch_size: 12
+  accumulate_grad_batches: 3  # Larger batches for 64x64 patches (4x smaller than 128x128)
   max_epochs: 100
-  num_workers: 8
+  num_workers: 4
+  persistent_workers: true  # Not needed with num_workers=0
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1
@@ -82,8 +91,8 @@ training:
   check_val_every_n_epoch: 1
   num_sanity_val_steps: 2
   benchmark: false
-  prefetch_factor: 1
-  val_check_interval: 350
+  prefetch_factor: 2  # Increased from 1: prefetch 2 batches per worker (helps with I/O)
+  val_check_interval: null
   use_swa: false
   use_ema: false
   finetune_model: false
@@ -93,17 +102,17 @@ training:
   gradient_clip_algorithm: "norm"
   aggressive_freeze: false
 # Checkpoint configuration
-checkpoint: 
-  resume_from_checkpoint: null # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr" # S3 backup for spot instances
+checkpoint:
+  resume_from_checkpoint: null # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_full_20-21_mse_64_lambda_lr_256" # Local directory for fast access
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_full_20-21_mse_64_lambda_lr_256" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/logs"
-  experiment_name: "dnn_wave_correction_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr"
+  log_dir: "/opt/dlami/nvme/logs_full_20-21_mse_64_lambda_lr_256"
+  experiment_name: "dnn_training_full_20-21_mse_64_lambda_lr_256"
   use_comet: true
-  comet_tags: ["wave_height", "transunet", "bias_correction", "lambda_lr"]
+  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset", "256_patch_size"]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"

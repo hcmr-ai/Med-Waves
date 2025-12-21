@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.classifiers.networks.mdn import MDNHead
+
 # -------------------------
 # Basic Conv Blocks
 # -------------------------
@@ -174,7 +176,8 @@ class TransUNetGeo(nn.Module):
                  base_channels=64,
                  bottleneck_dim=1024,
                  patch_size=16,   # must match CNN bottleneck size!
-                 num_layers=8):
+                 num_layers=8,
+                 use_mdn=False):
         super().__init__()
 
         # Encoder channels
@@ -209,7 +212,10 @@ class TransUNetGeo(nn.Module):
         self.u2 = UpBlock(c3, c2, c2)
         self.u1 = UpBlock(c2, c1, c1)
 
-        self.final = nn.Conv2d(c1, out_channels, 1)
+        if use_mdn:
+            self.final = MDNHead(c1, K=3)
+        else:
+            self.final = nn.Conv2d(c1, out_channels, 1)
 
     def forward(self, x):
         # Encoder

@@ -29,30 +29,30 @@ def setup_logging(level=logging.INFO):
 logger = setup_logging()
 
 # import pytorch_lightning as lightning
+import lightning
 import s3fs
 import torch
 from classifiers.lightning_trainer import WaveBiasCorrector
 from commons.aws.utils import download_s3_checkpoint
 from commons.callbacks.comet_callbacks import CometVisualizationCallback
-from commons.callbacks.s3_callback import S3CheckpointSyncCallback
 from commons.callbacks.exponential_moving_average import EMAWeightAveraging
-from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
 from commons.callbacks.freeze_layers import FreezeEncoderCallback
+from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
+from commons.callbacks.s3_callback import S3CheckpointSyncCallback
 from commons.dataloaders import CachedWaveDataset
-from commons.datasets.samplers import WaveBinBalancedSampler
 from commons.datasets.grid_patched_dataset import GridPatchWaveDataset
+from commons.datasets.samplers import WaveBinBalancedSampler
 from commons.preprocessing.bu_net_preprocessing import WaveNormalizer
-import lightning
 from lightning import Trainer
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
-    StochasticWeightAveraging
+    StochasticWeightAveraging,
 )
-
 from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
+
 
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
@@ -191,8 +191,18 @@ def get_file_list(
     """Get list of files from S3 or local path"""
     if data_path.startswith("s3://"):
         fs = s3fs.S3FileSystem()
-        # Use recursive glob to search in subdirectories
-        files = fs.glob(f"{data_path}**/{file_pattern}")
+        # Search in both the directory itself and subdirectories
+        data_path_clean = data_path.rstrip("/")
+        pattern = f"{data_path_clean}/{file_pattern}"
+        print(f"Searching S3 with pattern: {pattern}")
+        files = fs.glob(pattern)
+        # Also add files from subdirectories
+        pattern_recursive = f"{data_path_clean}/**/{file_pattern}"
+        files_recursive = fs.glob(pattern_recursive)
+        # Combine and deduplicate
+        files = list(set(files + files_recursive))
+        # Ensure s3:// prefix
+        files = [f if f.startswith("s3://") else f"s3://{f}" for f in files]
     else:
         files = list(Path(data_path).glob(f"**/{file_pattern}"))
         files = [str(f) for f in files]
@@ -336,7 +346,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    if data_config.get("patch_size", None) is not None:
+    if data_config.get("patch_size_deactivate", None) is not None:
         train_dataset = GridPatchWaveDataset(
             train_files,
             patch_size=patch_size,
@@ -347,11 +357,14 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
+            max_cache_size=data_config.get("max_cache_size", 20),
+            fs=fs
         )
     else:
         train_dataset = CachedWaveDataset(
             train_files,
+            patch_size=patch_size,
             excluded_columns=excluded_columns,
             target_column=target_column,
             predict_bias=predict_bias,
@@ -359,26 +372,30 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             normalizer=normalizer,
             enable_profiler=True,
             use_cache=data_config.get("use_cache", False),
-            normalize_target=data_config.get("normalize_target", False)
+            normalize_target=data_config.get("normalize_target", False),
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
-    
-    if data_config.get("patch_size", None) is not None:
+
+    if data_config.get("patch_size_deactivate", None) is not None:
         val_dataset = GridPatchWaveDataset(
             val_files,
             patch_size=patch_size,
+            stride=data_config.get("stride", None),
             excluded_columns=excluded_columns,
             target_column=target_column,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
-            use_cache=False,
+            use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
-            min_valid_pixels=data_config.get("min_valid_pixels", 0.3)  # Only keep patches with >30% sea pixels
+            min_valid_pixels=data_config.get("min_valid_pixels", 0.3),  # Only keep patches with >30% sea pixels
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
     else:
         val_dataset = CachedWaveDataset(
             val_files,
-            # fs=fs,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
             target_column=target_column,
@@ -386,26 +403,28 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             subsample_step=subsample_step,
             normalizer=normalizer,
             enable_profiler=True,
-            use_cache=False,
-            normalize_target=data_config.get("normalize_target", False)
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False),
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20)
         )
 
     # Pre-compute wave bins and filter patches (if using patched dataset)
     use_balanced_sampling = data_config.get("use_balanced_sampling", False)  # Set to False for uniform random sampling
-    
+
     if patch_size is not None:
         # ALWAYS compute bins to filter out invalid patches (regardless of balanced sampling)
-        logger.info("Computing wave bins and filtering invalid patches...")
-        train_dataset.compute_all_bins()
-        logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
-        
+        # logger.info("Computing wave bins and filtering invalid patches...")
+        # train_dataset.compute_all_bins()
+        # logger.info(f"Training dataset after filtering: {len(train_dataset)} patches")
+
         # Also filter validation dataset
-        val_dataset.compute_all_bins()
+        # val_dataset.compute_all_bins()
         logger.info(f"Validation dataset after filtering: {len(val_dataset)} patches")
-        
+
         if len(val_dataset) == 0:
             raise ValueError("Validation dataset is empty after filtering! Check val_year/val_months or lower min_valid_pixels threshold.")
-        
+
         if use_balanced_sampling:
             logger.info("Using balanced sampling (equal samples per wave height bin)")
         else:
@@ -418,9 +437,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=True if patch_size is None or not use_balanced_sampling else False,  # Don't shuffle when using sampler
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config.get("persistent_workers", training_config["num_workers"] > 0),
         prefetch_factor=training_config["prefetch_factor"],
-        sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None
+        sampler=WaveBinBalancedSampler(train_dataset, training_config["batch_size"]) if (patch_size is not None and use_balanced_sampling) else None,
+        # timeout=300  # 5 minute timeout for S3 loading
     )
 
     val_loader = DataLoader(
@@ -429,11 +449,12 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=False,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
+        persistent_workers=training_config.get("persistent_workers", training_config["num_workers"] > 0),
         prefetch_factor=None,
-        sampler=None
+        sampler=None,
+        # timeout=300  # 5 minute timeout for S3 loading
     )
-    
+
     logger.info(f"Train loader: {len(train_loader)} batches")
     logger.info(f"Val loader: {len(val_loader)} batches")
 
@@ -488,7 +509,7 @@ def create_callbacks(config: DNNConfig) -> list:
         logger.info("Adding Comet visualization callback")
         comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
         callbacks.append(comet_callback)
-    
+
     if config.config["training"]["use_swa"]:
         logger.info("Adding SWA callback")
         swa_callback = StochasticWeightAveraging(
@@ -497,7 +518,7 @@ def create_callbacks(config: DNNConfig) -> list:
             swa_epoch_start=5        # When to start SWA averaging
         )
         callbacks.append(swa_callback)
-    
+
     if config.config["training"]["use_ema"]:
         logger.info("Adding EMA callback")
         ema_callback = EMAWeightAveraging(
@@ -505,7 +526,7 @@ def create_callbacks(config: DNNConfig) -> list:
             start_step=100,
         )
         callbacks.append(ema_callback)
-    
+
     if config.config["model"]["loss_type"] == "pixel_switch_mse":
         logger.info("Adding Pixel Switch Threshold callback")
         pixel_switch_threshold_callback = PixelSwitchThresholdCallback(quantile=0.90)
@@ -612,6 +633,11 @@ def main():
             vhm0_channel_index=model_config.get("vhm0_channel_index", 0),
             weight_decay=float(model_config.get("weight_decay", 0)),
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+            use_mdn=model_config.get("use_mdn", False),
+            optimizer_type=model_config.get("optimizer_type", "Adam"),
+            lambda_adv=model_config.get("lambda_adv", 0.01),
+            n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
+            discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
         )
     else:
         logger.info("Training new model")
@@ -629,6 +655,11 @@ def main():
             model_type=model_config.get("model_type", "nick"),  # Options: "nick", "geo", "enhanced"
             upsample_mode=model_config.get("upsample_mode", "nearest"),
             pixel_switch_threshold_m=model_config.get("pixel_switch_threshold_m", 0.45),
+            use_mdn=model_config.get("use_mdn", False),
+            optimizer_type=model_config.get("optimizer_type", "Adam"),
+            lambda_adv=model_config.get("lambda_adv", 0.01),
+            n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
+            discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
         )
 
     # Create callbacks
@@ -711,7 +742,7 @@ def main():
     # Train model
     logger.info("Starting training...")
     logger.info(f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches")
-    
+
     # Only pass ckpt_path if we actually have a checkpoint to resume from
     if config.config["training"]["finetune_model"]:
         trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)

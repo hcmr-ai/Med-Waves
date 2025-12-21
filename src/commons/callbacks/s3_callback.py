@@ -1,5 +1,6 @@
 import logging
-
+import glob
+import os
 import s3fs
 from lightning.pytorch.callbacks import Callback
 
@@ -27,8 +28,6 @@ class S3CheckpointSyncCallback(Callback):
     def _sync_to_s3(self):
         """Sync all checkpoint files to S3"""
         try:
-            import glob
-            import os
 
             # Get all checkpoint files
             checkpoint_files = glob.glob(f"{self.local_dir}/*.ckpt")
@@ -37,9 +36,36 @@ class S3CheckpointSyncCallback(Callback):
                 filename = os.path.basename(file_path)
                 s3_path = f"{self.s3_dir}/{filename}"
 
-                # Upload to S3
-                self.fs.put(file_path, s3_path)
-                logger.info(f"Synced checkpoint to S3: {s3_path}")
+                # Check if file needs to be uploaded
+                should_upload = False
+                
+                try:
+                    # Check if file exists in S3
+                    s3_info = self.fs.info(s3_path)
+                    
+                    # Get local file info
+                    local_size = os.path.getsize(file_path)
+                    local_mtime = os.path.getmtime(file_path)
+                    
+                    # Compare size and modification time
+                    s3_size = s3_info.get('size', 0)
+                    s3_mtime = s3_info.get('LastModified', 0)
+                    
+                    # Upload if size differs or local file is newer
+                    if local_size != s3_size or local_mtime > s3_mtime.timestamp() if hasattr(s3_mtime, 'timestamp') else True:
+                        should_upload = True
+                    else:
+                        logger.debug(f"Skipping {filename} - already up to date in S3")
+                        
+                except FileNotFoundError:
+                    # File doesn't exist in S3, need to upload
+                    should_upload = True
+                    logger.info(f"New checkpoint detected: {filename}")
+
+                # Upload if needed
+                if should_upload:
+                    self.fs.put(file_path, s3_path)
+                    logger.info(f"Synced checkpoint to S3: {s3_path}")
 
         except Exception as e:
             logger.warning(f"Failed to sync checkpoints to S3: {e}")
