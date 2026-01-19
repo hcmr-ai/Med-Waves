@@ -68,21 +68,35 @@ def compute_local_snr_per_pixel(
         SNR per pixel (same shape as input)
     """
     if ground_truth.ndim == 1:
-        # Already flattened, compute global approximation
-        signal_var = np.var(ground_truth)
+        # Already flattened, compute per-pixel SNR
+        # Filter NaN values first
+        valid_mask = np.isfinite(ground_truth) & np.isfinite(reference)
+        if np.sum(valid_mask) == 0:
+            return np.full_like(ground_truth, np.nan)
+        
+        # Compute per-pixel SNR: signal^2 / noise^2 for each pixel
+        # This gives actual variance in SNR across pixels
+        signal_squared = ground_truth ** 2
         residuals = ground_truth - reference
-        noise_var = np.var(residuals)
-        snr = signal_var / np.maximum(noise_var, 1e-10)
-        return np.full_like(ground_truth, snr)
+        noise_squared = np.maximum(residuals ** 2, 1e-10)
+        snr_per_pixel = signal_squared / noise_squared
+        
+        # Set NaN for invalid pixels
+        snr_per_pixel[~valid_mask] = np.nan
+        
+        return snr_per_pixel
     
     # For 3D data [time, lat, lon], compute local SNR spatially
     t, h, w = ground_truth.shape
-    snr_map = np.zeros((t, h, w))
+    snr_map = np.full((t, h, w), np.nan)  # Initialize with NaN
     residuals = ground_truth - reference
     
     pad = patch_size // 2
-    ground_truth_pad = np.pad(ground_truth, ((0, 0), (pad, pad), (pad, pad)), mode='reflect')
-    residuals_pad = np.pad(residuals, ((0, 0), (pad, pad), (pad, pad)), mode='reflect')
+    # Use 'constant' mode with NaN to avoid reflecting NaN values
+    ground_truth_pad = np.pad(ground_truth, ((0, 0), (pad, pad), (pad, pad)), 
+                              mode='constant', constant_values=np.nan)
+    residuals_pad = np.pad(residuals, ((0, 0), (pad, pad), (pad, pad)), 
+                          mode='constant', constant_values=np.nan)
     
     for i in range(h):
         for j in range(w):
@@ -90,10 +104,23 @@ def compute_local_snr_per_pixel(
             gt_patch = ground_truth_pad[:, i:i+patch_size, j:j+patch_size]
             res_patch = residuals_pad[:, i:i+patch_size, j:j+patch_size]
             
-            signal_var = np.var(gt_patch)
-            noise_var = np.var(res_patch)
+            # Filter NaN values from patch before computing variance
+            valid_patch = np.isfinite(gt_patch) & np.isfinite(res_patch)
+            if np.sum(valid_patch) < patch_size:  # Need minimum samples
+                snr_map[:, i, j] = np.nan
+                continue
             
-            snr_map[:, i, j] = signal_var / np.maximum(noise_var, 1e-10)
+            gt_patch_valid = gt_patch[valid_patch]
+            res_patch_valid = res_patch[valid_patch]
+            
+            signal_var = np.var(gt_patch_valid)
+            noise_var = np.var(res_patch_valid)
+            
+            if np.isfinite(signal_var) and np.isfinite(noise_var) and noise_var > 0:
+                snr = signal_var / np.maximum(noise_var, 1e-10)
+                snr_map[:, i, j] = snr
+            else:
+                snr_map[:, i, j] = np.nan
     
     return snr_map
 
@@ -118,11 +145,16 @@ def compute_snr_per_bin(
     """
     results = {}
     
+    # Ensure all inputs are finite (no NaN/Inf)
+    valid_mask = np.isfinite(ground_truth) & np.isfinite(reference)
+    ground_truth = ground_truth[valid_mask]
+    reference = reference[valid_mask]
+    
     for i in range(len(bin_edges) - 1):
         bin_min, bin_max = bin_edges[i], bin_edges[i + 1]
         bin_name = f"{bin_min:.1f}-{bin_max:.1f}m"
         
-        # Filter data for this bin (based on ground truth)
+        # Filter data for this bin (based on ground truth) - already filtered for NaN above
         mask = (ground_truth >= bin_min) & (ground_truth < bin_max)
         n_samples = np.sum(mask)
         
@@ -181,20 +213,53 @@ def compute_correlations(
     """
     correlations = {}
     
+    # Ensure all inputs are finite (no NaN/Inf) - arrays should already be filtered, but double-check
+    # All arrays should have the same length at this point (already filtered in analyze_snr_complete)
+    if not (len(ground_truth) == len(reference) == len(snr_per_pixel)):
+        # If lengths don't match, filter to common valid indices
+        min_len = min(len(ground_truth), len(reference), len(snr_per_pixel))
+        ground_truth = ground_truth[:min_len]
+        reference = reference[:min_len]
+        snr_per_pixel = snr_per_pixel[:min_len]
+    
+    # Final check for any remaining NaN/Inf values
+    valid_mask = np.isfinite(ground_truth) & np.isfinite(reference) & np.isfinite(snr_per_pixel)
+    ground_truth = ground_truth[valid_mask]
+    reference = reference[valid_mask]
+    snr_per_pixel = snr_per_pixel[valid_mask]
+    
     # Overall correlation across all pixels
     error_magnitude = np.abs(ground_truth - reference)
-    valid_mask = np.isfinite(snr_per_pixel) & np.isfinite(error_magnitude)
+    # All values should be finite at this point, but double-check for safety
+    valid_mask = np.isfinite(error_magnitude) & np.isfinite(snr_per_pixel)
     
     if np.sum(valid_mask) > 10:
-        overall_corr, overall_pval = pearsonr(
-            error_magnitude[valid_mask],
-            snr_per_pixel[valid_mask]
-        )
-        correlations['overall'] = {
-            'correlation': overall_corr,
-            'p_value': overall_pval,
-            'n_samples': np.sum(valid_mask)
-        }
+        error_valid = error_magnitude[valid_mask]
+        snr_valid = snr_per_pixel[valid_mask]
+        
+        # Check if SNR has variance (required for correlation)
+        snr_var = np.var(snr_valid)
+        error_var = np.var(error_valid)
+        
+        if snr_var < 1e-10 or error_var < 1e-10:
+            # No variance in one or both variables, correlation is undefined
+            correlations['overall'] = {
+                'correlation': np.nan,
+                'p_value': np.nan,
+                'n_samples': np.sum(valid_mask)
+            }
+        else:
+            overall_corr, overall_pval = pearsonr(error_valid, snr_valid)
+            # Ensure correlation is finite
+            if not np.isfinite(overall_corr):
+                overall_corr = np.nan
+            if not np.isfinite(overall_pval):
+                overall_pval = np.nan
+            correlations['overall'] = {
+                'correlation': overall_corr,
+                'p_value': overall_pval,
+                'n_samples': np.sum(valid_mask)
+            }
     else:
         correlations['overall'] = {
             'correlation': np.nan,
@@ -209,29 +274,63 @@ def compute_correlations(
         gt_bin = metrics['gt_values']
         ref_bin = metrics['ref_values']
         
-        # Compute local SNR for this bin
-        signal_var = metrics['signal_var']
-        residuals = gt_bin - ref_bin
-        # Approximate local SNR (same for all pixels in bin for simplicity)
-        local_snr = np.full_like(error_mag, metrics['snr'])
+        # Filter out NaN/Inf values from bin data
+        valid_bin_mask = np.isfinite(error_mag) & np.isfinite(gt_bin) & np.isfinite(ref_bin)
+        error_mag = error_mag[valid_bin_mask]
+        gt_bin = gt_bin[valid_bin_mask]
+        ref_bin = ref_bin[valid_bin_mask]
         
-        if len(error_mag) > 10:
-            try:
-                bin_corr, bin_pval = pearsonr(error_mag, local_snr)
-                correlations['per_bin'][bin_name] = {
-                    'correlation': bin_corr,
-                    'p_value': bin_pval
-                }
-            except:
-                correlations['per_bin'][bin_name] = {
-                    'correlation': np.nan,
-                    'p_value': np.nan
-                }
-        else:
+        if len(error_mag) < 10:
             correlations['per_bin'][bin_name] = {
                 'correlation': np.nan,
                 'p_value': np.nan
             }
+            continue
+        
+        # Compute per-pixel SNR within this bin
+        # Use signal strength (gt_bin^2) vs noise (residual^2) as per-pixel SNR proxy
+        residuals = gt_bin - ref_bin
+        
+        # Per-pixel SNR: signal^2 / noise^2
+        # This gives actual variance in SNR across pixels in the bin
+        signal_squared = gt_bin ** 2
+        noise_squared = np.maximum(residuals ** 2, 1e-10)
+        local_snr = signal_squared / noise_squared
+        
+        # Ensure local_snr is finite and positive
+        valid_snr_mask = np.isfinite(local_snr) & np.isfinite(error_mag) & (local_snr > 0)
+        error_mag = error_mag[valid_snr_mask]
+        local_snr = local_snr[valid_snr_mask]
+        
+        if len(error_mag) < 10:
+            correlations['per_bin'][bin_name] = {
+                'correlation': np.nan,
+                'p_value': np.nan
+            }
+            continue
+        
+        # Check if local_snr has variance (required for correlation)
+        snr_var = np.var(local_snr)
+        error_var = np.var(error_mag)
+        
+        if snr_var < 1e-10 or error_var < 1e-10:
+            # No variance in one or both variables, correlation is undefined
+            correlations['per_bin'][bin_name] = {
+                'correlation': np.nan,
+                'p_value': np.nan
+            }
+        else:
+            try:
+                bin_corr, bin_pval = pearsonr(error_mag, local_snr)
+                correlations['per_bin'][bin_name] = {
+                    'correlation': bin_corr if np.isfinite(bin_corr) else np.nan,
+                    'p_value': bin_pval if np.isfinite(bin_pval) else np.nan
+                }
+            except Exception as e:
+                correlations['per_bin'][bin_name] = {
+                    'correlation': np.nan,
+                    'p_value': np.nan
+                }
     
     return correlations
 
@@ -270,7 +369,7 @@ def plot_snr_analysis(
     ax1 = axes[0, 0]
     colors = ['#2E7D32' if snr > 10 else '#F57C00' if snr > 5 else '#C62828' 
               for snr in snr_db_values]
-    bars1 = ax1.bar(range(len(bin_names)), snr_db_values, color=colors, alpha=0.7, 
+    _ = ax1.bar(range(len(bin_names)), snr_db_values, color=colors, alpha=0.7, 
                      edgecolor='black', linewidth=1.2)
     
     # Add value labels on bars
@@ -357,9 +456,20 @@ def plot_snr_analysis(
     
     # Add overall correlation annotation
     overall_corr = correlations['overall']['correlation']
+    if np.isfinite(overall_corr):
+        corr_str = f"{overall_corr:.3f}"
+        if abs(overall_corr) > 0.6:
+            interpretation = "→ Strong: SNR feature could help!"
+        elif abs(overall_corr) > 0.5:
+            interpretation = "→ Moderate: SNR feature may help."
+        else:
+            interpretation = "→ Weak relationship"
+    else:
+        corr_str = "N/A"
+        interpretation = "→ Cannot compute (no variance in SNR)"
+    
     ax3.text(0.05, 0.95, 
-            f"Overall correlation: {overall_corr:.3f}\n"
-            f"{'→ Strong: SNR feature could help!' if abs(overall_corr) > 0.6 else '→ Weak relationship'}",
+            f"Overall correlation: {corr_str}\n{interpretation}",
             transform=ax3.transAxes, fontsize=9,
             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9),
             verticalalignment='top')
@@ -402,17 +512,35 @@ def plot_snr_analysis(
     
     # Add correlation annotation
     if len(error_plot) > 10:
-        overall_pixel_corr, overall_pixel_pval = pearsonr(error_plot, snr_plot_db)
-        interpretation = (
-            "High correlation (>0.6) suggests SNR as input\n"
-            "feature could condition model on data quality."
-            if abs(overall_pixel_corr) > 0.6 else
-            "Moderate/weak correlation suggests other\n"
-            "factors dominate prediction errors."
-        )
+        # Check variance before computing correlation
+        error_var = np.var(error_plot)
+        snr_var = np.var(snr_plot_db)
+        
+        if error_var < 1e-10 or snr_var < 1e-10:
+            # No variance in one or both variables
+            corr_str = "N/A"
+            pval_str = "N/A"
+            interpretation = "Cannot compute correlation:\nno variance in SNR or error values."
+        else:
+            overall_pixel_corr, overall_pixel_pval = pearsonr(error_plot, snr_plot_db)
+            if np.isfinite(overall_pixel_corr) and np.isfinite(overall_pixel_pval):
+                corr_str = f"{overall_pixel_corr:.3f}"
+                pval_str = f"{overall_pixel_pval:.2e}"
+                interpretation = (
+                    "High correlation (>0.6) suggests SNR as input\n"
+                    "feature could condition model on data quality."
+                    if abs(overall_pixel_corr) > 0.6 else
+                    "Moderate/weak correlation suggests other\n"
+                    "factors dominate prediction errors."
+                )
+            else:
+                corr_str = "N/A"
+                pval_str = "N/A"
+                interpretation = "Cannot compute correlation:\ninvalid correlation result."
+        
         ax4.text(0.05, 0.95, 
-                f'Correlation: {overall_pixel_corr:.3f}\n'
-                f'p-value: {overall_pixel_pval:.2e}\n\n'
+                f'Correlation: {corr_str}\n'
+                f'p-value: {pval_str}\n\n'
                 f'{interpretation}',
                 transform=ax4.transAxes, fontsize=9,
                 bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.9),
@@ -452,14 +580,17 @@ def print_detailed_table(bin_results: Dict, correlations: Dict):
     overall_pval = correlations['overall']['p_value']
     overall_n = correlations['overall']['n_samples']
     
-    print(f"\nOVERALL CORRELATION (Error-SNR): {overall_corr:.4f} (p={overall_pval:.2e}, n={overall_n:,})")
-    
-    if abs(overall_corr) > 0.7:
-        print("→ STRONG RELATIONSHIP: SNR as feature could significantly help TransUNet!")
-    elif abs(overall_corr) > 0.5:
-        print("→ MODERATE RELATIONSHIP: SNR feature may provide useful signal.")
+    if np.isfinite(overall_corr):
+        print(f"\nOVERALL CORRELATION (Error-SNR): {overall_corr:.4f} (p={overall_pval:.2e}, n={overall_n:,})")
+        if abs(overall_corr) > 0.7:
+            print("→ STRONG RELATIONSHIP: SNR as feature could significantly help TransUNet!")
+        elif abs(overall_corr) > 0.5:
+            print("→ MODERATE RELATIONSHIP: SNR feature may provide useful signal.")
+        else:
+            print("→ WEAK RELATIONSHIP: Other factors dominate prediction errors.")
     else:
-        print("→ WEAK RELATIONSHIP: Other factors dominate prediction errors.")
+        print(f"\nOVERALL CORRELATION (Error-SNR): N/A (p=N/A, n={overall_n:,})")
+        print("→ CANNOT COMPUTE: No variance in SNR values (all pixels have same SNR)")
     
     print("="*120 + "\n")
 
@@ -494,21 +625,32 @@ def analyze_snr_complete(
     gt_flat = ground_truth.flatten()
     ref_flat = reference.flatten()
     
-    # Remove NaN/Inf values
-    valid_mask = np.isfinite(gt_flat) & np.isfinite(ref_flat)
+    # Remove NaN/Inf values (land pixels and invalid data)
+    valid_mask = np.isfinite(gt_flat) & np.isfinite(ref_flat) & (gt_flat >= 0) & (ref_flat >= 0)
+    n_removed = np.sum(~valid_mask)
     gt_flat = gt_flat[valid_mask]
     ref_flat = ref_flat[valid_mask]
     
     print(f"Data shape: {original_shape}")
     print(f"Valid samples: {len(gt_flat):,} / {len(ground_truth.flatten()):,}")
+    if n_removed > 0:
+        print(f"  → Removed {n_removed:,} invalid samples (NaN/Inf/negative values)")
     print(f"Ground truth range: [{gt_flat.min():.2f}, {gt_flat.max():.2f}] m")
     print(f"Reference range: [{ref_flat.min():.2f}, {ref_flat.max():.2f}] m")
     
     # Step 1: Compute local SNR per pixel
     print("\n[1/4] Computing local SNR per pixel...")
     if len(original_shape) == 3:
+        # For 3D data, compute SNR (function now handles NaN internally)
         snr_per_pixel_full = compute_local_snr_per_pixel(ground_truth, reference, patch_size=5)
+        # Filter to only valid pixels (NaN SNR values will be filtered out)
         snr_per_pixel = snr_per_pixel_full.flatten()[valid_mask]
+        # Ensure any remaining NaN in SNR are filtered
+        valid_snr_mask = np.isfinite(snr_per_pixel)
+        snr_per_pixel = snr_per_pixel[valid_snr_mask]
+        # Also filter the corresponding ground truth and reference
+        gt_flat = gt_flat[valid_snr_mask]
+        ref_flat = ref_flat[valid_snr_mask]
     else:
         snr_per_pixel = compute_local_snr_per_pixel(gt_flat, ref_flat)
     
@@ -595,8 +737,8 @@ def load_parquet_data(
             gt_data = table.column(ground_truth_col).to_numpy()
             ref_data = table.column(reference_col).to_numpy()
             
-            # Filter out NaN/Inf values
-            valid_mask = np.isfinite(gt_data) & np.isfinite(ref_data)
+            # Filter out NaN/Inf values and negative values (land pixels and invalid data)
+            valid_mask = np.isfinite(gt_data) & np.isfinite(ref_data) & (gt_data >= 0) & (ref_data >= 0)
             gt_data = gt_data[valid_mask]
             ref_data = ref_data[valid_mask]
             
@@ -644,19 +786,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--input-dir",
         type=str,
-        default="s3://medwav-dev-data/parquet/hourly/",
+        default="/data/tsolis/AI_project/parquet/augmented_with_labels/hourly",
         help="Directory containing parquet files (local or S3 path)"
     )
     parser.add_argument(
         "--year",
         type=int,
-        default=2021,
+        default=2022,
         help="Year to analyze"
     )
     parser.add_argument(
         "--ground-truth-col",
         type=str,
-        default="vhm0_y",
+        default="corrected_VHM0",
         help="Column name for ground truth (e.g., vhm0_y, corrected_VHM0)"
     )
     parser.add_argument(
@@ -680,17 +822,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--min-samples",
         type=int,
-        default=50,
+        default=5,
         help="Minimum samples per bin"
     )
     
     args = parser.parse_args()
     
     # Construct input directory with year
-    if args.input_dir.endswith("/"):
+    if args.input_dir.startswith("s3://"):
         input_dir = f"{args.input_dir}year={args.year}/"
     else:
-        input_dir = f"{args.input_dir}/year={args.year}/"
+        input_dir = args.input_dir
     
     # Load data from parquet files
     ground_truth, reference = load_parquet_data(
