@@ -28,7 +28,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import pearsonr
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 import warnings
 import os
 import glob
@@ -36,6 +36,7 @@ import pyarrow.parquet as pq
 import fsspec
 from tqdm import tqdm
 import argparse
+from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -674,13 +675,189 @@ def analyze_snr_complete(
     return bin_results, correlations
 
 
+def spatial_snr_analysis(
+    ground_truth: np.ndarray,
+    reference: np.ndarray,
+    snr_per_pixel: np.ndarray,
+    lat_coords: np.ndarray,
+    lon_coords: np.ndarray,
+    output_path: str = 'snr_spatial_analysis.png',
+    grid_resolution: float = 0.5
+):
+    """
+    Perform spatial SNR analysis and generate geographic maps.
+    
+    Args:
+        ground_truth: Target values (flattened)
+        reference: Model predictions (flattened)
+        snr_per_pixel: SNR values per pixel (flattened)
+        lat_coords: Latitude coordinates per pixel
+        lon_coords: Longitude coordinates per pixel
+        output_path: Where to save the spatial analysis plot
+        grid_resolution: Grid cell size in degrees
+    """
+    print("\n" + "="*80)
+    print("SPATIAL SNR ANALYSIS")
+    print("="*80)
+    
+    # Filter valid data
+    valid_mask = np.isfinite(ground_truth) & np.isfinite(reference) & np.isfinite(snr_per_pixel)
+    valid_mask = valid_mask & np.isfinite(lat_coords) & np.isfinite(lon_coords)
+    
+    gt_valid = ground_truth[valid_mask]
+    ref_valid = reference[valid_mask]
+    snr_valid = snr_per_pixel[valid_mask]
+    lat_valid = lat_coords[valid_mask]
+    lon_valid = lon_coords[valid_mask]
+    
+    error_magnitude = np.abs(gt_valid - ref_valid)
+    snr_db = 10 * np.log10(np.maximum(snr_valid, 1e-10))
+    
+    print(f"Valid spatial samples: {len(gt_valid):,}")
+    print(f"Lat range: [{lat_valid.min():.2f}, {lat_valid.max():.2f}]")
+    print(f"Lon range: [{lon_valid.min():.2f}, {lon_valid.max():.2f}]")
+    
+    # Create spatial grid
+    lat_bins = np.arange(lat_valid.min(), lat_valid.max() + grid_resolution, grid_resolution)
+    lon_bins = np.arange(lon_valid.min(), lon_valid.max() + grid_resolution, grid_resolution)
+    
+    print(f"Grid resolution: {grid_resolution}° ({len(lat_bins)-1}x{len(lon_bins)-1} cells)")
+    
+    # Aggregate data into spatial grid using vectorized operations
+    snr_grid = np.full((len(lat_bins)-1, len(lon_bins)-1), np.nan)
+    error_grid = np.full((len(lat_bins)-1, len(lon_bins)-1), np.nan)
+    corr_grid = np.full((len(lat_bins)-1, len(lon_bins)-1), np.nan)
+    count_grid = np.zeros((len(lat_bins)-1, len(lon_bins)-1), dtype=int)
+    
+    print("Aggregating data into spatial grid (optimized)...")
+    
+    # Assign each sample to a grid cell using digitize (much faster!)
+    lat_indices = np.digitize(lat_valid, lat_bins) - 1
+    lon_indices = np.digitize(lon_valid, lon_bins) - 1
+    
+    # Clip to valid range
+    lat_indices = np.clip(lat_indices, 0, len(lat_bins) - 2)
+    lon_indices = np.clip(lon_indices, 0, len(lon_bins) - 2)
+    
+    # Create unique cell IDs
+    cell_ids = lat_indices * len(lon_bins) + lon_indices
+    unique_cells = np.unique(cell_ids)
+    
+    print(f"Processing {len(unique_cells)} populated grid cells...")
+    
+    # Process each unique cell
+    for cell_id in tqdm(unique_cells):
+        # Find all samples in this cell
+        cell_mask = cell_ids == cell_id
+        n_samples = np.sum(cell_mask)
+        
+        if n_samples < 10:  # Need minimum samples
+            continue
+        
+        # Get grid indices
+        i = cell_id // len(lon_bins)
+        j = cell_id % len(lon_bins)
+        
+        if i >= len(lat_bins) - 1 or j >= len(lon_bins) - 1:
+            continue
+        
+        cell_snr = snr_db[cell_mask]
+        cell_error = error_magnitude[cell_mask]
+        
+        # Compute statistics for this cell
+        snr_grid[i, j] = np.mean(cell_snr)
+        error_grid[i, j] = np.mean(cell_error)
+        count_grid[i, j] = n_samples
+        
+        # Compute local correlation if enough variance
+        if n_samples > 20 and np.var(cell_snr) > 1e-6 and np.var(cell_error) > 1e-6:
+            try:
+                corr, _ = pearsonr(cell_error, cell_snr)
+                if np.isfinite(corr):
+                    corr_grid[i, j] = corr
+            except:
+                pass
+    
+    print(f"Grid cells with data: {np.sum(~np.isnan(snr_grid))}")
+    
+    # Create spatial plots
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Spatial SNR Analysis', fontsize=16, fontweight='bold', y=0.995)
+    
+    # Define extent for plotting
+    extent = [lon_bins[0], lon_bins[-1], lat_bins[0], lat_bins[-1]]
+    
+    # Plot 1: Mean SNR map
+    ax1 = axes[0, 0]
+    im1 = ax1.imshow(snr_grid, extent=extent, origin='lower', cmap='RdYlGn',
+                     aspect='auto', vmin=-10, vmax=40)
+    ax1.set_xlabel('Longitude (°)', fontweight='bold')
+    ax1.set_ylabel('Latitude (°)', fontweight='bold')
+    ax1.set_title('Mean SNR (dB) per Region', fontweight='bold', pad=10)
+    cbar1 = plt.colorbar(im1, ax=ax1)
+    cbar1.set_label('SNR (dB)', fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Mean Error map
+    ax2 = axes[0, 1]
+    im2 = ax2.imshow(error_grid, extent=extent, origin='lower', cmap='YlOrRd',
+                     aspect='auto', vmin=0, vmax=np.nanpercentile(error_grid, 95))
+    ax2.set_xlabel('Longitude (°)', fontweight='bold')
+    ax2.set_ylabel('Latitude (°)', fontweight='bold')
+    ax2.set_title('Mean Error (m) per Region', fontweight='bold', pad=10)
+    cbar2 = plt.colorbar(im2, ax=ax2)
+    cbar2.set_label('Error (m)', fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Local correlation map
+    ax3 = axes[1, 0]
+    im3 = ax3.imshow(corr_grid, extent=extent, origin='lower', cmap='RdBu_r',
+                     aspect='auto', vmin=-1, vmax=1)
+    ax3.set_xlabel('Longitude (°)', fontweight='bold')
+    ax3.set_ylabel('Latitude (°)', fontweight='bold')
+    ax3.set_title('Local Error-SNR Correlation', fontweight='bold', pad=10)
+    cbar3 = plt.colorbar(im3, ax=ax3)
+    cbar3.set_label('Correlation', fontweight='bold')
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Sample count map (log scale)
+    ax4 = axes[1, 1]
+    count_grid_plot = np.where(count_grid > 0, count_grid, np.nan)
+    im4 = ax4.imshow(np.log10(count_grid_plot), extent=extent, origin='lower', 
+                     cmap='viridis', aspect='auto')
+    ax4.set_xlabel('Longitude (°)', fontweight='bold')
+    ax4.set_ylabel('Latitude (°)', fontweight='bold')
+    ax4.set_title('Sample Count per Region (log₁₀)', fontweight='bold', pad=10)
+    cbar4 = plt.colorbar(im4, ax=ax4)
+    cbar4.set_label('log₁₀(count)', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n✓ Saved spatial analysis to: {output_path}")
+    plt.close()
+    
+    # Print spatial statistics
+    print("\n" + "="*80)
+    print("SPATIAL STATISTICS")
+    print("="*80)
+    print(f"Mean SNR across regions: {np.nanmean(snr_grid):.2f} dB")
+    print(f"Mean error across regions: {np.nanmean(error_grid):.3f} m")
+    print(f"Regions with valid correlation: {np.sum(np.isfinite(corr_grid))}")
+    if np.sum(np.isfinite(corr_grid)) > 0:
+        print(f"Mean local correlation: {np.nanmean(corr_grid):.3f}")
+        print(f"Correlation range: [{np.nanmin(corr_grid):.3f}, {np.nanmax(corr_grid):.3f}]")
+    print("="*80)
+
+
 def load_parquet_data(
     input_dir: str,
     ground_truth_col: str = "vhm0_y",
     reference_col: str = "VHM0",
     file_pattern: str = "WAVEAN*.parquet",
-    max_files: int = None
-) -> Tuple[np.ndarray, np.ndarray]:
+    max_files: int = None,
+    load_coords: bool = False
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Load ground truth and reference data from parquet files.
     
@@ -690,9 +867,11 @@ def load_parquet_data(
         reference_col: Column name for reference/uncorrected data (e.g., 'VHM0')
         file_pattern: Glob pattern for files to load
         max_files: Maximum number of files to process (None = all)
+        load_coords: Whether to also load latitude/longitude coordinates
     
     Returns:
-        ground_truth, reference as flattened numpy arrays
+        ground_truth, reference, latitude, longitude as flattened numpy arrays
+        (latitude and longitude are None if load_coords=False)
     """
     print(f"\n{'='*80}")
     print("LOADING DATA FROM PARQUET FILES")
@@ -723,15 +902,22 @@ def load_parquet_data(
     
     ground_truth_list = []
     reference_list = []
+    lat_list = [] if load_coords else None
+    lon_list = [] if load_coords else None
     
     # Load data from each file
     for file_path in tqdm(files, desc="Loading parquet files"):
         try:
+            # Determine columns to load
+            cols_to_load = [ground_truth_col, reference_col]
+            if load_coords:
+                cols_to_load.extend(['latitude', 'longitude'])
+            
             if is_s3:
                 with fsspec.open(file_path, "rb") as fh:
-                    table = pq.read_table(fh, columns=[ground_truth_col, reference_col])
+                    table = pq.read_table(fh, columns=cols_to_load)
             else:
-                table = pq.read_table(file_path, columns=[ground_truth_col, reference_col])
+                table = pq.read_table(file_path, columns=cols_to_load)
             
             # Extract columns as numpy arrays
             gt_data = table.column(ground_truth_col).to_numpy()
@@ -739,14 +925,26 @@ def load_parquet_data(
             
             # Filter out NaN/Inf values and negative values (land pixels and invalid data)
             valid_mask = np.isfinite(gt_data) & np.isfinite(ref_data) & (gt_data >= 0) & (ref_data >= 0)
+            
+            if load_coords:
+                lat_data = table.column('latitude').to_numpy()
+                lon_data = table.column('longitude').to_numpy()
+                valid_mask = valid_mask & np.isfinite(lat_data) & np.isfinite(lon_data)
+            
             gt_data = gt_data[valid_mask]
             ref_data = ref_data[valid_mask]
             
             if len(gt_data) > 0:
                 ground_truth_list.append(gt_data)
                 reference_list.append(ref_data)
+                
+                if load_coords:
+                    lat_list.append(lat_data[valid_mask])
+                    lon_list.append(lon_data[valid_mask])
             
             del table, gt_data, ref_data
+            if load_coords:
+                del lat_data, lon_data
             
         except Exception as e:
             print(f"\n⚠ Warning: Failed to load {os.path.basename(file_path)}: {e}")
@@ -755,14 +953,19 @@ def load_parquet_data(
     # Concatenate all data
     ground_truth = np.concatenate(ground_truth_list)
     reference = np.concatenate(reference_list)
+    latitude = np.concatenate(lat_list) if load_coords else None
+    longitude = np.concatenate(lon_list) if load_coords else None
     
     print(f"\n✓ Data loaded successfully!")
     print(f"  Total samples: {len(ground_truth):,}")
     print(f"  Ground truth range: [{ground_truth.min():.3f}, {ground_truth.max():.3f}]")
     print(f"  Reference range: [{reference.min():.3f}, {reference.max():.3f}]")
+    if load_coords:
+        print(f"  Latitude range: [{latitude.min():.3f}, {latitude.max():.3f}]")
+        print(f"  Longitude range: [{longitude.min():.3f}, {longitude.max():.3f}]")
     print(f"{'='*80}\n")
     
-    return ground_truth, reference
+    return ground_truth, reference, latitude, longitude
 
 
 # Example usage / Integration with evaluate_bunet.py
@@ -825,6 +1028,17 @@ if __name__ == "__main__":
         default=5,
         help="Minimum samples per bin"
     )
+    parser.add_argument(
+        "--spatial-analysis",
+        action="store_true",
+        help="Perform spatial SNR analysis (generates additional map plots)"
+    )
+    parser.add_argument(
+        "--grid-resolution",
+        type=float,
+        default=0.5,
+        help="Grid resolution in degrees for spatial analysis (default: 0.5°)"
+    )
     
     args = parser.parse_args()
     
@@ -835,12 +1049,13 @@ if __name__ == "__main__":
         input_dir = args.input_dir
     
     # Load data from parquet files
-    ground_truth, reference = load_parquet_data(
+    ground_truth, reference, latitude, longitude = load_parquet_data(
         input_dir=input_dir,
         ground_truth_col=args.ground_truth_col,
         reference_col=args.reference_col,
         file_pattern=f"WAVEAN{args.year}*.parquet",
-        max_files=args.max_files
+        max_files=args.max_files,
+        load_coords=args.spatial_analysis
     )
     
     # Define wave height bins (matching your sea_bins in evaluate_bunet.py)
@@ -855,11 +1070,32 @@ if __name__ == "__main__":
         min_samples=args.min_samples
     )
     
+    # Perform spatial analysis if requested
+    if args.spatial_analysis and latitude is not None and longitude is not None:
+        print("\nPreparing spatial analysis...")
+        # Compute SNR per pixel for spatial analysis
+        snr_per_pixel = compute_local_snr_per_pixel(ground_truth, reference)
+        
+        spatial_output = args.output_path.replace('.png', '_spatial.png')
+        spatial_snr_analysis(
+            ground_truth=ground_truth,
+            reference=reference,
+            snr_per_pixel=snr_per_pixel,
+            lat_coords=latitude,
+            lon_coords=longitude,
+            output_path=spatial_output,
+            grid_resolution=args.grid_resolution
+        )
+    
     print("\n✓ SNR Analysis Complete!")
     print("\nNext steps:")
     print(f"  1. Review the 4-panel plot: {args.output_path}")
-    print("  2. Check correlation values in the table above")
-    print("  3. If correlation > 0.6, consider adding SNR as input feature to TransUNet")
-    print("  4. Focus on bins with high correlation for local SNR features")
+    if args.spatial_analysis:
+        print(f"  2. Review the spatial analysis: {args.output_path.replace('.png', '_spatial.png')}")
+    print("  3. Check correlation values in the table above")
+    print("  4. If correlation > 0.6, consider adding SNR as input feature to TransUNet")
+    print("  5. Focus on bins with high correlation for local SNR features")
     print("\nTo analyze a different year, run:")
     print(f"  python calculate_snr.py --input-dir {args.input_dir} --year <YEAR>")
+    if not args.spatial_analysis:
+        print("\nTo include spatial analysis, add: --spatial-analysis")
