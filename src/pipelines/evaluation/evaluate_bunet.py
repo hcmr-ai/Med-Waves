@@ -26,6 +26,11 @@ import logging
 from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.classifiers.networks.mdn import mdn_expected_value
 from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
+from src.commons.postprocessing.post_processing import (
+    apply_bilateral_filter,
+    apply_bin_corrections,
+    compute_global_bin_biases,
+)
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.evaluation.evaluation_plots import (
     plot_error_boxplots as plot_error_boxplots_fn,
@@ -63,87 +68,6 @@ from src.pipelines.training.dnn_trainer import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-
-def apply_binwise_correction(
-    y_pred,
-    y_true,
-    vhm0,
-    bins=None,  # Wave height bins in meters
-    normalize=False,
-    std=None,
-    mean=None,
-    mask=None,
-):
-    """
-    Apply post-hoc bin-wise bias correction based on VHM0 (true or predicted).
-
-    Args:
-        y_pred: (B, 1, H, W) torch.Tensor, model predictions (normalized or real)
-        y_true: (B, 1, H, W) torch.Tensor, ground truth (same units as y_pred)
-        vhm0:   (B, 1, H, W) torch.Tensor, original wave height (same units as y_true)
-        bins:   List of bin edges in meters for binning vhm0
-        normalize: If True, assumes y_pred and y_true are normalized
-        std, mean: If normalize=True, std and mean should be provided
-        mask: (B, 1, H, W) optional boolean mask of valid sea pixels
-
-    Returns:
-        y_corr: (B, 1, H, W) bias-corrected predictions
-        bin_biases: dict of {bin_label: bias_value}
-        bin_counts: dict of {bin_label: sample_count}
-    """
-
-    # 1. Unnormalize if needed
-    if bins is None:
-        bins = [0, 1, 2, 3, 4, 5, 10]
-    if normalize:
-        assert std is not None and mean is not None, "Need mean/std to unnormalize"
-        y_pred_denorm = y_pred * std + mean
-        y_true_denorm = y_true * std + mean
-        vhm0_denorm = vhm0 * std + mean
-    else:
-        y_pred_denorm, y_true_denorm, vhm0_denorm = y_pred, y_true, vhm0
-
-    # 2. Prepare mask
-    if mask is None:
-        mask = ~torch.isnan(y_true_denorm)
-
-    # 3. Compute residuals (true - pred)
-    residuals = y_true_denorm - y_pred_denorm
-
-    # 4. Compute mean bias per bin
-    bin_biases = {}
-    bin_counts = {}
-    for i in range(len(bins) - 1):
-        low, high = bins[i], bins[i + 1]
-        bin_label = f"{low}-{high}m"
-
-        in_bin = (vhm0_denorm >= low) & (vhm0_denorm < high) & mask
-        if in_bin.any():
-            bin_bias = residuals[in_bin].mean().item()
-            bin_count = in_bin.sum().item()
-        else:
-            bin_bias = 0.0  # no data in this bin → no correction
-            bin_count = 0
-        bin_biases[bin_label] = bin_bias
-        bin_counts[bin_label] = bin_count
-
-    # 5. Apply correction
-    y_corr_denorm = y_pred_denorm.clone()
-    for i in range(len(bins) - 1):
-        low, high = bins[i], bins[i + 1]
-        bin_label = f"{low}-{high}m"
-        in_bin = (vhm0_denorm >= low) & (vhm0_denorm < high) & mask
-        y_corr_denorm[in_bin] += bin_biases[bin_label]
-
-    # 6. Normalize back if needed
-    if normalize:
-        y_corr = (y_corr_denorm - mean) / std
-    else:
-        y_corr = y_corr_denorm
-
-    return y_corr, bin_biases, bin_counts
 
 
 class ModelEvaluator:
@@ -742,88 +666,28 @@ class ModelEvaluator:
 
     def _compute_global_bin_biases(self):
         """Compute global bin-wise correction biases from training/validation set."""
-        print(
-            "Computing global bin-wise correction biases from training/validation set..."
-        )
-
-        all_residuals_by_bin = {}
         self.bins = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
-        # Initialize storage for each bin
-        for i in range(len(self.bins) - 1):
-            bin_label = f"{self.bins[i]}-{self.bins[i + 1]}m"
-            all_residuals_by_bin[bin_label] = []
-
-        with torch.no_grad():
-            for batch in tqdm(self.bias_loader, desc="Computing biases from train/val"):
-                # Handle batch format
-                if self.predict_bias:
-                    X, y, mask, vhm0 = batch
-                    vhm0 = vhm0.to(self.device) if vhm0 is not None else None
-                else:
-                    X, y, mask, vhm0_batch = batch
-                    vhm0 = (
-                        vhm0_batch.to(self.device) if vhm0_batch is not None else None
-                    )
-
-                X = X.to(self.device)
-                y = y.to(self.device)
-                mask = mask.to(self.device)
-
-                # Get predictions
-                y_pred = self.model(X)
-
-                # Align dimensions
-                min_h = min(y_pred.shape[2], y.shape[2])
-                min_w = min(y_pred.shape[3], y.shape[3])
-                y_pred = y_pred[:, :, :min_h, :min_w]
-                y = y[:, :, :min_h, :min_w]
-                mask = mask[:, :, :min_h, :min_w]
-                if vhm0 is not None:
-                    vhm0 = vhm0[:, :, :min_h, :min_w]
-
-                # Unnormalize
-                if self.normalize_target and self.normalizer is not None:
-                    y_pred = self.normalizer.inverse_transform_torch(y_pred)
-                    y = self.normalizer.inverse_transform_torch(y)
-
-                # Compute residuals and bin them
-                residuals = y - y_pred
-
-                for i in range(len(self.bins) - 1):
-                    low, high = self.bins[i], self.bins[i + 1]
-                    bin_label = f"{low}-{high}m"
-                    in_bin = (vhm0 >= low) & (vhm0 < high) & mask
-                    if in_bin.any():
-                        all_residuals_by_bin[bin_label].append(residuals[in_bin].cpu())
-
-        # Compute global bin biases
-        self.global_bin_biases = {}
-        print("\nGlobal bin-wise correction biases (from train/val set):")
-        print(f"{'Bin':<12} {'Count':<15} {'Bias ({self.unit})':<12}")
-        print("-" * 39)
-
-        for bin_label, residual_list in all_residuals_by_bin.items():
-            if residual_list:
-                all_residuals = torch.cat(residual_list)
-                self.global_bin_biases[bin_label] = all_residuals.mean().item()
-                bin_count = len(all_residuals)
-                print(
-                    f"{bin_label:<12} {bin_count:<15,} {self.global_bin_biases[bin_label]:>10.4f}"
-                )
-            else:
-                self.global_bin_biases[bin_label] = 0.0
+        self.global_bin_biases = compute_global_bin_biases(
+            model=self.model,
+            data_loader=self.bias_loader,
+            device=self.device,
+            bins=self.bins,
+            predict_bias=self.predict_bias,
+            normalize_target=self.normalize_target,
+            normalizer=self.normalizer,
+            unit=self.unit,
+        )
 
     def _apply_bin_corrections(self, y_pred, vhm0, mask):
         """Apply pre-computed global bin-wise corrections to predictions."""
-        y_pred_corrected = y_pred.clone()
-        for i in range(len(self.bins) - 1):
-            low, high = self.bins[i], self.bins[i + 1]
-            bin_label = f"{low}-{high}m"
-            in_bin = (vhm0 >= low) & (vhm0 < high) & mask
-            if in_bin.any() and bin_label in self.global_bin_biases:
-                y_pred_corrected[in_bin] += self.global_bin_biases[bin_label]
-        return y_pred_corrected
+        return apply_bin_corrections(
+            y_pred=y_pred,
+            vhm0=vhm0,
+            mask=mask,
+            bins=self.bins,
+            global_bin_biases=self.global_bin_biases,
+        )
 
     def _apply_bilateral_filter(self, predictions, mask, d=5, sigma_color=0.3, sigma_space=5):
         """
@@ -839,32 +703,13 @@ class ModelEvaluator:
         Returns:
             Filtered predictions [B, 1, H, W]
         """
-        import cv2
-
-        filtered = torch.zeros_like(predictions)
-
-        for i in range(predictions.shape[0]):
-            pred_np = predictions[i, 0].cpu().numpy()
-            mask_np = mask[i, 0].cpu().numpy()
-
-            # Only filter sea pixels
-            pred_filtered = pred_np.copy()
-
-            # Apply bilateral filter (only on valid data)
-            if mask_np.sum() > 0:
-                pred_filtered = cv2.bilateralFilter(
-                    pred_np.astype(np.float32),
-                    d=d,
-                    sigmaColor=sigma_color,
-                    sigmaSpace=sigma_space
-                )
-
-                # Keep land pixels unchanged
-                pred_filtered[~mask_np] = pred_np[~mask_np]
-
-            filtered[i, 0] = torch.from_numpy(pred_filtered).to(predictions.device)
-
-        return filtered
+        return apply_bilateral_filter(
+            predictions=predictions,
+            mask=mask,
+            d=d,
+            sigma_color=sigma_color,
+            sigma_space=sigma_space,
+        )
 
     def compute_overall_metrics(self) -> Dict[str, float]:
         """Compute overall performance metrics from accumulators."""
