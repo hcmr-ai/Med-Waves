@@ -77,10 +77,8 @@ model:
   # Task configuration. Used for both single and multi-task training. Define one task if single-task training, or multiple tasks if multi-task training.
   tasks_config:
     - name: "vhm0"
-      loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", etc.
       weight: 1.0
     - name: "vtm02"
-      loss_type: "mse"
       weight: 0.5
 # Training configuration
 training:
