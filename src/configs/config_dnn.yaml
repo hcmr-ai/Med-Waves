@@ -17,11 +17,14 @@ data:
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null # Data already subsampled in files, no additional runtime subsampling
-  use_cache: false  # Cache files in memory (reduces repeated I/O)
-  max_cache_size: 20  # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
+  use_cache: false # Cache files in memory (reduces repeated I/O)
+  max_cache_size: 20 # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
 
   # Data preprocessing
-  target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
+  # target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
+  target_columns: # Multi-task: {task_name: column_name}. Single-task: {task_name: column_name}
+    vhm0: "corrected_VHM0"
+    vtm02: "corrected_VTM02"
   predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
   normalize_target: true
   excluded_columns: [
@@ -71,13 +74,21 @@ model:
     step_size: 10 # For StepLR: epochs between LR reductions
     gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
 
+  # Task configuration. Used for both single and multi-task training. Define one task if single-task training, or multiple tasks if multi-task training.
+  tasks_config:
+    - name: "vhm0"
+      loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", etc.
+      weight: 1.0
+    - name: "vtm02"
+      loss_type: "mse"
+      weight: 0.5
 # Training configuration
 training:
-  batch_size: 12
-  accumulate_grad_batches: 3  # Larger batches for 64x64 patches (4x smaller than 128x128)
+  batch_size: 64
+  accumulate_grad_batches: 1 # Larger batches for 64x64 patches (4x smaller than 128x128)
   max_epochs: 100
   num_workers: 4
-  persistent_workers: true  # Not needed with num_workers=0
+  persistent_workers: true # Not needed with num_workers=0
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1
@@ -89,9 +100,9 @@ training:
   mode: "min"
   fast_dev_run: false
   check_val_every_n_epoch: 1
-  num_sanity_val_steps: 2
+  num_sanity_val_steps: 0
   benchmark: false
-  prefetch_factor: 2  # Increased from 1: prefetch 2 batches per worker (helps with I/O)
+  prefetch_factor: 2 # Increased from 1: prefetch 2 batches per worker (helps with I/O)
   val_check_interval: null
   use_swa: false
   use_ema: false
@@ -114,5 +125,14 @@ logging:
   log_dir: "/opt/dlami/nvme/logs_full_20-21_mse_64_lambda_lr_256"
   experiment_name: "dnn_training_full_20-21_mse_64_lambda_lr_256"
   use_comet: true
-  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset", "256_patch_size"]
+  comet_tags:
+    [
+      "wave_height",
+      "transunet",
+      "mse",
+      "bias_correction",
+      "lambda_lr",
+      "full_dataset",
+      "256_patch_size",
+    ]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"
