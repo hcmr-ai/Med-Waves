@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+
 import polars as pl
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
@@ -11,70 +12,69 @@ def main():
     # Configuration
     base_data_dir = "/data/tsolis/AI_project/parquet/augmented_with_labels/hourly"  # Use existing data
     output_dir = "/data/tsolis/AI_project/output/experiments/DiffCorrector/run_diff_v1"
-    
+
     # Use the same date patterns as in training
     patterns = ["WAVEAN2023"]
     print(f"📅 Using date patterns: {patterns}")
-    
+
     print("🚀 Starting Diff Corrector Evaluation")
     print("=" * 50)
     print(f"📂 Data directory: {base_data_dir}")
     print(f"📁 Output directory: {output_dir}")
     print()
-    
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     class DummyExperiment:
         def log_figure(self, figure_name, figure):
-            import matplotlib.pyplot as plt
             figure.savefig(output_path / figure_name, dpi=300, bbox_inches='tight')
             print(f"📊 Saved figure: {figure_name}")
-    
+
     dummy_experiment = DummyExperiment()
-    
+
     class FilteredPredictionPlotter(PredictionPlotter):
         def __init__(self, prediction_dir, comet_exp, patterns):
             super().__init__(prediction_dir, comet_exp)
             self.patterns = patterns
-        
+
         def _load_all_predictions(self) -> pl.DataFrame:
             """Load predictions with date pattern filtering"""
             print(f"📂 Loading daily predictions from {self.prediction_dir} with patterns: {self.patterns}")
-            
+
             all_files = []
             for pattern in self.patterns:
                 pattern_files = sorted(self.prediction_dir.glob(f"*{pattern}*.parquet"))
                 all_files.extend(pattern_files)
-            
+
             all_files = sorted(set(all_files))  # Remove duplicates
             print(f"📁 Found {len(all_files)} files matching patterns")
-            
+
             lazy_dfs = []
             for file in all_files:
                 lazy_df = pl.scan_parquet(file).with_columns([
                     pl.col("timestamp").dt.date().alias("day")
                 ])
                 lazy_dfs.append(lazy_df)
-            
+
             return pl.concat(lazy_dfs, how="vertical").collect(engine="streaming")
-        
+
         def compute_metrics(self, resolution: float = 0.25):
             """Memory-optimized metrics computation with streaming and reduced copies"""
             print("📊 Computing metrics per day, month, and spatial bins...")
-            
+
             # Filter files based on patterns
             all_files = []
             for pattern in self.patterns:
                 pattern_files = sorted(self.prediction_dir.glob(f"*{pattern}*.parquet"))
                 all_files.extend(pattern_files)
-            
+
             all_files = sorted(set(all_files))  # Remove duplicates
             if not all_files:
                 raise FileNotFoundError(f"No files matching patterns {self.patterns} found in {self.prediction_dir}")
-            
+
             print(f"📁 Processing {len(all_files)} files matching patterns")
-            
+
             lazy_dfs = []
             for file in all_files:
                 lazy_df = pl.scan_parquet(file).with_columns([
@@ -90,7 +90,7 @@ def main():
                     ])
                 )
                 lazy_dfs.append(lazy_df)
-            
+
             lazy_df = pl.concat(lazy_dfs, how="vertical")
 
             def metric_block(uncorrected: str, corrected: str):
@@ -139,43 +139,43 @@ def main():
             ]).collect(engine="streaming")
 
             return metrics_day, metrics_month, metrics_spatial
-    
+
     plotter = FilteredPredictionPlotter(base_data_dir, dummy_experiment, patterns)
-    
+
     try:
         print("📊 Computing Diff corrector metrics (uncorrected vs corrected)...")
         metrics_day, metrics_month, metrics_spatial = plotter.compute_metrics(resolution=0.25)
-        
+
         predictions_dir = output_path / "individual_predictions"
         predictions_dir.mkdir(exist_ok=True)
-        
+
         metrics_day.write_parquet(predictions_dir / "metrics_by_day.parquet")
         metrics_month.write_parquet(predictions_dir / "metrics_by_month.parquet")
         metrics_spatial.write_parquet(predictions_dir / "metrics_spatial_by_month.parquet")
-        
-        print(f"✅ Saved metrics files:")
+
+        print("✅ Saved metrics files:")
         print(f"   - metrics_by_day.parquet ({len(metrics_day)} days)")
         print(f"   - metrics_by_month.parquet ({len(metrics_month)} months)")
         print(f"   - metrics_spatial_by_month.parquet ({len(metrics_spatial)} spatial bins)")
-        
+
         print("\n📈 Diff Corrector Summary Statistics:")
         print("=" * 50)
-        
+
         for var in ["VHM0", "VTM02"]:
             print(f"\n{var}:")
             rmse_avg = metrics_day[f"rmse_{var}"].mean()
             mae_avg = metrics_day[f"mae_{var}"].mean()
             bias_avg = metrics_day[f"bias_{var}"].mean()
             corr_avg = metrics_day[f"corr_{var}"].mean()
-            
+
             print(f"  RMSE: {rmse_avg:.4f}")
             print(f"  MAE:  {mae_avg:.4f}")
             print(f"  Bias: {bias_avg:.4f}")
             print(f"  Corr: {corr_avg:.4f}")
-        
-        print(f"\n✅ Diff corrector evaluation complete!")
+
+        print("\n✅ Diff corrector evaluation complete!")
         print(f"📁 Results saved to: {output_dir}")
-        
+
     except Exception as e:
         print(f"Error during evaluation: {e}")
         raise

@@ -342,7 +342,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     predict_bias = data_config.get("predict_bias", False)
     subsample_step = data_config.get("subsample_step", None)
 
-    normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
+    # normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
+    normalizer = WaveNormalizer.load_from_disk(data_config["normalizer_path"])
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
@@ -490,15 +491,18 @@ def create_callbacks(config: DNNConfig) -> list:
         )
         callbacks.append(s3_sync_callback)
 
-    # Early stopping callback
-    logger.info("Adding Early Stopping callback")
-    early_stopping = EarlyStopping(
-        monitor=training_config["monitor"],
-        patience=training_config["early_stopping_patience"],
-        mode=training_config["mode"],
-        check_on_train_epoch_end=False,  # Only check when validation runs
-    )
-    callbacks.append(early_stopping)
+    # Early stopping callback (only if patience is set)
+    if training_config["early_stopping_patience"] is not None:
+        logger.info("Adding Early Stopping callback")
+        early_stopping = EarlyStopping(
+            monitor=training_config["monitor"],
+            patience=training_config["early_stopping_patience"],
+            mode=training_config["mode"],
+            check_on_train_epoch_end=False,  # Only check when validation runs
+        )
+        callbacks.append(early_stopping)
+    else:
+        logger.info("Early stopping disabled - will train for full max_epochs")
 
     logger.info("Adding Learning Rate Monitor callback")
     lr_monitor = LearningRateMonitor(logging_interval='step')
