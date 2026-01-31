@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.commons.loss_functions.mse_loss import masked_mse_loss
+
 
 class WaveFeatureExtractor(nn.Module):
     """
@@ -55,7 +57,7 @@ class PerceptualLoss(nn.Module):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.detach_target = detach_target
-        
+
         # Set to eval mode (disables dropout, batchnorm updates, etc.)
         self.feature_extractor.eval()
 
@@ -70,10 +72,10 @@ class PerceptualLoss(nn.Module):
         self.feature_extractor.eval()
         with torch.no_grad():
             feats_pred_no_grad = self.feature_extractor(pred)
-        
+
         # Re-enable gradients by creating new tensors that require grad
         feats_pred = [f.detach().requires_grad_(True) for f in feats_pred_no_grad]
-        
+
         # Extract features from target - no gradients needed
         with torch.no_grad():
             feats_tgt = self.feature_extractor(target)
@@ -91,3 +93,16 @@ class PerceptualLoss(nn.Module):
             loss = loss + w * loss_feat
 
         return loss
+
+
+def masked_ssim_perceptual_loss(y_pred, y_true, mask, ssim_loss, perceptual_loss, lambda_ssim=0.1, lambda_perceptual=0.05):
+    """
+    Masked SSIM perceptual loss.
+    Args:
+        y_pred: (B, 1, H, W) normalized model prediction
+        y_true: (B, 1, H, W) normalized target
+        mask:   (B, 1, H, W) bool mask of valid pixels
+        lambda_ssim: weight for SSIM loss
+        lambda_perceptual: weight for perceptual loss
+    """
+    return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss + lambda_perceptual * perceptual_loss(y_pred, y_true)

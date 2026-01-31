@@ -5,42 +5,24 @@ import lightning as pl
 import numpy as np
 import torch
 import torch.optim as optim
-from transformers import get_cosine_schedule_with_warmup
 
 # Add src to path for imports
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.classifiers.networks.bunet import (
-    BU_Net_Geo,
-    BU_Net_Geo_Nick,
-    BU_Net_Geo_Nick_Enhanced,
-)
+from src.classifiers.model_factory import create_model
 from src.classifiers.networks.mdn import mdn_expected_value
-from src.classifiers.networks.swin_unet import SwinUNetAgnostic
-from src.classifiers.networks.trans_unet import TransUNetGeo
-from src.classifiers.networks.trans_unet_gan import WaveTransUNetGAN
+from src.commons.loss_functions.adversarial_loss import (
+    adversarial_loss_D,
+    adversarial_loss_G,
+)
 from src.commons.loss_functions.perceptual_loss import (
     PerceptualLoss,
     WaveFeatureExtractor,
 )
 from src.commons.loss_functions.ssim import SSIMLoss
-from src.commons.losses import (
-    adversarial_loss_D,
-    adversarial_loss_G,
-    masked_huber_loss,
-    masked_mse_loss,
-    masked_mse_mdn_loss,
-    masked_mse_perceptual_loss,
-    masked_mse_ssim_loss,
-    masked_multi_bin_weighted_mse,
-    masked_multi_bin_weighted_smooth_l1,
-    masked_smooth_l1_loss,
-    masked_ssim_perceptual_loss,
-    masked_weighted_mse,
-    mdn_nll_loss,
-    pixel_switch_loss_stable,
-)
+from src.commons.losses_factory import compute_loss
+from src.commons.scheduler_factory import create_scheduler
 
 
 class WaveBiasCorrector(pl.LightningModule):
@@ -51,7 +33,7 @@ class WaveBiasCorrector(pl.LightningModule):
         add_vhm0_residual=False,
         vhm0_channel_index=0,
         weight_decay=1e-4,
-        model_type="nick",  # Options: "nick", "geo", "enhanced"
+        model_type="nick",
         upsample_mode="nearest",
         pixel_switch_threshold_m=0.45,
         use_mdn=False,
@@ -81,45 +63,18 @@ class WaveBiasCorrector(pl.LightningModule):
 
         if model_type == "transunet_gan":
             self.automatic_optimization = False
-        # Select model architecture
-        if model_type == "geo":
-            self.model = BU_Net_Geo(
-                in_channels=in_channels, filters=filters, dropout=dropout,
-                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index
-            )
-        elif model_type == "enhanced":
-            self.model = BU_Net_Geo_Nick_Enhanced(
-                in_channels=in_channels, filters=filters, dropout=dropout,
-                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index,
-                upsample_mode=upsample_mode,
-                use_mdn=use_mdn,
-            )
-        elif model_type == "transunet":
-            self.model = TransUNetGeo(
-                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8,
-                use_mdn=use_mdn,
-            )
-        elif model_type == "swinunet":
-            self.model = SwinUNetAgnostic(
-                img_size=(64, 64),
-                in_chans=in_channels,
-                num_classes=1,
-                embed_dim=64,
-                depths=(2,2,2,2),
-                num_heads=(2,4,8,8),
-                window_size=4,
-                mlp_ratio=4.,
-            )
-        elif model_type == "transunet_gan":
-            self.model = WaveTransUNetGAN(
-                in_channels=in_channels, out_channels=1, base_channels=64, bottleneck_dim=1024, patch_size=16, num_layers=8,
-                use_mdn=use_mdn,
-            )
-        else:  # "nick" or default
-            self.model = BU_Net_Geo_Nick(
-                in_channels=in_channels, filters=filters, dropout=dropout,
-                add_vhm0_residual=add_vhm0_residual, vhm0_channel_index=vhm0_channel_index
-            )
+
+        # Create model using factory
+        self.model = create_model(
+            model_type=model_type,
+            in_channels=in_channels,
+            filters=filters,
+            dropout=dropout,
+            add_vhm0_residual=add_vhm0_residual,
+            vhm0_channel_index=vhm0_channel_index,
+            upsample_mode=upsample_mode,
+            use_mdn=use_mdn,
+        )
 
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
@@ -132,32 +87,21 @@ class WaveBiasCorrector(pl.LightningModule):
         return self.model(x_clean)
 
     def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction, pi=None, mu=None, sigma=None):
-        if self.loss_type == "mse":
-            return masked_mse_loss(y_pred, y_true, mask)
-        elif self.loss_type == "smooth_l1":
-            return masked_smooth_l1_loss(y_pred, y_true, mask, self.criterion)
-        elif self.loss_type == "weighted_mse":
-            return masked_weighted_mse(y_pred, y_true, mask, threshold=6.0, high_weight=5.0, epsilon=1e-6)
-        elif self.loss_type == "multi_bin_weighted_smooth_l1":
-            return masked_multi_bin_weighted_smooth_l1(y_pred, y_true, mask, vhm0_for_reconstruction, self.criterion)
-        elif self.loss_type == "pixel_switch_mse":
-            return pixel_switch_loss_stable(y_pred, y_true, mask, threshold_m=self.pixel_switch_threshold_m)
-        elif self.loss_type == "mse_perceptual":
-            return masked_mse_perceptual_loss(y_pred, y_true, mask, self.perceptual_loss)
-        elif self.loss_type == "mse_ssim":
-            return masked_mse_ssim_loss(y_pred, y_true, mask, ssim_loss=self.ssim_loss)
-        elif self.loss_type == "mse_ssim_perceptual":
-            return masked_ssim_perceptual_loss(y_pred, y_true, mask, self.ssim_loss, self.perceptual_loss)
-        elif self.loss_type == "mse_mdn":
-            return masked_mse_mdn_loss(pi, mu, sigma, y_true, mask, eps=1e-9, lambda_mse=0.1, lambda_nll=1.0)
-        elif self.loss_type == "mdn":
-            return mdn_nll_loss(pi, mu, sigma, y_true, mask, eps=1e-9)
-        elif self.loss_type == "mse_gan":
-            return masked_mse_loss(y_pred, y_true, mask)
-        elif self.loss_type == "huber":
-            return masked_huber_loss(y_pred, y_true, mask)
-        else:
-            return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
+        """Compute loss using the unified loss wrapper from losses.py"""
+        return compute_loss(
+            loss_type=self.loss_type,
+            y_pred=y_pred,
+            y_true=y_true,
+            mask=mask,
+            vhm0_for_reconstruction=vhm0_for_reconstruction,
+            pi=pi,
+            mu=mu,
+            sigma=sigma,
+            criterion=self.criterion,
+            pixel_switch_threshold_m=self.pixel_switch_threshold_m,
+            perceptual_loss=self.perceptual_loss,
+            ssim_loss=self.ssim_loss,
+        )
 
     def _training_step(self, batch, batch_idx):
         X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id we don't need
@@ -621,115 +565,19 @@ class WaveBiasCorrector(pl.LightningModule):
                 self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
 
     def _build_scheduler(self, optimizer):
-        def get_float(key, default):
-            val = scheduler_config.get(key, default)
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                return default
+        """Build scheduler using scheduler factory"""
+        scheduler_cfg, scheduler_metadata = create_scheduler(
+            optimizer=optimizer,
+            scheduler_config=self.lr_scheduler_config,
+            total_steps=self.trainer.estimated_stepping_batches if hasattr(self, 'trainer') else None,
+            max_epochs=self.trainer.max_epochs if hasattr(self, 'trainer') else None,
+        )
 
-        scheduler_config = self.lr_scheduler_config
-        if not scheduler_config or scheduler_config.get("type", "none") == "none":
-            return {}
+        # Store metadata for logging if provided
+        if scheduler_metadata:
+            self.scheduler_info = scheduler_metadata
 
-        scheduler_type = scheduler_config["type"]
-
-        if scheduler_type == "ReduceLROnPlateau":
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode=scheduler_config.get("mode", "min"),
-                factor=get_float("factor", 0.5),
-                patience=int(scheduler_config.get("patience", 5)),
-                min_lr=get_float("min_lr", 1e-7),
-                # verbose=scheduler_config.get("verbose", True),
-            )
-            return {
-                    "scheduler": scheduler,
-                    "monitor": scheduler_config.get("monitor", "val_loss"),
-                }
-
-        elif scheduler_type == "CosineAnnealingLR":
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=int(scheduler_config.get("T_max", 50)), eta_min=get_float("eta_min", 1e-6),
-            )
-            return {
-                    "scheduler": scheduler,
-                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
-                    "frequency": 1,
-                }
-
-        elif scheduler_type == "StepLR":
-            scheduler = optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=int(scheduler_config.get("step_size", 10)),
-                gamma=get_float("gamma", 0.1),
-            )
-            return {
-                    "scheduler": scheduler,
-                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
-                    "frequency": 1,
-                }
-
-        elif scheduler_type == "ExponentialLR":
-            scheduler = optim.lr_scheduler.ExponentialLR(
-                optimizer, gamma=get_float("gamma", 0.1)
-            )
-            return {
-                    "scheduler": scheduler,
-                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
-                    "frequency": 1,
-                }
-
-        elif scheduler_type == "CosineAnnealingWarmupRestarts":
-            # Use PyTorch Lightning's estimated_stepping_batches
-            total_steps = self.trainer.estimated_stepping_batches
-            warmup_ratio = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
-            warmup_steps = int(warmup_ratio * total_steps)
-
-            # Store these values to log them during training
-            self.scheduler_info = {
-                "total_steps": total_steps,
-                "max_epochs": self.trainer.max_epochs,
-                "warmup_ratio": warmup_ratio,
-                "warmup_steps_calculated": warmup_steps
-            }
-
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
-            )
-            return {
-                    "scheduler": scheduler,
-                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
-                    "frequency": 1,
-                }
-        elif scheduler_type == "LambdaLR":
-            import math
-            total_steps = self.trainer.estimated_stepping_batches
-
-            warmup_frac = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
-            warmup_steps = int(warmup_frac * total_steps)
-            print(f"Warmup steps: {warmup_steps}, Total steps: {total_steps}")
-
-            def lr_lambda(step):
-                # Warmup: linear increase
-                if step < warmup_steps:
-                    return max(0.01, step / max(1, warmup_steps))
-
-                # Cosine decay: smooth decrease
-                progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))
-                return 0.5 * (1 + math.cos(math.pi * progress))
-
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-            return {
-                    "scheduler": scheduler,
-                    "interval": "step",
-                    "frequency": 1,
-                }
-
-        else:
-            # Unknown scheduler type, return optimizer only
-            return {}
+        return scheduler_cfg
 
     def configure_optimizers(self):
         if self.optimizer_type == "Adam":
@@ -773,130 +621,3 @@ class WaveBiasCorrector(pl.LightningModule):
                 "lr_scheduler": self._build_scheduler(opt_d)
             }
         ]
-
-    def _configure_optimizers(self):
-        # lr = float(self.hparams.lr) if isinstance(self.hparams.lr, str) else self.hparams.lr
-        if self.optimizer_type == "Adam":
-            optimizer = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        elif self.optimizer_type == "AdamW":
-            optimizer = optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        elif self.optimizer_type == "SGD":
-            optimizer = optim.SGD(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        else:
-            raise ValueError(f"Invalid optimizer type: {self.optimizer_type}")
-
-        if self.model_type == "transunet_gan":
-            optimizer_g = optim.Adam(self.model.G.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-            optimizer_d = optim.Adam(self.model.D.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-            optimizer = [optimizer_g, optimizer_d]
-
-        # Store optimizer info to log later
-        self.optimizer_info = {
-            "optimizer_weight_decay": self.hparams.weight_decay,
-            "optimizer_lr": self.hparams.lr
-        }
-
-        def get_float(key, default):
-            val = scheduler_config.get(key, default)
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                return default
-
-        # Configure learning rate scheduler
-        scheduler_config = self.lr_scheduler_config
-        if not scheduler_config or scheduler_config.get("type", "none") == "none":
-            return optimizer
-
-        scheduler_type = scheduler_config["type"]
-
-        if scheduler_type == "ReduceLROnPlateau":
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode=scheduler_config.get("mode", "min"),
-                factor=get_float("factor", 0.5),
-                patience=int(scheduler_config.get("patience", 5)),
-                min_lr=get_float("min_lr", 1e-7),
-                # verbose=scheduler_config.get("verbose", True),
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "monitor": scheduler_config.get("monitor", "val_loss"),
-                },
-            }
-
-        elif scheduler_type == "CosineAnnealingLR":
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=int(scheduler_config.get("T_max", 50)), eta_min=get_float("eta_min", 1e-6),
-            )
-            return {"optimizer": optimizer, "lr_scheduler": scheduler}
-
-        elif scheduler_type == "StepLR":
-            scheduler = optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=int(scheduler_config.get("step_size", 10)),
-                gamma=get_float("gamma", 0.1),
-            )
-            return {"optimizer": optimizer, "lr_scheduler": scheduler}
-
-        elif scheduler_type == "ExponentialLR":
-            scheduler = optim.lr_scheduler.ExponentialLR(
-                optimizer, gamma=get_float("gamma", 0.1)
-            )
-            return {"optimizer": optimizer, "lr_scheduler": scheduler}
-
-        elif scheduler_type == "CosineAnnealingWarmupRestarts":
-            # Use PyTorch Lightning's estimated_stepping_batches
-            total_steps = self.trainer.estimated_stepping_batches
-            warmup_ratio = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
-            warmup_steps = int(warmup_ratio * total_steps)
-
-            # Store these values to log them during training
-            self.scheduler_info = {
-                "total_steps": total_steps,
-                "max_epochs": self.trainer.max_epochs,
-                "warmup_ratio": warmup_ratio,
-                "warmup_steps_calculated": warmup_steps
-            }
-
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps,
-            )
-            return {"optimizer": optimizer, "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",   # ✅ CRITICAL — warmup MUST be per-step
-                    "frequency": 1,
-                }}
-        elif scheduler_type == "LambdaLR":
-            import math
-            total_steps = self.trainer.estimated_stepping_batches
-
-            warmup_frac = get_float(scheduler_config.get("warmup_steps", 0.1), 0.1)
-            warmup_steps = int(warmup_frac * total_steps)
-            print(f"Warmup steps: {warmup_steps}, Total steps: {total_steps}")
-
-            def lr_lambda(step):
-                # Warmup: linear increase
-                if step < warmup_steps:
-                    return max(0.01, step / max(1, warmup_steps))
-
-                # Cosine decay: smooth decrease
-                progress = (step - warmup_steps) / max(1, (total_steps - warmup_steps))
-                return 0.5 * (1 + math.cos(math.pi * progress))
-
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",
-                    "frequency": 1,
-                }
-            }
-
-        else:
-            # Unknown scheduler type, return optimizer only
-            return optimizer

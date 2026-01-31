@@ -1,12 +1,14 @@
-import os
-import boto3
-import polars as pl
-import numpy as np
-from tqdm import tqdm
-from pathlib import Path
-import sys
-import s3fs
 import glob
+import os
+import sys
+from pathlib import Path
+
+import boto3
+import numpy as np
+import polars as pl
+import s3fs
+from tqdm import tqdm
+
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
@@ -85,7 +87,7 @@ if __name__ == "__main__":
     for name, cfg in tqdm(configs.items(), desc="Fitting scalers"):
         # Fit normalizer
         normalizer = WaveNormalizer(**cfg)
-        
+
         # Validation: Check feature order matches data shape
         print(f"\n{'='*80}")
         print(f"Fitting normalizer: {name}")
@@ -93,21 +95,21 @@ if __name__ == "__main__":
         print(f"Data shape: {X.shape}")
         print(f"Number of features: {len(FEATURES)}")
         print(f"Number of channels in data: {X.shape[-1]}")
-        
+
         if len(FEATURES) != X.shape[-1]:
             raise ValueError(
                 f"Mismatch: FEATURES has {len(FEATURES)} items but data has {X.shape[-1]} channels"
             )
-        
+
         # Fit the normalizer
         normalizer.fit(X, feature_order=FEATURES, target_feature_name="corrected_VHM0")
-        
+
         # Validation: Verify target feature name was stored correctly
-        print(f"\nNormalizer metadata:")
+        print("\nNormalizer metadata:")
         print(f"  Feature order length: {len(normalizer.feature_order_) if normalizer.feature_order_ else 'None'}")
         print(f"  Target feature name: {normalizer.target_feature_name_}")
         print(f"  Number of stats channels: {len(normalizer.stats_)}")
-        
+
         # Validate target feature lookup
         if normalizer.feature_order_ and normalizer.target_feature_name_:
             try:
@@ -123,12 +125,12 @@ if __name__ == "__main__":
                         print(f"  Target stats type: {type(target_stats)}")
             except ValueError:
                 print(f"  WARNING: Target '{normalizer.target_feature_name_}' not found in feature_order!")
-        
+
         # Print first and last few features for verification
         if normalizer.feature_order_:
             print(f"\n  First 3 features: {normalizer.feature_order_[:3]}")
             print(f"  Last 3 features: {normalizer.feature_order_[-3:]}")
-        
+
         print(f"{'='*80}\n")
 
         # Save locally
@@ -143,4 +145,4 @@ if __name__ == "__main__":
             normalizer.save_to_s3(local_path, S3_BUCKET, s3_key)
             print(f"✓ Uploaded to s3://{S3_BUCKET}/{s3_key}")
         else:
-            print(f"Skipping upload to S3 as USE_S3 is False")
+            print("Skipping upload to S3 as USE_S3 is False")
