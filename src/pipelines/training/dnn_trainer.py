@@ -128,7 +128,7 @@ class DNNConfig:
                 "max_files": None,
                 "random_seed": 42,
                 "excluded_columns": ["time", "latitude", "longitude", "timestamp"],
-                "target_column": "corrected_VHM0",
+                "target_columns": {"vhm0": "corrected_VHM0"},
                 "predict_bias": False,
             },
             "model": {
@@ -338,7 +338,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     excluded_columns = data_config.get(
         "excluded_columns", ["time", "latitude", "longitude", "timestamp"]
     )
-    target_column = data_config.get("target_column", "corrected_VHM0")
+    target_columns = data_config.get("target_columns", {"vhm0": "corrected_VHM0"})
     predict_bias = data_config.get("predict_bias", False)
     subsample_step = data_config.get("subsample_step", None)
 
@@ -352,7 +352,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             train_files,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -367,7 +367,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             train_files,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -384,7 +384,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             patch_size=patch_size,
             stride=data_config.get("stride", None),
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -399,7 +399,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             val_files,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -642,6 +642,7 @@ def main():
             lambda_adv=model_config.get("lambda_adv", 0.01),
             n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
             discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
+            tasks_config=model_config.get("tasks_config", None),
         )
     else:
         logger.info("Training new model")
@@ -664,6 +665,7 @@ def main():
             lambda_adv=model_config.get("lambda_adv", 0.01),
             n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
             discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
+            tasks_config=model_config.get("tasks_config", None),
         )
 
     # Create callbacks
@@ -704,7 +706,7 @@ def main():
             "validation_data_year", config.config["data"]["val_year"]
         )
         comet_logger.experiment.log_other(
-            "target_column", config.config["data"]["target_column"]
+            "target_columns", config.config["data"]["target_columns"]
         )
         comet_logger.experiment.log_other(
             "predict_bias", config.config["data"]["predict_bias"]
