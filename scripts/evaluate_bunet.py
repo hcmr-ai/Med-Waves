@@ -310,6 +310,7 @@ class ModelEvaluator:
         geo_bounds: dict = None,
         use_mdn: bool = False,
         target_column: str = "corrected_VHM0",
+        apply_bilateral_filter: bool = False,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -327,7 +328,9 @@ class ModelEvaluator:
         self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
         self.use_mdn = use_mdn
         self.target_column = target_column
-
+        self.apply_bilateral_filter = apply_bilateral_filter
+        if self.apply_bilateral_filter:
+            logger.info("Applying bilateral filter to predictions")
         self._configure_sea_bins()
         self._configure_labels()
         # Sea-bin definitions
@@ -887,6 +890,9 @@ class ModelEvaluator:
                     y_pred = self.normalizer.inverse_transform_torch(y_pred)
                     y = self.normalizer.inverse_transform_torch(y)
 
+                if self.apply_bilateral_filter:  # New flag
+                    y_pred = self._apply_bilateral_filter(y_pred, mask)
+
                 # Apply bin-wise correction if enabled
                 if self.apply_binwise_correction_flag and vhm0 is not None:
                     y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
@@ -980,6 +986,47 @@ class ModelEvaluator:
             if in_bin.any() and bin_label in self.global_bin_biases:
                 y_pred_corrected[in_bin] += self.global_bin_biases[bin_label]
         return y_pred_corrected
+    
+    def _apply_bilateral_filter(self, predictions, mask, d=5, sigma_color=0.3, sigma_space=5):
+        """
+        Apply bilateral filter to smooth extreme predictions while preserving edges.
+        
+        Args:
+            predictions: [B, 1, H, W] tensor
+            mask: [B, 1, H, W] boolean mask (sea pixels)
+            d: Diameter of pixel neighborhood
+            sigma_color: Filter sigma in value space (wave height diff tolerance)
+            sigma_space: Filter sigma in coordinate space (spatial distance)
+        
+        Returns:
+            Filtered predictions [B, 1, H, W]
+        """
+        import cv2
+        
+        filtered = torch.zeros_like(predictions)
+        
+        for i in range(predictions.shape[0]):
+            pred_np = predictions[i, 0].cpu().numpy()
+            mask_np = mask[i, 0].cpu().numpy()
+            
+            # Only filter sea pixels
+            pred_filtered = pred_np.copy()
+            
+            # Apply bilateral filter (only on valid data)
+            if mask_np.sum() > 0:
+                pred_filtered = cv2.bilateralFilter(
+                    pred_np.astype(np.float32),
+                    d=d,
+                    sigmaColor=sigma_color,
+                    sigmaSpace=sigma_space
+                )
+                
+                # Keep land pixels unchanged
+                pred_filtered[~mask_np] = pred_np[~mask_np]
+            
+            filtered[i, 0] = torch.from_numpy(pred_filtered).to(predictions.device)
+        
+        return filtered
 
     def compute_overall_metrics(self) -> Dict[str, float]:
         """Compute overall performance metrics from accumulators."""
@@ -2688,7 +2735,7 @@ class ModelEvaluator:
 def main():
     parser = argparse.ArgumentParser(description="Evaluate WaveBiasCorrector model")
     parser.add_argument(
-        "--checkpoint", type=str, default="", help="Path to model checkpoint"
+        "--checkpoint", type=str, default="", help="Path to model checkpoint file or directory (evaluates all .ckpt files in directory)"
     )
     parser.add_argument(
         "--output-dir",
@@ -2729,7 +2776,8 @@ def main():
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
     )
     _test_files_parq = get_file_list(
-        f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
+        # f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
+        f"/data/users/aiuser/parquet",
         f"WAVEAN{data_config.get('test_year', [2023])[0]}*.parquet",
     )
 
@@ -2741,6 +2789,7 @@ def main():
         val_months=data_config.get("val_months", []),
         test_months=data_config.get("test_months", []),
     )
+    print(test_files_parq[:10])
 
     logger.info(f"Found {len(files)} files")
 
@@ -2758,8 +2807,11 @@ def main():
     logger.info(f"Train files: {len(train_files)}")
 
     # Load normalizer (same as training)
-    normalizer = WaveNormalizer.load_from_s3(
-        "medwav-dev-data", data_config["normalizer_path"]
+    # normalizer = WaveNormalizer.load_from_s3(
+    #     "medwav-dev-data", data_config["normalizer_path"]
+    # )
+    normalizer = WaveNormalizer.load_from_disk(
+        data_config["normalizer_path"]
     )
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
@@ -2846,74 +2898,110 @@ def main():
         )
         logger.info(f"Train loader created with {len(train_dataset)} samples")
 
-    checkpoint = config.config["checkpoint"]["resume_from_checkpoint"]
-    ckpt = torch.load(checkpoint, map_location="cpu")
-
-    logger.info(f"Loading model from {checkpoint}...")
-    model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
-    logger.info(f"Model loaded. predict_bias={predict_bias}")
-
-    if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
-        logger.info("Applying EMA weights for evaluation...")
-        ema_weights = [w.to(model.device) for w in ckpt["ema_weights"]]
-
-        # Copy into model
-        for ema_param, param in zip(ema_weights, model.parameters()):
-            param.data.copy_(ema_param.data)
+    # Get checkpoint path (file or directory)
+    # Priority: command line arg > config resume_from_checkpoint > config checkpoint_dir
+    if args.checkpoint:
+        checkpoint_path = args.checkpoint
+    elif config.config["checkpoint"]["resume_from_checkpoint"]:
+        checkpoint_path = config.config["checkpoint"]["resume_from_checkpoint"]
     else:
-        logger.info("No EMA weights found in checkpoint. Using standard weights.")
-
-    # Create geographic bounds dictionary if filtering is requested
-    geo_bounds = None
-    if args.apply_geographic_filtering:
-        if patch_size is not None:
-            logger.warning("=" * 80)
-            logger.warning(
-                "Geographic filtering is NOT supported with patch-based datasets!"
-            )
-            logger.warning("Patches don't maintain spatial coordinate information.")
-            logger.warning("Geographic filtering will be DISABLED.")
-            logger.warning(
-                "To use geographic filtering, set patch_size to null in config."
-            )
-            logger.warning("=" * 80)
-            geo_bounds = None
+        # Try to get checkpoint directory
+        checkpoint_dir = config.config["checkpoint"].get("checkpoint_dir")
+        if checkpoint_dir and Path(checkpoint_dir).exists():
+            checkpoint_path = checkpoint_dir
         else:
-            # Iberian Peninsula bounds
-            geo_bounds = {
-                "lat_min": 43.0,
-                "lat_max": 48.0,
-                "lon_min": -8.0,
-                "lon_max": 0.0,
-            }
-            logger.info(
-                f"Geographic filtering enabled: lat=[{geo_bounds['lat_min']}, {geo_bounds['lat_max']}], "
-                f"lon=[{geo_bounds['lon_min']}, {geo_bounds['lon_max']}]"
-            )
+            raise ValueError("No checkpoint specified. Use --checkpoint or set in config")
+    
+    checkpoint_path = Path(checkpoint_path)
+    
+    if checkpoint_path.is_dir():
+        # Find all .ckpt files in directory
+        checkpoint_list = sorted(list(checkpoint_path.glob("*.ckpt")))
+        if not checkpoint_list:
+            raise ValueError(f"No .ckpt files found in directory: {checkpoint_path}")
+        logger.info(f"Found {len(checkpoint_list)} checkpoints to evaluate")
+    elif checkpoint_path.is_file():
+        checkpoint_list = [checkpoint_path]
+    else:
+        raise ValueError(f"Checkpoint path does not exist: {checkpoint_path}")
+    
+    # Loop through all checkpoints and evaluate each one
+    for checkpoint in checkpoint_list:
+        logger.info("=" * 80)
+        logger.info(f"Evaluating checkpoint: {checkpoint}")
+        logger.info("=" * 80)
+        
+        ckpt = torch.load(checkpoint, map_location="cpu")
 
-    # Create evaluator and run evaluation
-    evaluator = ModelEvaluator(
-        model=model,
-        test_loader=test_loader,
-        output_dir=Path(args.output_dir)
-        / config.config["logging"]["experiment_name"]
-        / config.config["checkpoint"]["resume_from_checkpoint"]
-        .split("/")[-1]
-        .split(".")[0],
-        predict_bias=predict_bias,
-        device="cuda",
-        normalizer=normalizer,
-        normalize_target=data_config.get("normalize_target", False),
-        test_files=test_files_parq,
-        subsample_step=1,
-        apply_binwise_correction_flag=args.apply_binwise_correction,
-        bias_loader=train_loader,  # Use train set to compute bin biases
-        geo_bounds=geo_bounds,
-        use_mdn=model.use_mdn,
-        target_column=target_column,
-    )
+        logger.info(f"Loading model from {checkpoint}...")
+        model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
+        logger.info(f"Model loaded. predict_bias={predict_bias}")
 
-    evaluator.evaluate()
+        if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
+            logger.info("Applying EMA weights for evaluation...")
+            ema_weights = [w.to(model.device) for w in ckpt["ema_weights"]]
+
+            # Copy into model
+            for ema_param, param in zip(ema_weights, model.parameters()):
+                param.data.copy_(ema_param.data)
+        else:
+            logger.info("No EMA weights found in checkpoint. Using standard weights.")
+
+        # Create geographic bounds dictionary if filtering is requested
+        geo_bounds = None
+        if args.apply_geographic_filtering:
+            if patch_size is not None:
+                logger.warning("=" * 80)
+                logger.warning(
+                    "Geographic filtering is NOT supported with patch-based datasets!"
+                )
+                logger.warning("Patches don't maintain spatial coordinate information.")
+                logger.warning("Geographic filtering will be DISABLED.")
+                logger.warning(
+                    "To use geographic filtering, set patch_size to null in config."
+                )
+                logger.warning("=" * 80)
+                geo_bounds = None
+            else:
+                # Iberian Peninsula bounds
+                geo_bounds = {
+                    "lat_min": 43.0,
+                    "lat_max": 48.0,
+                    "lon_min": -8.0,
+                    "lon_max": 0.0,
+                }
+                logger.info(
+                    f"Geographic filtering enabled: lat=[{geo_bounds['lat_min']}, {geo_bounds['lat_max']}], "
+                    f"lon=[{geo_bounds['lon_min']}, {geo_bounds['lon_max']}]"
+                )
+
+        # Create evaluator and run evaluation
+        evaluator = ModelEvaluator(
+            model=model,
+            test_loader=test_loader,
+            output_dir=Path(args.output_dir)
+            / config.config["logging"]["experiment_name"]
+            / checkpoint.stem,  # Use checkpoint filename without extension
+            predict_bias=predict_bias,
+            device="cuda",
+            normalizer=normalizer,
+            normalize_target=data_config.get("normalize_target", False),
+            test_files=test_files_parq,
+            subsample_step=1,
+            apply_binwise_correction_flag=args.apply_binwise_correction,
+            bias_loader=train_loader,  # Use train set to compute bin biases
+            geo_bounds=geo_bounds,
+            use_mdn=model.use_mdn,
+            target_column=target_column,
+            apply_bilateral_filter=False,
+        )
+
+        evaluator.evaluate()
+        
+        logger.info(f"Completed evaluation for {checkpoint.name}")
+        logger.info("=" * 80)
+    
+    logger.info(f"\nAll evaluations complete! Evaluated {len(checkpoint_list)} checkpoint(s)")
 
 
 if __name__ == "__main__":

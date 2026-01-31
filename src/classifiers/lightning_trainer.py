@@ -28,6 +28,7 @@ from src.commons.loss_functions.ssim import SSIMLoss
 from src.commons.losses import (
     adversarial_loss_D,
     adversarial_loss_G,
+    masked_huber_loss,
     masked_mse_loss,
     masked_mse_mdn_loss,
     masked_mse_perceptual_loss,
@@ -153,6 +154,8 @@ class WaveBiasCorrector(pl.LightningModule):
             return mdn_nll_loss(pi, mu, sigma, y_true, mask, eps=1e-9)
         elif self.loss_type == "mse_gan":
             return masked_mse_loss(y_pred, y_true, mask)
+        elif self.loss_type == "huber":
+            return masked_huber_loss(y_pred, y_true, mask)
         else:
             return masked_multi_bin_weighted_mse(y_pred, y_true, mask, vhm0_for_reconstruction)
 

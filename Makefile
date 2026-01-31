@@ -50,6 +50,14 @@ train-per-point: ## Run incremental training
 train-bunet: ## Run incremental training
 	poetry run python src/pipelines/training/dnn_trainer.py --config src/configs/config_dnn.yaml
 
+train-bunet-nohup: ## Run BUNet training with nohup in background
+	nohup poetry run python src/pipelines/training/dnn_trainer.py --config src/configs/config_dnn.yaml > nohup_train.out 2>&1 &
+	@echo "Training started in background. Check progress with: tail -f nohup_train.out"
+	@echo "Or monitor with: make watch-training"
+
+watch-training-nohup: ## Watch the nohup training output
+	tail -f nohup_train.out
+
 run-train-evaluator: ## Run training evaluator
 	poetry run python -m src.pipelines.training.train_evaluator
 
