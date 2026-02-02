@@ -188,7 +188,10 @@ class DNNConfig:
 def get_file_list(
     data_path: str, file_pattern: str, max_files: Optional[int] = None
 ) -> list:
-    """Get list of files from S3 or local path"""
+    """Get list of files from S3 or local path.
+
+    Returns files in sorted order for reproducibility.
+    """
     if data_path.startswith("s3://"):
         fs = s3fs.S3FileSystem()
         # Search in both the directory itself and subdirectories
@@ -199,13 +202,15 @@ def get_file_list(
         # Also add files from subdirectories
         pattern_recursive = f"{data_path_clean}/**/{file_pattern}"
         files_recursive = fs.glob(pattern_recursive)
-        # Combine and deduplicate
-        files = list(set(files + files_recursive))
+        # Combine and deduplicate, then sort for reproducibility
+        files = sorted(list(set(files + files_recursive)))
         # Ensure s3:// prefix
         files = [f if f.startswith("s3://") else f"s3://{f}" for f in files]
     else:
         files = list(Path(data_path).glob(f"**/{file_pattern}"))
         files = [str(f) for f in files]
+        # Sort for reproducibility
+        files = sorted(files)
 
     if max_files:
         files = files[:max_files]
@@ -559,11 +564,26 @@ def main():
     parser.add_argument("--batch_size", type=int, help="Override batch size")
     parser.add_argument("--max_epochs", type=int, help="Override max epochs")
     parser.add_argument("--learning_rate", type=float, help="Override learning rate")
+    parser.add_argument("--deterministic", action="store_true", help="Enable deterministic mode (slower but fully reproducible)")
 
     args = parser.parse_args()
 
     # Load configuration
     config = DNNConfig(args.config)
+
+    # Set random seed for reproducibility
+    random_seed = config.config["data"].get("random_seed", 42)
+    lightning.seed_everything(random_seed, workers=True)
+    logger.info(f"Set random seed to {random_seed} for reproducible training")
+
+    # Enable deterministic mode if requested (slower but fully reproducible)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        logger.info("Deterministic mode enabled (training will be slower but fully reproducible)")
+    else:
+        logger.info("Using non-deterministic optimizations for faster training")
 
     # Override with command line arguments
     if args.data_path:

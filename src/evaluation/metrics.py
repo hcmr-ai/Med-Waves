@@ -375,3 +375,24 @@ def compute_sea_bin_metrics_from_accumulators(
             }
 
     return sea_bin_metrics
+
+
+def compute_snr(features: np.ndarray) -> np.ndarray:
+    """Compute Signal-to-Noise Ratio (SNR) from features.
+
+    Computes SNR as: SNR = 10 * log10(mean^2 / variance) across feature channels.
+
+    Args:
+        features: Numpy array of shape (N, C) where N=samples, C=feature channels
+
+    Returns:
+        Numpy array of shape (N,) containing SNR values in dB
+    """
+    # SNR = 10 * log10(mean^2 / variance) across feature channels
+    mean_val = features.mean(axis=1)  # Mean across feature channels
+    var_val = features.var(axis=1) + 1e-8  # Variance across channels (add epsilon to avoid division by zero)
+
+    # Compute SNR in dB
+    snr = 10 * np.log10(np.abs(mean_val)**2 / var_val)
+
+    return snr
