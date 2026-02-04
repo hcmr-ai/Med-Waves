@@ -5,6 +5,7 @@ Provides detailed metrics, visualizations, and sea-bin analysis.
 """
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ import logging
 from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.classifiers.networks.mdn import mdn_expected_value
 from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
+from src.commons.helpers import SeasonHelper
 from src.commons.postprocessing.post_processing import (
     apply_bilateral_filter,
     apply_bin_corrections,
@@ -59,6 +61,7 @@ from src.evaluation.evaluation_plots import (
 from src.evaluation.metrics import (
     compute_overall_metrics_from_accumulators,
     compute_sea_bin_metrics_from_accumulators,
+    compute_snr,
 )
 from src.evaluation.visuals import load_coordinates_from_parquet
 from src.pipelines.training.dnn_trainer import (
@@ -135,6 +138,9 @@ class ModelEvaluator:
             "y_uncorrected": [],
         }
 
+        # Timestamp cache for seasonal analysis
+        self._timestamps_cache = {}
+
     def _reset_accumulators(self):
         """Reset all metric accumulators."""
         # Overall metrics - using Welford's algorithm for stable variance
@@ -179,6 +185,49 @@ class ModelEvaluator:
         }
 
         self.spatial_rmse_accumulators = {}
+
+        # Category breakdown accumulators: corrected vs not_corrected
+        self.category_breakdown = {}
+        for bin_config in self.sea_bins:
+            bin_name = bin_config["name"]
+            self.category_breakdown[bin_name] = {
+                'corrected': {
+                    'count': 0,
+                    'feature_sums': {},  # Dict: {feature_idx: sum}
+                    'feature_sq_sums': {},  # For std computation
+                    'snr_sum': 0.0,
+                    'confidence_sum': 0.0,
+                    'seasons': {'winter': 0, 'spring': 0, 'summer': 0, 'autumn': 0}
+                },
+                'not_corrected': {
+                    'count': 0,
+                    'feature_sums': {},
+                    'feature_sq_sums': {},
+                    'snr_sum': 0.0,
+                    'confidence_sum': 0.0,
+                    'seasons': {'winter': 0, 'spring': 0, 'summer': 0, 'autumn': 0}
+                }
+            }
+
+        # Overall breakdown (across all bins)
+        self.overall_breakdown = {
+            'corrected': {
+                'count': 0,
+                'feature_sums': {},
+                'feature_sq_sums': {},
+                'snr_sum': 0.0,
+                'confidence_sum': 0.0,
+                'seasons': {'winter': 0, 'spring': 0, 'summer': 0, 'autumn': 0}
+            },
+            'not_corrected': {
+                'count': 0,
+                'feature_sums': {},
+                'feature_sq_sums': {},
+                'snr_sum': 0.0,
+                'confidence_sum': 0.0,
+                'seasons': {'winter': 0, 'spring': 0, 'summer': 0, 'autumn': 0}
+            }
+        }
 
     def _configure_labels(self):
         """Configure dynamic labels based on target_column."""
@@ -381,8 +430,18 @@ class ModelEvaluator:
         """Reconstruct full wave heights from bias: corrected = vhm0 + bias"""
         return bias + vhm0
 
-    def _process_batch(self, y, mask, vhm0, y_pred):
-        """Process a single batch and update accumulators."""
+    def _process_batch(self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None):
+        """Process a single batch and update accumulators.
+
+        Args:
+            X: Input features (B, C, H, W)
+            y: Ground truth targets (B, 1, H, W)
+            mask: Valid pixel mask (B, 1, H, W)
+            vhm0: Uncorrected wave heights (B, 1, H, W)
+            y_pred: Model predictions (B, 1, H, W)
+            timestamps: Batch timestamps for season extraction (optional)
+            confidence: Model confidence values (B, H, W) (optional)
+        """
         # Apply geographic mask if available
         if self.geo_mask is not None:
             # Crop geo_mask to match current batch size if needed
@@ -571,11 +630,154 @@ class ModelEvaluator:
                             baseline_bin_errors.tolist()
                         )
 
+                        # NEW: Track category breakdown (corrected vs not_corrected)
+                        # Categorize samples: corrected = model improved or maintained quality
+                        corrected_mask = model_better
+                        not_corrected_mask = model_worse
+
+                        # Extract input features for this bin (if X is provided)
+                        if X is not None:
+                            try:
+                                # X shape: (B, C, H, W)
+                                X_np = X.cpu().numpy()
+                                # Flatten spatial dimensions
+                                X_flat = X_np.reshape(X_np.shape[0], X_np.shape[1], -1)  # (B, C, H*W)
+                                X_flat = X_flat.transpose(0, 2, 1)  # (B, H*W, C)
+                                X_flat = X_flat.reshape(-1, X_np.shape[1])  # (B*H*W, C)
+                                # Apply mask to get valid pixels only
+                                X_masked = X_flat[mask_flat.cpu().numpy()]  # (N_valid, C)
+                                # Get features for this specific bin
+                                bin_X = X_masked[bin_mask]  # (N_bin, C)
+
+                                # Prepare confidence for this bin
+                                bin_confidence = None
+                                if confidence is not None:
+                                    confidence_flat = confidence.flatten()[mask_flat]
+                                    bin_confidence = confidence_flat.cpu().numpy()[bin_mask]
+
+                                # Prepare timestamps for this bin
+                                bin_timestamps = None
+                                if timestamps is not None:
+                                    # timestamps should already be aligned with valid samples
+                                    if len(timestamps) == len(mask_flat):
+                                        bin_timestamps = timestamps[bin_mask]
+
+                                # Update corrected category
+                                if corrected_mask.sum() > 0:
+                                    self._update_category_stats(
+                                        bin_name=bin_name,
+                                        category='corrected',
+                                        features=bin_X[corrected_mask],
+                                        timestamps=bin_timestamps[corrected_mask] if bin_timestamps is not None else None,
+                                        confidence=bin_confidence[corrected_mask] if bin_confidence is not None else None
+                                    )
+
+                                # Update not_corrected category
+                                if not_corrected_mask.sum() > 0:
+                                    self._update_category_stats(
+                                        bin_name=bin_name,
+                                        category='not_corrected',
+                                        features=bin_X[not_corrected_mask],
+                                        timestamps=bin_timestamps[not_corrected_mask] if bin_timestamps is not None else None,
+                                        confidence=bin_confidence[not_corrected_mask] if bin_confidence is not None else None
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed to update category stats for bin {bin_name}: {e}")
+
             # Store samples for plotting (limited)
             self.plot_samples["y_true"].extend(y_true_np)
             self.plot_samples["y_pred"].extend(y_pred_np)
             if y_uncorrected is not None:
                 self.plot_samples["y_uncorrected"].extend(y_uncorrected_np)
+
+    def _update_category_stats(self, bin_name, category, features, timestamps, confidence):
+        """Update statistics for a category (corrected/not_corrected).
+
+        Args:
+            bin_name: Name of the sea bin
+            category: 'corrected' or 'not_corrected'
+            features: numpy array of shape (N, C) where N=samples, C=channels
+            timestamps: numpy array of timestamps (optional)
+            confidence: numpy array of confidence values (optional)
+        """
+        if len(features) == 0:
+            return
+
+        n = len(features)
+        stats = self.category_breakdown[bin_name][category]
+        overall_stats = self.overall_breakdown[category]
+
+        # Update feature statistics (both bin-specific and overall)
+        for i in range(features.shape[1]):  # For each feature channel
+            feature_vals = features[:, i]
+
+            # Bin-specific
+            if i not in stats['feature_sums']:
+                stats['feature_sums'][i] = 0.0
+                stats['feature_sq_sums'][i] = 0.0
+            stats['feature_sums'][i] += np.sum(feature_vals)
+            stats['feature_sq_sums'][i] += np.sum(feature_vals**2)
+
+            # Overall
+            if i not in overall_stats['feature_sums']:
+                overall_stats['feature_sums'][i] = 0.0
+                overall_stats['feature_sq_sums'][i] = 0.0
+            overall_stats['feature_sums'][i] += np.sum(feature_vals)
+            overall_stats['feature_sq_sums'][i] += np.sum(feature_vals**2)
+
+        # Compute and accumulate SNR
+        try:
+            snr_values = compute_snr(features)
+            # Filter out invalid SNR values (inf, nan)
+            valid_snr = snr_values[np.isfinite(snr_values)]
+            if len(valid_snr) > 0:
+                stats['snr_sum'] += np.sum(valid_snr)
+                overall_stats['snr_sum'] += np.sum(valid_snr)
+        except Exception as e:
+            logger.debug(f"Failed to compute SNR for {bin_name}/{category}: {e}")
+
+        # Update seasons
+        if timestamps is not None and len(timestamps) > 0:
+            try:
+                seasons = SeasonHelper.get_seasons_from_timestamps(timestamps)
+                for season in seasons:
+                    if season in stats['seasons']:
+                        stats['seasons'][season] += 1
+                        overall_stats['seasons'][season] += 1
+            except Exception as e:
+                logger.debug(f"Failed to extract seasons for {bin_name}/{category}: {e}")
+
+        # Update confidence
+        if confidence is not None and len(confidence) > 0:
+            stats['confidence_sum'] += np.sum(confidence)
+            overall_stats['confidence_sum'] += np.sum(confidence)
+
+        # Update counts
+        stats['count'] += n
+        overall_stats['count'] += n
+
+    def _get_timestamps_for_file(self, file_path):
+        """Get timestamps from a parquet file with caching.
+
+        Args:
+            file_path: Path to parquet file
+
+        Returns:
+            Numpy array of timestamps or None if not available
+        """
+        if file_path not in self._timestamps_cache:
+            try:
+                _, _, timestamps = load_coordinates_from_parquet(
+                    file_path,
+                    subsample_step=self.subsample_step,
+                    return_timestamps=True
+                )
+                self._timestamps_cache[file_path] = timestamps
+                logger.info(f"Loaded {len(timestamps) if timestamps is not None else 0} timestamps from {file_path}")
+            except Exception as e:
+                logger.debug(f"Failed to load timestamps from {file_path}: {e}")
+                self._timestamps_cache[file_path] = None
+        return self._timestamps_cache[file_path]
 
     def run_inference(self):
         """Run model inference and compute metrics incrementally."""
@@ -602,7 +804,7 @@ class ModelEvaluator:
             self._compute_global_bin_biases()
 
         with torch.no_grad():
-            for _, batch in enumerate(
+            for batch_idx, batch in enumerate(
                 tqdm(self.test_loader, desc="Processing batches")
             ):
                 # Handle batch format based on predict_bias
@@ -626,14 +828,64 @@ class ModelEvaluator:
                 if vhm0 is not None:
                     vhm0, _ = pad_to_multiple(vhm0, multiple=16)
 
+                # Load timestamps from test files for seasonal analysis
+                timestamps = None
+                if self.test_files and len(self.test_files) > 0:
+                    try:
+                        # Get file index for this batch (cycle through files)
+                        file_idx = batch_idx % len(self.test_files)
+                        file_path = self.test_files[file_idx]
+
+                        # Ensure s3:// prefix for S3 files
+                        if not file_path.startswith("s3://") and not file_path.startswith("/"):
+                            file_path = f"s3://{file_path}"
+
+                        # Get timestamps for this file
+                        timestamps_raw = self._get_timestamps_for_file(file_path)
+
+                        if timestamps_raw is not None:
+                            # Match timestamps to valid pixels in this batch
+                            n_valid = mask.sum().item()
+
+                            if timestamps_raw.ndim == 1:
+                                # Single timestamp or 1D array
+                                if len(timestamps_raw) == 1:
+                                    # Single timestamp per file - replicate for all valid pixels
+                                    timestamps = np.full(n_valid, timestamps_raw[0], dtype='datetime64[ns]')
+                                else:
+                                    # Multiple timestamps - assume they correspond to flattened grid
+                                    # Apply mask to get only valid pixels
+                                    mask_np = mask.cpu().numpy().flatten()
+                                    if len(timestamps_raw) == len(mask_np):
+                                        timestamps = timestamps_raw[mask_np]
+                                    else:
+                                        # Fallback: use first timestamp
+                                        timestamps = np.full(n_valid, timestamps_raw[0], dtype='datetime64[ns]')
+                            elif timestamps_raw.ndim == 2:
+                                # 2D timestamps (H, W) - flatten and mask
+                                timestamps_flat = timestamps_raw.flatten()
+                                mask_np = mask.cpu().numpy().flatten()
+                                timestamps = timestamps_flat[mask_np]
+                    except Exception as e:
+                        logger.debug(f"Could not load timestamps for batch {batch_idx}: {e}")
+                        timestamps = None
+
                 X = X.to(self.device)
                 y = y.to(self.device)
                 mask = mask.to(self.device)
 
-                # Get predictions
+                # Get predictions and compute confidence
+                confidence = None
                 if self.use_mdn:
                     pi, mu, sigma = self.model(X)
                     y_pred = mdn_expected_value(pi, mu)
+
+                    # Compute confidence from MDN uncertainty
+                    # Lower sigma = higher confidence
+                    # sigma shape: (B, num_components, 1, H, W)
+                    # Average across mixture components, then take inverse as confidence
+                    sigma_mean = sigma.mean(dim=1).squeeze(1)  # (B, H, W)
+                    confidence = 1.0 / (sigma_mean + 1e-8)  # Higher value = more confident
                 else:
                     y_pred = self.model(X)
 
@@ -641,11 +893,18 @@ class ModelEvaluator:
                 min_h = min(y_pred.shape[2], y.shape[2])
                 min_w = min(y_pred.shape[3], y.shape[3])
                 min_h, min_w = orig_size
+
+                # Crop to original size
                 y_pred = y_pred[:, :, :min_h, :min_w]
                 y = y[:, :, :min_h, :min_w]
                 mask = mask[:, :, :min_h, :min_w]
+                X_cropped = X[:, :, :min_h, :min_w]  # Crop X to match
+
                 if vhm0 is not None:
                     vhm0 = vhm0[:, :, :min_h, :min_w]
+
+                if confidence is not None:
+                    confidence = confidence[:, :min_h, :min_w]
 
                 # Unnormalize if needed
                 if self.normalize_target and self.normalizer is not None:
@@ -660,9 +919,19 @@ class ModelEvaluator:
                     y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
 
                 # Process batch and update accumulators
-                self._process_batch(y, mask, vhm0, y_pred)
+                self._process_batch(X_cropped, y, mask, vhm0, y_pred, timestamps, confidence)
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
+
+        # Report timestamp availability for seasonal analysis
+        if self._timestamps_cache:
+            loaded_files = [k for k, v in self._timestamps_cache.items() if v is not None]
+            if loaded_files:
+                logger.info(f"Timestamps loaded from {len(loaded_files)} file(s) - seasonal analysis enabled")
+            else:
+                logger.info("No timestamps found in data files - seasonal analysis disabled")
+        else:
+            logger.info("No timestamp loading attempted - seasonal analysis disabled")
 
     def _compute_global_bin_biases(self):
         """Compute global bin-wise correction biases from training/validation set."""
@@ -735,6 +1004,389 @@ class ModelEvaluator:
             sea_bins=self.sea_bins,
             sea_bin_accumulators=self.sea_bin_accumulators,
         )
+
+    def compute_category_breakdown(self) -> dict:
+        """Compute breakdown metrics for corrected vs not_corrected categories.
+
+        Returns:
+            Dictionary containing breakdown statistics for each bin and overall
+        """
+        results = {'bins': {}, 'overall': {}}
+
+        # Process each bin
+        for bin_name, bin_data in self.category_breakdown.items():
+            results['bins'][bin_name] = {}
+            total_count = bin_data['corrected']['count'] + bin_data['not_corrected']['count']
+
+            for category in ['corrected', 'not_corrected']:
+                stats = bin_data[category]
+                count = stats['count']
+
+                if count > 0:
+                    # Compute feature means and stds
+                    feature_stats = {}
+                    for i in sorted(stats['feature_sums'].keys()):
+                        mean = stats['feature_sums'][i] / count
+                        variance = (stats['feature_sq_sums'][i] / count) - (mean ** 2)
+                        std = np.sqrt(max(0, variance))
+                        feature_stats[f'feature_{i}'] = {
+                            'mean': float(mean),
+                            'std': float(std)
+                        }
+
+                    # Compute mean SNR
+                    mean_snr = stats['snr_sum'] / count if stats['snr_sum'] != 0 else None
+
+                    # Compute season percentages
+                    total_seasons = sum(stats['seasons'].values())
+                    season_pcts = {
+                        season: (cnt / total_seasons * 100) if total_seasons > 0 else 0
+                        for season, cnt in stats['seasons'].items()
+                    }
+
+                    # Compute mean confidence
+                    mean_confidence = stats['confidence_sum'] / count if stats['confidence_sum'] != 0 else None
+
+                    results['bins'][bin_name][category] = {
+                        'count': int(count),
+                        'percentage': float(count / total_count * 100) if total_count > 0 else 0,
+                        'features': feature_stats,
+                        'snr_mean': float(mean_snr) if mean_snr is not None else None,
+                        'seasons': season_pcts,
+                        'confidence_mean': float(mean_confidence) if mean_confidence is not None else None
+                    }
+                else:
+                    results['bins'][bin_name][category] = None
+
+        # Process overall
+        total_overall = self.overall_breakdown['corrected']['count'] + self.overall_breakdown['not_corrected']['count']
+        for category in ['corrected', 'not_corrected']:
+            stats = self.overall_breakdown[category]
+            count = stats['count']
+
+            if count > 0:
+                feature_stats = {}
+                for i in sorted(stats['feature_sums'].keys()):
+                    mean = stats['feature_sums'][i] / count
+                    variance = (stats['feature_sq_sums'][i] / count) - (mean ** 2)
+                    std = np.sqrt(max(0, variance))
+                    feature_stats[f'feature_{i}'] = {
+                        'mean': float(mean),
+                        'std': float(std)
+                    }
+
+                mean_snr = stats['snr_sum'] / count if stats['snr_sum'] != 0 else None
+                total_seasons = sum(stats['seasons'].values())
+                season_pcts = {
+                    season: (cnt / total_seasons * 100) if total_seasons > 0 else 0
+                    for season, cnt in stats['seasons'].items()
+                }
+                mean_confidence = stats['confidence_sum'] / count if stats['confidence_sum'] != 0 else None
+
+                results['overall'][category] = {
+                    'count': int(count),
+                    'percentage': float(count / total_overall * 100) if total_overall > 0 else 0,
+                    'features': feature_stats,
+                    'snr_mean': float(mean_snr) if mean_snr is not None else None,
+                    'seasons': season_pcts,
+                    'confidence_mean': float(mean_confidence) if mean_confidence is not None else None
+                }
+
+        return results
+
+    def save_category_breakdown_csv(self, breakdown: dict, output_path: Path):
+        """Save category breakdown table to CSV files.
+
+        Args:
+            breakdown: The breakdown dictionary from compute_category_breakdown
+            output_path: Base path for CSV files (will create multiple files)
+        """
+        # Save overall breakdown
+        overall_csv = output_path / "category_breakdown_overall.csv"
+        with open(overall_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            # Header
+            writer.writerow(['Category', 'Count', 'Percentage', 'SNR Mean', 'Confidence Mean',
+                           'Winter %', 'Spring %', 'Summer %', 'Autumn %', 'Features'])
+
+            for category in ['corrected', 'not_corrected']:
+                if category in breakdown['overall'] and breakdown['overall'][category]:
+                    data = breakdown['overall'][category]
+
+                    # Format features as string
+                    features_str = '; '.join([
+                        f"{k}: {v['mean']:.4f}±{v['std']:.4f}"
+                        for k, v in data['features'].items()
+                    ])
+
+                    writer.writerow([
+                        category.replace('_', ' ').title(),
+                        data['count'],
+                        f"{data['percentage']:.2f}",
+                        f"{data['snr_mean']:.4f}" if data['snr_mean'] is not None else 'N/A',
+                        f"{data['confidence_mean']:.4f}" if data['confidence_mean'] is not None else 'N/A',
+                        f"{data['seasons']['winter']:.2f}",
+                        f"{data['seasons']['spring']:.2f}",
+                        f"{data['seasons']['summer']:.2f}",
+                        f"{data['seasons']['autumn']:.2f}",
+                        features_str
+                    ])
+
+        logger.info(f"Saved overall category breakdown to {overall_csv}")
+
+        # Save per-bin breakdown
+        bins_csv = output_path / "category_breakdown_per_bin.csv"
+        with open(bins_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+
+            # Header
+            writer.writerow(['Bin', 'Category', 'Count', 'Percentage', 'SNR Mean', 'Confidence Mean',
+                           'Winter %', 'Spring %', 'Summer %', 'Autumn %', 'Features'])
+
+            for bin_name, bin_data in breakdown['bins'].items():
+                # Get bin label for readability
+                bin_label = next((b['label'] for b in self.sea_bins if b['name'] == bin_name), bin_name)
+
+                for category in ['corrected', 'not_corrected']:
+                    if category in bin_data and bin_data[category]:
+                        data = bin_data[category]
+
+                        # Format features as string
+                        features_str = '; '.join([
+                            f"{k}: {v['mean']:.4f}±{v['std']:.4f}"
+                            for k, v in data['features'].items()
+                        ])
+
+                        writer.writerow([
+                            bin_label,
+                            category.replace('_', ' ').title(),
+                            data['count'],
+                            f"{data['percentage']:.2f}",
+                            f"{data['snr_mean']:.4f}" if data['snr_mean'] is not None else 'N/A',
+                            f"{data['confidence_mean']:.4f}" if data['confidence_mean'] is not None else 'N/A',
+                            f"{data['seasons']['winter']:.2f}",
+                            f"{data['seasons']['spring']:.2f}",
+                            f"{data['seasons']['summer']:.2f}",
+                            f"{data['seasons']['autumn']:.2f}",
+                            features_str
+                        ])
+
+        logger.info(f"Saved per-bin category breakdown to {bins_csv}")
+
+    def save_category_breakdown_wide_format(self, breakdown: dict, output_path: Path):
+        """Save category breakdown in wide pivot table format (bins as columns, metrics as rows).
+
+        Args:
+            breakdown: The breakdown dictionary from compute_category_breakdown
+            output_path: Base path for CSV files
+        """
+        import pandas as pd
+
+        # Prepare data structure for wide format
+
+        # Get all bin names in order
+        bin_names = [bin_config['name'] for bin_config in self.sea_bins]
+        bin_labels = {bin_config['name']: bin_config['label'] for bin_config in self.sea_bins}
+
+        # Filter to only bins with data
+        bins_with_data = [bn for bn in bin_names if bn in breakdown['bins'] and
+                          (breakdown['bins'][bn].get('corrected') or breakdown['bins'][bn].get('not_corrected'))]
+
+        # Collect all feature indices that exist
+        all_feature_indices = set()
+        for bin_name in bins_with_data:
+            bin_data = breakdown['bins'][bin_name]
+            for category in ['corrected', 'not_corrected']:
+                if bin_data.get(category) and bin_data[category].get('features'):
+                    all_feature_indices.update([int(f.split('_')[1]) for f in bin_data[category]['features'].keys()])
+
+        # Build rows for each metric
+        metric_rows = []
+
+        # Count row
+        count_row = {'Metric': 'Count'}
+        count_pct_row = {'Metric': 'Percentage'}
+        for bin_name in bins_with_data:
+            bin_label = bin_labels[bin_name]
+            bin_data = breakdown['bins'][bin_name]
+
+            for category in ['Corrected', 'Not corrected']:
+                cat_key = category.lower().replace(' ', '_')
+                col_name = f"{bin_label}_{category}"
+
+                if bin_data.get(cat_key):
+                    count_row[col_name] = bin_data[cat_key]['count']
+                    count_pct_row[col_name] = f"{bin_data[cat_key]['percentage']:.1f}%"
+                else:
+                    count_row[col_name] = 0
+                    count_pct_row[col_name] = '0.0%'
+
+        metric_rows.append(count_row)
+        metric_rows.append(count_pct_row)
+
+        # Feature rows (mean only for simplicity in wide format)
+        for feat_idx in sorted(all_feature_indices):
+            feat_row = {'Metric': f'Mean feature {feat_idx}'}
+            for bin_name in bins_with_data:
+                bin_label = bin_labels[bin_name]
+                bin_data = breakdown['bins'][bin_name]
+
+                for category in ['Corrected', 'Not corrected']:
+                    cat_key = category.lower().replace(' ', '_')
+                    col_name = f"{bin_label}_{category}"
+
+                    if bin_data.get(cat_key) and bin_data[cat_key].get('features'):
+                        feat_key = f'feature_{feat_idx}'
+                        if feat_key in bin_data[cat_key]['features']:
+                            feat_row[col_name] = f"{bin_data[cat_key]['features'][feat_key]['mean']:.4f}"
+                        else:
+                            feat_row[col_name] = 'N/A'
+                    else:
+                        feat_row[col_name] = 'N/A'
+
+            metric_rows.append(feat_row)
+
+        # SNR row
+        snr_row = {'Metric': 'SNR (mean dB)'}
+        for bin_name in bins_with_data:
+            bin_label = bin_labels[bin_name]
+            bin_data = breakdown['bins'][bin_name]
+
+            for category in ['Corrected', 'Not corrected']:
+                cat_key = category.lower().replace(' ', '_')
+                col_name = f"{bin_label}_{category}"
+
+                if bin_data.get(cat_key) and bin_data[cat_key].get('snr_mean') is not None:
+                    snr_row[col_name] = f"{bin_data[cat_key]['snr_mean']:.4f}"
+                else:
+                    snr_row[col_name] = 'N/A'
+
+        metric_rows.append(snr_row)
+
+        # Season rows
+        for season in ['Summer', 'Autumn', 'Winter', 'Spring']:
+            season_row = {'Metric': season}
+            season_key = season.lower()
+
+            for bin_name in bins_with_data:
+                bin_label = bin_labels[bin_name]
+                bin_data = breakdown['bins'][bin_name]
+
+                for category in ['Corrected', 'Not corrected']:
+                    cat_key = category.lower().replace(' ', '_')
+                    col_name = f"{bin_label}_{category}"
+
+                    if bin_data.get(cat_key) and bin_data[cat_key].get('seasons'):
+                        season_row[col_name] = f"{bin_data[cat_key]['seasons'][season_key]:.1f}%"
+                    else:
+                        season_row[col_name] = 'N/A'
+
+            metric_rows.append(season_row)
+
+        # Model confidence row
+        conf_row = {'Metric': 'Model confidence'}
+        for bin_name in bins_with_data:
+            bin_label = bin_labels[bin_name]
+            bin_data = breakdown['bins'][bin_name]
+
+            for category in ['Corrected', 'Not corrected']:
+                cat_key = category.lower().replace(' ', '_')
+                col_name = f"{bin_label}_{category}"
+
+                if bin_data.get(cat_key) and bin_data[cat_key].get('confidence_mean') is not None:
+                    conf_row[col_name] = f"{bin_data[cat_key]['confidence_mean']:.4f}"
+                else:
+                    conf_row[col_name] = 'N/A'
+
+        metric_rows.append(conf_row)
+
+        # Create DataFrame
+        df = pd.DataFrame(metric_rows)
+
+        # Reorder columns: Metric first, then bins in order
+        columns = ['Metric']
+        for bin_name in bins_with_data:
+            bin_label = bin_labels[bin_name]
+            columns.append(f"{bin_label}_Corrected")
+            columns.append(f"{bin_label}_Not corrected")
+
+        df = df[columns]
+
+        # Save to CSV
+        wide_csv = output_path / "category_breakdown_wide_format.csv"
+        df.to_csv(wide_csv, index=False)
+        logger.info(f"Saved wide-format category breakdown to {wide_csv}")
+
+    def print_category_breakdown(self, breakdown: dict):
+        """Print the category breakdown table to console.
+
+        Args:
+            breakdown: The breakdown dictionary from compute_category_breakdown
+        """
+        print("\n" + "=" * 140)
+        print("ERROR ANALYSIS - CORRECTED vs NOT CORRECTED BREAKDOWN")
+        print("=" * 140)
+
+        # Print overall first
+        print("\nOVERALL (All Bins Combined):")
+        print("-" * 140)
+        for category in ['corrected', 'not_corrected']:
+            if category in breakdown['overall'] and breakdown['overall'][category]:
+                data = breakdown['overall'][category]
+                print(f"\n  {category.upper().replace('_', ' ')}:")
+                print(f"    Count: {data['count']:,} ({data['percentage']:.1f}%)")
+
+                if data['features']:
+                    print("    Features (mean ± std):")
+                    for feat_name, feat_data in sorted(data['features'].items()):
+                        print(f"      {feat_name}: {feat_data['mean']:.4f} ± {feat_data['std']:.4f}")
+
+                if data['snr_mean'] is not None:
+                    print(f"    SNR (mean): {data['snr_mean']:.4f} dB")
+
+                print("    Seasons:")
+                for season in ['winter', 'spring', 'summer', 'autumn']:
+                    pct = data['seasons'][season]
+                    print(f"      {season.capitalize()}: {pct:.1f}%")
+
+                if data['confidence_mean'] is not None:
+                    print(f"    Model Confidence (mean): {data['confidence_mean']:.4f}")
+
+        # Print per-bin breakdown
+        print("\n\nPER-BIN BREAKDOWN:")
+        print("=" * 140)
+
+        for bin_name, bin_data in breakdown['bins'].items():
+            # Get readable bin label
+            bin_label = next((b['label'] for b in self.sea_bins if b['name'] == bin_name), bin_name)
+
+            print(f"\n{bin_label}:")
+            print("-" * 140)
+
+            for category in ['corrected', 'not_corrected']:
+                if category in bin_data and bin_data[category]:
+                    data = bin_data[category]
+                    print(f"\n  {category.upper().replace('_', ' ')}:")
+                    print(f"    Count: {data['count']:,} ({data['percentage']:.1f}%)")
+
+                    if data['features']:
+                        print("    Features (mean ± std):")
+                        for feat_name, feat_data in sorted(data['features'].items()):
+                            print(f"      {feat_name}: {feat_data['mean']:.4f} ± {feat_data['std']:.4f}")
+
+                    if data['snr_mean'] is not None:
+                        print(f"    SNR (mean): {data['snr_mean']:.4f} dB")
+
+                    print("    Seasons:")
+                    for season in ['winter', 'spring', 'summer', 'autumn']:
+                        pct = data['seasons'][season]
+                        print(f"      {season.capitalize()}: {pct:.1f}%")
+
+                    if data['confidence_mean'] is not None:
+                        print(f"    Model Confidence (mean): {data['confidence_mean']:.4f}")
+
+        print("=" * 140 + "\n")
 
     def plot_rmse_maps(self):
         """Plot spatial RMSE maps for model and baseline."""
@@ -899,17 +1551,26 @@ class ModelEvaluator:
         overall_metrics = self.compute_overall_metrics()
         sea_bin_metrics = self.compute_sea_bin_metrics()
 
+        # NEW: Compute category breakdown
+        print("Computing category breakdown (corrected vs not_corrected)...")
+        category_breakdown = self.compute_category_breakdown()
+
         # Save metrics
         with open(self.output_dir / "metrics.json", "w") as f:
             json.dump(
                 {
                     "overall": overall_metrics,
                     "sea_bins": sea_bin_metrics,
-                    # "spatial": spatial_metrics
+                    "category_breakdown": category_breakdown,  # NEW: Add breakdown
                 },
                 f,
                 indent=2,
             )
+
+        # NEW: Save category breakdown to CSV
+        print("Saving category breakdown to CSV...")
+        self.save_category_breakdown_csv(category_breakdown, self.output_dir)
+        self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
 
         # Create plots using samples
         print("Creating plots...")
@@ -922,8 +1583,11 @@ class ModelEvaluator:
         # self.plot_error_violins()
         # self.plot_error_cdfs()
 
-        # Print summary
+        # Print summaries
         self.print_summary(overall_metrics, sea_bin_metrics)
+
+        # NEW: Print category breakdown
+        self.print_category_breakdown(category_breakdown)
 
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
 
@@ -1045,14 +1709,13 @@ def main():
             normalize_target=data_config.get("normalize_target", False),
         )
     # Create test loader (use training batch size)
+    # Note: num_workers=0 for reproducible evaluation
     test_loader = DataLoader(
         test_dataset,
         batch_size=training_config["batch_size"],
         shuffle=False,
-        num_workers=training_config["num_workers"],
+        num_workers=0,  # Single-threaded for deterministic batch order
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config["num_workers"] > 0,
-        prefetch_factor=training_config["prefetch_factor"],
     )
 
     # Create train loader for binwise correction (if needed)
@@ -1087,10 +1750,8 @@ def main():
             train_dataset,
             batch_size=training_config["batch_size"],
             shuffle=False,
-            num_workers=training_config["num_workers"],
+            num_workers=0,  # Single-threaded for deterministic batch order
             pin_memory=training_config["pin_memory"],
-            persistent_workers=training_config["num_workers"] > 0,
-            prefetch_factor=training_config["prefetch_factor"],
         )
         logger.info(f"Train loader created with {len(train_dataset)} samples")
 
