@@ -111,6 +111,7 @@ def masked_multi_bin_weighted_mse(
     bin_thresholds=None,
     bin_weights=None,
     epsilon=1e-6,
+    focus_on_low_waves=True,
 ):
     """
     Weighted MSE with physics-based binning using unnormalized VHM0.
@@ -133,7 +134,7 @@ def masked_multi_bin_weighted_mse(
     if bin_thresholds is None:
         bin_thresholds = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 15.0]
     if bin_weights is None:
-        bin_weights = [0.9, 1.0, 1.2, 1.5, 2.2, 3.0, 4.0]
+        bin_weights = [15.0, 8.0, 4.0, 2.0, 1.0, 1.0, 1.0, 1.0] if focus_on_low_waves else [0.9, 1.0, 1.2, 1.5, 2.2, 3.0, 4.0]
 
     # Crop shapes to match
     min_h = min(y_pred.shape[2], y_true.shape[2])

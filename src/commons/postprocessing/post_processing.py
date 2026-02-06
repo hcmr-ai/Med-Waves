@@ -101,6 +101,7 @@ def compute_global_bin_biases(
     normalize_target: bool,
     normalizer: Optional[object],
     unit: str = "m",
+    task_name: str = "vhm0",
 ) -> Dict[str, float]:
     """
     Compute global bin-wise correction biases from training/validation set.
@@ -114,6 +115,7 @@ def compute_global_bin_biases(
         normalize_target: Whether target is normalized
         normalizer: Normalizer object with inverse_transform_torch method
         unit: Unit string for printing (default: 'm')
+        task_name: Task name for multi-task models (default: 'vhm0')
 
     Returns:
         Dictionary mapping bin labels to computed bias values
@@ -131,15 +133,14 @@ def compute_global_bin_biases(
 
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Computing biases from train/val"):
-            # Handle batch format
-            if predict_bias:
-                X, y, mask, vhm0 = batch
-                vhm0 = vhm0.to(device) if vhm0 is not None else None
-            else:
-                X, y, mask, vhm0_batch = batch
-                vhm0 = (
-                    vhm0_batch.to(device) if vhm0_batch is not None else None
-                )
+            # Unpack batch
+            X, y, mask, vhm0_batch = batch
+            vhm0 = vhm0_batch.to(device) if vhm0_batch is not None else None
+            
+            # Handle multi-task vs single-task format
+            # If y is a dict (multi-task), extract the target for the task we're evaluating
+            if isinstance(y, dict):
+                y = y[task_name]
 
             X = X.to(device)
             y = y.to(device)
@@ -147,6 +148,11 @@ def compute_global_bin_biases(
 
             # Get predictions
             y_pred = model(X)
+            
+            # Handle multi-task predictions
+            # If y_pred is a dict (multi-task model), extract the prediction for the task
+            if isinstance(y_pred, dict):
+                y_pred = y_pred[task_name]
 
             # Align dimensions
             min_h = min(y_pred.shape[2], y.shape[2])

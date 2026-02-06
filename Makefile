@@ -68,8 +68,8 @@ evaluation: ## Run evaluation
 	poetry run python src/pipelines/evaluation/evaluate_model_refactored.py --config src/configs/config_evaluation.yaml
 
 eval-bunet:
-	poetry run python scripts/evaluate_bunet.py
-
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py
+	
 eval-bunet-bitwise:
 	poetry run python scripts/evaluate_bunet.py --apply-binwise-correction
 # Scripts

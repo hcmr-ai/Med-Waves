@@ -347,8 +347,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     predict_bias = data_config.get("predict_bias", False)
     subsample_step = data_config.get("subsample_step", None)
 
-    # normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
-    normalizer = WaveNormalizer.load_from_disk(data_config["normalizer_path"])
+    normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
+    # normalizer = WaveNormalizer.load_from_disk(data_config["normalizer_path"])
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
@@ -464,7 +464,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Train loader: {len(train_loader)} batches")
     logger.info(f"Val loader: {len(val_loader)} batches")
 
-    return train_loader, val_loader
+    return train_loader, val_loader, normalizer
 
 def create_callbacks(config: DNNConfig) -> list:
     """Create training callbacks"""
@@ -612,10 +612,11 @@ def main():
         logger.warning("S3FS detected with num_workers > 0. This may cause issues.")
         logger.warning("Consider setting num_workers=0 or pre-downloading data locally.")
 
-    train_loader, val_loader = create_data_loaders(config, fs)
+    train_loader, val_loader, normalizer = create_data_loaders(config, fs)
 
     # Create model
     model_config = config.config["model"]
+    data_config = config.config["data"]
     logger.info(f"Creating model with {model_config['in_channels']} input channels")
     logger.info(f"Learning rate: {model_config['learning_rate']}")
     logger.info(f"Loss type: {model_config['loss_type']}")
@@ -663,6 +664,8 @@ def main():
             n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
             discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
             tasks_config=model_config.get("tasks_config", None),
+            normalizer=normalizer,
+            normalize_target=data_config.get("normalize_target", False),
         )
     else:
         logger.info("Training new model")
@@ -686,6 +689,8 @@ def main():
             n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
             discriminator_lr_multiplier=model_config.get("discriminator_lr_multiplier", 1.0),
             tasks_config=model_config.get("tasks_config", None),
+            normalizer=normalizer,
+            normalize_target=data_config.get("normalize_target", False),
         )
 
     # Create callbacks
