@@ -58,9 +58,11 @@ class WaveBiasCorrector(pl.LightningModule):
         lambda_adv=0.01,
         n_discriminator_updates=3,
         discriminator_lr_multiplier=1.0,
+        normalizer=None,
+        normalize_target=False,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['normalizer'])
         self.loss_type = loss_type
         self.n_discriminator_updates = n_discriminator_updates
         self.discriminator_lr_multiplier = discriminator_lr_multiplier
@@ -82,9 +84,12 @@ class WaveBiasCorrector(pl.LightningModule):
         self.model_type = model_type
 
         # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
-        # Use provided tasks_config
+        # Use provided tasks_config and ensure each task has a loss_type
         self.tasks_config = tasks_config
-        self.tasks_config['loss_type'] = self.loss_type
+        # Add loss_type to each task if not already present
+        for task in self.tasks_config:
+            if 'loss_type' not in task:
+                task['loss_type'] = self.loss_type
         self.auxiliary_tasks = [task['name'] for task in tasks_config]
 
         # Store whether we're in multi-task mode
@@ -108,11 +113,74 @@ class WaveBiasCorrector(pl.LightningModule):
 
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
+        self.normalizer = normalizer
+        self.normalize_target = normalize_target
 
     def forward(self, x):
         # Handle NaN values in input by replacing with zeros
         x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return self.model(x_clean)
+
+    def _denormalize_bias_prediction(self, prediction, task_name):
+        """
+        Denormalize predictions if normalization was applied during training.
+        Works for both bias predictions and direct wave height predictions.
+        
+        Args:
+            prediction: Normalized prediction tensor (any shape)
+            task_name: Name of the task (e.g., 'vhm0', 'vtm02')
+        
+        Returns:
+            Denormalized prediction tensor (same shape as input)
+        """
+        if not self.normalize_target or self.normalizer is None:
+            return prediction
+        
+        # Get the target column name for this task
+        # This assumes the normalizer has access to the task column mappings
+        # For vhm0, the target is typically 'corrected_VHM0'
+        target_column_map = {
+            'vhm0': 'corrected_VHM0',
+            'vtm02': 'corrected_VTM02',
+        }
+        target_col = target_column_map.get(task_name, f'corrected_{task_name.upper()}')
+        
+        # Set up the normalizer to use the correct target stats
+        if target_col in self.normalizer.feature_order_:
+            target_idx = self.normalizer.feature_order_.index(target_col)
+            if target_idx in self.normalizer.stats_:
+                self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+        
+        # Denormalize
+        original_shape = prediction.shape
+        
+        # inverse_transform_torch expects (H, W) or (1, H, W) or (H, W, 1)
+        # prediction is typically (B, C, H, W) for batches
+        if len(original_shape) == 4:  # (B, C, H, W)
+            B, C, H, W = original_shape
+            # Process each sample in the batch
+            denormalized = torch.zeros_like(prediction)
+            for b in range(B):
+                for c in range(C):
+                    slice_2d = prediction[b, c]  # (H, W)
+                    denormalized[b, c] = self.normalizer.inverse_transform_torch(slice_2d)
+            return denormalized
+        elif len(original_shape) == 3:  # (C, H, W) or (B, H, W)
+            # Assume (C, H, W) for single sample
+            C, H, W = original_shape
+            denormalized = torch.zeros_like(prediction)
+            for c in range(C):
+                slice_2d = prediction[c]  # (H, W)
+                denormalized[c] = self.normalizer.inverse_transform_torch(slice_2d)
+            return denormalized
+        elif len(original_shape) == 2:  # (H, W)
+            return self.normalizer.inverse_transform_torch(prediction)
+        elif len(original_shape) == 1:  # Flattened (N,)
+            # Cannot denormalize flattened without spatial structure
+            # Return as-is (should not happen in practice)
+            return prediction
+        else:
+            return prediction
 
     def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction, pi=None, mu=None, sigma=None):
         """Compute loss using the unified loss wrapper from losses.py"""
@@ -125,10 +193,10 @@ class WaveBiasCorrector(pl.LightningModule):
             pi=pi,
             mu=mu,
             sigma=sigma,
-            criterion=self.criterion,
-            pixel_switch_threshold_m=self.pixel_switch_threshold_m,
-            perceptual_loss=self.perceptual_loss,
-            ssim_loss=self.ssim_loss,
+            criterion=self.criterion if hasattr(self, 'criterion') else None,
+            pixel_switch_threshold_m=self.pixel_switch_threshold_m if hasattr(self, 'pixel_switch_threshold_m') else None,
+            perceptual_loss=self.perceptual_loss if hasattr(self, 'perceptual_loss') else None,
+            ssim_loss=self.ssim_loss if hasattr(self, 'ssim_loss') else None,
         )
 
     def compute_multi_task_loss(self, predictions, targets, mask, vhm0_for_reconstruction):
@@ -276,33 +344,45 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True)
 
             # Log sea-bin metrics for training
-            # For multi-task, log sea-bins for the primary task (first task)
-            if isinstance(predictions, dict):
-                primary_task = self.auxiliary_tasks[0]
-                y_pred_primary = predictions[primary_task]
-                y_true_primary = targets[primary_task] if isinstance(targets, dict) else targets
-            else:
-                y_pred_primary = predictions
-                y_true_primary = targets
+            # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
+            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
+            
+            for task_name in tasks_to_log:
+                if isinstance(predictions, dict):
+                    y_pred_task = predictions[task_name]
+                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                else:
+                    y_pred_task = predictions
+                    y_true_task = targets
 
-            # Align shapes for sea-bin computation
-            min_h = min(y_pred_primary.shape[2], y_true_primary.shape[2])
-            min_w = min(y_pred_primary.shape[3], y_true_primary.shape[3])
-            y_pred_primary = y_pred_primary[:, :, :min_h, :min_w]
-            y_true_primary = y_true_primary[:, :, :min_h, :min_w]
-            mask_crop = mask[:, :, :min_h, :min_w]
+                # Align shapes for sea-bin computation
+                min_h = min(y_pred_task.shape[2], y_true_task.shape[2])
+                min_w = min(y_pred_task.shape[3], y_true_task.shape[3])
+                y_pred_task = y_pred_task[:, :, :min_h, :min_w]
+                y_true_task = y_true_task[:, :, :min_h, :min_w]
+                mask_crop = mask[:, :, :min_h, :min_w]
 
-            if self.predict_bias and vhm0_for_reconstruction is not None:
-                vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
-                y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_primary[mask_crop]
-                y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_primary[mask_crop]
-                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "train")
-                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, "train_baseline")
-            else:
-                self._log_sea_bin_metrics(y_true_primary[mask_crop], y_pred_primary[mask_crop], "train")
-                vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
-                if vhm0_crop is not None:
-                    self._log_sea_bin_metrics(y_true_primary[mask_crop], vhm0_crop[mask_crop], "train_baseline")
+                # Denormalize predictions for sea-bin metrics (if targets were normalized)
+                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
+                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
+                
+                # Create task-specific prefix for multi-task logging
+                prefix = f"train_{task_name}" if isinstance(predictions, dict) else "train"
+                baseline_prefix = f"train_baseline_{task_name}" if isinstance(predictions, dict) else "train_baseline"
+                
+                if self.predict_bias and vhm0_for_reconstruction is not None:
+                    # Reconstruct full wave heights from bias
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
+                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
+                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                else:
+                    # Direct wave height prediction - use denormalized values
+                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
+                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    if vhm0_crop is not None:
+                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
 
         return loss
 
@@ -498,33 +578,45 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
 
             # Log sea-bin metrics for validation
-            # For multi-task, log sea-bins for the primary task (first task)
-            if isinstance(predictions, dict):
-                primary_task = self.auxiliary_tasks[0]
-                y_pred_primary = predictions[primary_task]
-                y_true_primary = targets[primary_task] if isinstance(targets, dict) else targets
-            else:
-                y_pred_primary = predictions
-                y_true_primary = targets
+            # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
+            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
+            
+            for task_name in tasks_to_log:
+                if isinstance(predictions, dict):
+                    y_pred_task = predictions[task_name]
+                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                else:
+                    y_pred_task = predictions
+                    y_true_task = targets
 
-            # Align shapes for sea-bin computation
-            min_h = min(y_pred_primary.shape[2], y_true_primary.shape[2])
-            min_w = min(y_pred_primary.shape[3], y_true_primary.shape[3])
-            y_pred_primary = y_pred_primary[:, :, :min_h, :min_w]
-            y_true_primary = y_true_primary[:, :, :min_h, :min_w]
-            mask_crop = mask[:, :, :min_h, :min_w]
+                # Align shapes for sea-bin computation
+                min_h = min(y_pred_task.shape[2], y_true_task.shape[2])
+                min_w = min(y_pred_task.shape[3], y_true_task.shape[3])
+                y_pred_task = y_pred_task[:, :, :min_h, :min_w]
+                y_true_task = y_true_task[:, :, :min_h, :min_w]
+                mask_crop = mask[:, :, :min_h, :min_w]
 
-            if self.predict_bias and vhm0_for_reconstruction is not None:
-                vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
-                y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_primary[mask_crop]
-                y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_primary[mask_crop]
-                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "val")
-                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, "val_baseline")
-            else:
-                self._log_sea_bin_metrics(y_true_primary[mask_crop], y_pred_primary[mask_crop], "val")
-                vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
-                if vhm0_crop is not None:
-                    self._log_sea_bin_metrics(y_true_primary[mask_crop], vhm0_crop[mask_crop], "val_baseline")
+                # Denormalize predictions for sea-bin metrics (if targets were normalized)
+                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
+                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
+                
+                # Create task-specific prefix for multi-task logging
+                prefix = f"val_{task_name}" if isinstance(predictions, dict) else "val"
+                baseline_prefix = f"val_baseline_{task_name}" if isinstance(predictions, dict) else "val_baseline"
+                
+                if self.predict_bias and vhm0_for_reconstruction is not None:
+                    # Reconstruct full wave heights from bias
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
+                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
+                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                else:
+                    # Direct wave height prediction - use denormalized values
+                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
+                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    if vhm0_crop is not None:
+                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
 
         return {"loss": loss, "pred": predictions}
 
@@ -563,6 +655,7 @@ class WaveBiasCorrector(pl.LightningModule):
         y_pred_np = y_pred.cpu().numpy()
 
         # Define sea-bin ranges (same as in config)
+        # Last bin is unbounded to capture all extreme wave heights
         sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0},
             {"name": "light", "min": 1.0, "max": 2.0},
@@ -578,7 +671,7 @@ class WaveBiasCorrector(pl.LightningModule):
             {"name": "extreme_11_12", "min": 11.0, "max": 12.0},
             {"name": "extreme_12_13", "min": 12.0, "max": 13.0},
             {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
-            {"name": "extreme_14_15", "min": 14.0, "max": 15.0}
+            {"name": "extreme_14plus", "min": 14.0, "max": float("inf")}
         ]
 
         for bin_config in sea_bins:
@@ -587,7 +680,11 @@ class WaveBiasCorrector(pl.LightningModule):
             bin_max = bin_config["max"]
 
             # Filter data for this sea state bin
-            mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
+            # Use <= for the last bin to capture all values >= bin_min
+            if bin_max == float("inf"):
+                mask = y_true_np >= bin_min
+            else:
+                mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
             bin_count = np.sum(mask)
 
             if bin_count > 0:

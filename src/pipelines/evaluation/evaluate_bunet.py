@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Add src to path for imports
-project_root = Path(__file__).parent.parent
+project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # Import your model and dataset classes
@@ -91,11 +91,129 @@ class ModelEvaluator:
         bias_loader: DataLoader = None,
         geo_bounds: dict = None,
         use_mdn: bool = False,
-        target_column: str = "corrected_VHM0",
+        target_columns: dict = {"vhm0": "corrected_VHM0"},
         apply_bilateral_filter: bool = False,
     ):
         self.model = model.to(device)
         self.model.eval()
+        
+        # Load bin-specific model for 0-2m waves (HARDCODED FOR TESTING)
+        self.low_wave_model = None
+        try:
+            low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
+            low_wave_ckpt = ""
+            # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced/epoch=19-val_loss=0.01.ckpt"
+            logger.info(f"Loading specialized model for 0-2m waves from {low_wave_ckpt}")
+            
+            # Load checkpoint manually to extract hyperparameters
+            import s3fs
+            if low_wave_ckpt.startswith("s3://"):
+                fs = s3fs.S3FileSystem()
+                with fs.open(low_wave_ckpt, "rb") as f:
+                    ckpt = torch.load(f, map_location="cpu")
+            else:
+                ckpt = torch.load(low_wave_ckpt, map_location="cpu")
+            
+            # Extract hyperparameters from checkpoint
+            hparams = ckpt.get("hyper_parameters", {})
+            logger.info(f"Checkpoint hyperparameters: {list(hparams.keys())}")
+            
+            # Create model instance with checkpoint hyperparameters
+            from src.classifiers.lightning_trainer import WaveBiasCorrector
+            
+            # Reconstruct model with saved hyperparameters (using correct parameter names)
+            self.low_wave_model = WaveBiasCorrector(
+                tasks_config=hparams.get("tasks_config", [{"name": "vhm0", "loss_type": "mse", "weight": 1.0}]),
+                in_channels=hparams.get("in_channels", 15),
+                lr=hparams.get("lr", 1e-4),
+                loss_type=hparams.get("loss_type", "mse"),
+                predict_bias=hparams.get("predict_bias", False),
+                model_type=hparams.get("model_type", "transunet"),
+                filters=hparams.get("filters", [64, 128, 256]),
+                dropout=hparams.get("dropout", 0.2),
+                use_mdn=hparams.get("use_mdn", False),
+            )
+            
+            # Load state dict with key mapping (old single-task → new multi-task format)
+            state_dict = ckpt["state_dict"]
+            
+            # Check if we need to remap keys from single-task to multi-task format
+            if "model.final.weight" in state_dict and "model.task_heads.vhm0.weight" not in state_dict:
+                logger.info("Remapping single-task checkpoint to multi-task format")
+                # Rename final layer keys: model.final.* → model.task_heads.vhm0.*
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith("model.final."):
+                        new_key = key.replace("model.final.", "model.task_heads.vhm0.")
+                        new_state_dict[new_key] = value
+                    else:
+                        new_state_dict[key] = value
+                state_dict = new_state_dict
+            
+            self.low_wave_model.load_state_dict(state_dict, strict=False)
+            self.low_wave_model.to(device)
+            self.low_wave_model.eval()
+            logger.info("✓ Successfully loaded 0-2m specialized model from state_dict")
+        except Exception as e:
+            logger.warning(f"Failed to load specialized 0-2m model: {e}. Using default model for all predictions.")
+            self.low_wave_model = None
+            import traceback
+            logger.debug(traceback.format_exc())
+        
+        # Load bin-specific model for >=9m waves (HARDCODED FOR TESTING)
+        self.high_wave_model = None
+        try:
+            high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
+            high_wave_ckpt = ""
+            logger.info(f"Loading specialized model for >=9m waves from {high_wave_ckpt}")
+            
+            # Load checkpoint manually
+            import s3fs
+            if high_wave_ckpt.startswith("s3://"):
+                fs = s3fs.S3FileSystem()
+                with fs.open(high_wave_ckpt, "rb") as f:
+                    ckpt = torch.load(f, map_location="cpu")
+            else:
+                ckpt = torch.load(high_wave_ckpt, map_location="cpu")
+            
+            hparams = ckpt.get("hyper_parameters", {})
+            logger.info(f"High-wave checkpoint hyperparameters: {list(hparams.keys())}")
+            
+            from src.classifiers.lightning_trainer import WaveBiasCorrector
+            self.high_wave_model = WaveBiasCorrector(
+                tasks_config=hparams.get("tasks_config", [{"name": "vhm0", "loss_type": "mse", "weight": 1.0}]),
+                in_channels=hparams.get("in_channels", 15),
+                lr=hparams.get("lr", 1e-4),
+                loss_type=hparams.get("loss_type", "mse"),
+                predict_bias=hparams.get("predict_bias", False),
+                model_type=hparams.get("model_type", "transunet"),
+                filters=hparams.get("filters", [64, 128, 256]),
+                dropout=hparams.get("dropout", 0.2),
+                use_mdn=hparams.get("use_mdn", False),
+            )
+            
+            # Load state dict with key remapping
+            state_dict = ckpt["state_dict"]
+            if "model.final.weight" in state_dict and "model.task_heads.vhm0.weight" not in state_dict:
+                logger.info("Remapping single-task checkpoint to multi-task format (high-wave)")
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith("model.final."):
+                        new_key = key.replace("model.final.", "model.task_heads.vhm0.")
+                        new_state_dict[new_key] = value
+                    else:
+                        new_state_dict[key] = value
+                state_dict = new_state_dict
+            
+            self.high_wave_model.load_state_dict(state_dict, strict=False)
+            self.high_wave_model.to(device)
+            self.high_wave_model.eval()
+            logger.info("✓ Successfully loaded >=9m specialized model from state_dict")
+        except Exception as e:
+            logger.warning(f"Failed to load specialized >=9m model: {e}. Using default model for high waves.")
+            self.high_wave_model = None
+            import traceback
+            logger.debug(traceback.format_exc())
         self.test_loader = test_loader
         self.bias_loader = (
             bias_loader  # Separate loader for computing biases (train/val)
@@ -109,7 +227,14 @@ class ModelEvaluator:
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
         self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
         self.use_mdn = use_mdn
-        self.target_column = target_column
+        self.target_columns = target_columns
+        
+        # For backward compatibility and single-task evaluation, use first target
+        self.target_column = list(self.target_columns.values())[0]
+        self.task_name = list(self.target_columns.keys())[0]
+        print(self.target_column, self.task_name)
+        print(self.target_columns)
+        
         self.apply_bilateral_filter = apply_bilateral_filter
         if self.apply_bilateral_filter:
             logger.info("Applying bilateral filter to predictions")
@@ -668,6 +793,8 @@ class ModelEvaluator:
                                         bin_name=bin_name,
                                         category='corrected',
                                         features=bin_X[corrected_mask],
+                                        y_true=bin_y_true[corrected_mask],
+                                        y_pred=bin_y_pred[corrected_mask],
                                         timestamps=bin_timestamps[corrected_mask] if bin_timestamps is not None else None,
                                         confidence=bin_confidence[corrected_mask] if bin_confidence is not None else None
                                     )
@@ -678,6 +805,8 @@ class ModelEvaluator:
                                         bin_name=bin_name,
                                         category='not_corrected',
                                         features=bin_X[not_corrected_mask],
+                                        y_true=bin_y_true[not_corrected_mask],
+                                        y_pred=bin_y_pred[not_corrected_mask],
                                         timestamps=bin_timestamps[not_corrected_mask] if bin_timestamps is not None else None,
                                         confidence=bin_confidence[not_corrected_mask] if bin_confidence is not None else None
                                     )
@@ -690,13 +819,15 @@ class ModelEvaluator:
             if y_uncorrected is not None:
                 self.plot_samples["y_uncorrected"].extend(y_uncorrected_np)
 
-    def _update_category_stats(self, bin_name, category, features, timestamps, confidence):
+    def _update_category_stats(self, bin_name, category, features, y_true, y_pred, timestamps, confidence):
         """Update statistics for a category (corrected/not_corrected).
 
         Args:
             bin_name: Name of the sea bin
             category: 'corrected' or 'not_corrected'
             features: numpy array of shape (N, C) where N=samples, C=channels
+            y_true: numpy array of ground truth values for this category
+            y_pred: numpy array of predicted values for this category
             timestamps: numpy array of timestamps (optional)
             confidence: numpy array of confidence values (optional)
         """
@@ -725,14 +856,19 @@ class ModelEvaluator:
             overall_stats['feature_sums'][i] += np.sum(feature_vals)
             overall_stats['feature_sq_sums'][i] += np.sum(feature_vals**2)
 
-        # Compute and accumulate SNR
+        # Compute and accumulate SNR from prediction quality
+        # SNR = 10 * log10(signal_power / noise_power)
+        # signal_power = var(y_true), noise_power = var(y_true - y_pred)
         try:
-            snr_values = compute_snr(features)
-            # Filter out invalid SNR values (inf, nan)
-            valid_snr = snr_values[np.isfinite(snr_values)]
-            if len(valid_snr) > 0:
-                stats['snr_sum'] += np.sum(valid_snr)
-                overall_stats['snr_sum'] += np.sum(valid_snr)
+            signal_power = np.var(y_true)
+            residuals = y_true - y_pred
+            noise_power = np.var(residuals)
+            
+            if noise_power > 0 and signal_power > 0:
+                snr_db = 10 * np.log10(signal_power / noise_power)
+                # Accumulate SNR (multiply by sample count for proper averaging)
+                stats['snr_sum'] += snr_db * n
+                overall_stats['snr_sum'] += snr_db * n
         except Exception as e:
             logger.debug(f"Failed to compute SNR for {bin_name}/{category}: {e}")
 
@@ -773,7 +909,7 @@ class ModelEvaluator:
                     return_timestamps=True
                 )
                 self._timestamps_cache[file_path] = timestamps
-                logger.info(f"Loaded {len(timestamps) if timestamps is not None else 0} timestamps from {file_path}")
+                # logger.info(f"Loaded {len(timestamps) if timestamps is not None else 0} timestamps from {file_path}")
             except Exception as e:
                 logger.debug(f"Failed to load timestamps from {file_path}: {e}")
                 self._timestamps_cache[file_path] = None
@@ -807,16 +943,16 @@ class ModelEvaluator:
             for batch_idx, batch in enumerate(
                 tqdm(self.test_loader, desc="Processing batches")
             ):
-                # Handle batch format based on predict_bias
-                if self.predict_bias:
-                    X, y, mask, vhm0 = batch
-                    vhm0 = vhm0.to(self.device) if vhm0 is not None else None
-                else:
-                    X, y, mask, vhm0_batch = batch
-                    vhm0 = (
-                        vhm0_batch.to(self.device) if vhm0_batch is not None else None
-                    )
-
+                # Unpack batch
+                X, y, mask, vhm0_batch = batch
+                vhm0 = vhm0_batch.to(self.device) if vhm0_batch is not None else None
+                
+                # Handle multi-task vs single-task format
+                # If y is a dict (multi-task), extract the target for the task we're evaluating
+                if isinstance(y, dict):
+                    # Multi-task: extract the specific target we're evaluating
+                    y = y[self.task_name]
+                
                 X, orig_size = pad_to_multiple(X, multiple=16)
 
                 if y is not None:
@@ -887,7 +1023,100 @@ class ModelEvaluator:
                     sigma_mean = sigma.mean(dim=1).squeeze(1)  # (B, H, W)
                     confidence = 1.0 / (sigma_mean + 1e-8)  # Higher value = more confident
                 else:
-                    y_pred = self.model(X)
+                    # Use bin-specific model routing if available
+                    if (self.low_wave_model is not None or self.high_wave_model is not None) and vhm0 is not None:
+                        # Create masks for different wave height ranges
+                        low_wave_mask = (vhm0 >= 0.0) & (vhm0 <= 1.0)
+                        high_wave_mask = (vhm0 >= 12.0) & (vhm0 < 14.0)
+                        mid_wave_mask = ~(low_wave_mask | high_wave_mask)
+                        
+                        # Get predictions from all models
+                        y_pred_default = self.model(X)
+                        
+                        # Handle multi-task: extract task before combining
+                        if isinstance(y_pred_default, dict):
+                            y_pred_default = y_pred_default[self.task_name]
+                        
+                        # Start with default predictions
+                        y_pred = y_pred_default.clone()
+                        
+                        # Helper function to align spatial dimensions
+                        def align_predictions(pred_source, pred_target, is_mask=False):
+                            """Align pred_source spatial dims to match pred_target.
+                            
+                            Args:
+                                is_mask: If True, use nearest-neighbor to avoid boundary bleeding
+                            """
+                            if pred_source.shape != pred_target.shape:
+                                # Resize to match target dimensions
+                                import torch.nn.functional as F
+                                mode = 'nearest' if is_mask else 'bilinear'
+                                return F.interpolate(
+                                    pred_source,
+                                    size=(pred_target.shape[2], pred_target.shape[3]),
+                                    mode=mode,
+                                    align_corners=False if mode == 'bilinear' else None
+                                )
+                            return pred_source
+                        
+                        # Apply low-wave specialized model if available
+                        if self.low_wave_model is not None and low_wave_mask.any():
+                            y_pred_low = self.low_wave_model(X)
+                            if isinstance(y_pred_low, dict):
+                                y_pred_low = y_pred_low[self.task_name]
+                            
+                            # Debug: Check if shapes match
+                            if batch_idx == 0:
+                                logger.info(f"Shape check - Default: {y_pred.shape}, Low-wave: {y_pred_low.shape}, VHM0: {vhm0.shape}")
+                            
+                            # Only align if shapes differ
+                            if y_pred_low.shape != y_pred.shape:
+                                logger.warning(f"Shape mismatch! Aligning low-wave model output from {y_pred_low.shape} to {y_pred.shape}")
+                                y_pred_low = align_predictions(y_pred_low, y_pred, is_mask=False)
+                                low_wave_mask_aligned = align_predictions(low_wave_mask.float(), y_pred, is_mask=True).bool()
+                            else:
+                                low_wave_mask_aligned = low_wave_mask
+                            
+                            y_pred = torch.where(low_wave_mask_aligned, y_pred_low, y_pred)
+                        
+                        # Apply high-wave specialized model if available
+                        if self.high_wave_model is not None and high_wave_mask.any():
+                            y_pred_high = self.high_wave_model(X)
+                            if isinstance(y_pred_high, dict):
+                                y_pred_high = y_pred_high[self.task_name]
+                            
+                            # Debug: Check if shapes match
+                            if batch_idx == 0:
+                                logger.info(f"Shape check - Default: {y_pred.shape}, High-wave: {y_pred_high.shape}, VHM0: {vhm0.shape}")
+                            
+                            # Only align if shapes differ
+                            if y_pred_high.shape != y_pred.shape:
+                                logger.warning(f"Shape mismatch! Aligning high-wave model output from {y_pred_high.shape} to {y_pred.shape}")
+                                y_pred_high = align_predictions(y_pred_high, y_pred, is_mask=False)
+                                high_wave_mask_aligned = align_predictions(high_wave_mask.float(), y_pred, is_mask=True).bool()
+                            else:
+                                high_wave_mask_aligned = high_wave_mask
+                            
+                            y_pred = torch.where(high_wave_mask_aligned, y_pred_high, y_pred)
+                        
+                        if batch_idx == 0:
+                            low_pixels = low_wave_mask.sum().item()
+                            mid_pixels = mid_wave_mask.sum().item()
+                            high_pixels = high_wave_mask.sum().item()
+                            total_pixels = low_wave_mask.numel()
+                            logger.info(f"Bin-specific routing:")
+                            logger.info(f"  0-2m: {low_pixels}/{total_pixels} pixels ({100*low_pixels/total_pixels:.1f}%)" + 
+                                       (" → specialized model" if self.low_wave_model is not None else " → default model"))
+                            logger.info(f"  2-9m: {mid_pixels}/{total_pixels} pixels ({100*mid_pixels/total_pixels:.1f}%) → default model")
+                            logger.info(f"  ≥9m: {high_pixels}/{total_pixels} pixels ({100*high_pixels/total_pixels:.1f}%)" + 
+                                       (" → specialized model" if self.high_wave_model is not None else " → default model"))
+                    else:
+                        y_pred = self.model(X)
+                
+                # Handle multi-task predictions (for non-bin-routed case)
+                # If y_pred is a dict (multi-task model), extract the prediction for the task we're evaluating
+                if isinstance(y_pred, dict):
+                    y_pred = y_pred[self.task_name]
 
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])
@@ -908,16 +1137,21 @@ class ModelEvaluator:
 
                 # Unnormalize if needed
                 if self.normalize_target and self.normalizer is not None:
+                    # CRITICAL: Set target_stats_ for the correct target column
+                    # The dataset may have left it set to a different task during normalization
+                    if self.target_column in self.normalizer.feature_order_:
+                        target_idx = self.normalizer.feature_order_.index(self.target_column)
+                        if target_idx in self.normalizer.stats_:
+                            self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                    
                     y_pred = self.normalizer.inverse_transform_torch(y_pred)
                     y = self.normalizer.inverse_transform_torch(y)
 
                 if self.apply_bilateral_filter:  # New flag
                     y_pred = self._apply_bilateral_filter(y_pred, mask)
-
                 # Apply bin-wise correction if enabled
                 if self.apply_binwise_correction_flag and vhm0 is not None:
                     y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
-
                 # Process batch and update accumulators
                 self._process_batch(X_cropped, y, mask, vhm0, y_pred, timestamps, confidence)
 
@@ -946,6 +1180,7 @@ class ModelEvaluator:
             normalize_target=self.normalize_target,
             normalizer=self.normalizer,
             unit=self.unit,
+            task_name=self.task_name,
         )
 
     def _apply_bin_corrections(self, y_pred, vhm0, mask):
@@ -1629,15 +1864,21 @@ def main():
     training_config = config.config["training"]
     data_config = config.config["data"]
     predict_bias = data_config.get("predict_bias", False)
-    target_column = data_config.get("target_column", "corrected_VHM0")
+    
+    # Support both old target_column (str) and new target_columns (dict)
+    target_columns = data_config.get("target_columns", None)
+    if target_columns is None:
+        # Fall back to old single-task format
+        target_column = data_config.get("target_column", "corrected_VHM0")
+        target_columns = {"vhm0": target_column}
 
     # Get file list (same as training)
     files = get_file_list(
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
     )
     _test_files_parq = get_file_list(
-        # f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
-        "/data/users/aiuser/parquet",
+        f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
+        # "/data/users/aiuser/parquet",
         f"WAVEAN{data_config.get('test_year', [2023])[0]}*.parquet",
     )
 
@@ -1667,21 +1908,33 @@ def main():
     logger.info(f"Train files: {len(train_files)}")
 
     # Load normalizer (same as training)
-    # normalizer = WaveNormalizer.load_from_s3(
-    #     "medwav-dev-data", data_config["normalizer_path"]
-    # )
-    normalizer = WaveNormalizer.load_from_disk(
-        data_config["normalizer_path"]
+    normalizer = WaveNormalizer.load_from_s3(
+        "medwav-dev-data", data_config["normalizer_path"]
     )
+    # normalizer = WaveNormalizer.load_from_disk(
+    #     data_config["normalizer_path"]
+    # )
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
+    
+    # CRITICAL: Set target_stats_ for the target column we're evaluating
+    # Without this, inverse_transform_torch falls back to the last channel!
+    first_target_col = list(target_columns.values())[0]
+    if first_target_col in normalizer.feature_order_:
+        target_idx = normalizer.feature_order_.index(first_target_col)
+        if target_idx in normalizer.stats_:
+            normalizer.target_stats_ = normalizer.stats_[target_idx]
+            logger.info(f"Set normalizer target_stats_ for '{first_target_col}' (index {target_idx})")
+        else:
+            logger.warning(f"Target index {target_idx} not found in normalizer stats!")
+    else:
+        logger.warning(f"Target column '{first_target_col}' not found in normalizer feature_order!")
 
     # Create test dataset (same parameters as training)
     patch_size = tuple(data_config["patch_size"]) if data_config["patch_size"] else None
     excluded_columns = data_config.get(
         "excluded_columns", ["time", "latitude", "longitude", "timestamp"]
     )
-    target_column = data_config.get("target_column", "corrected_VHM0")
     subsample_step = data_config.get("subsample_step", None)
 
     if None is True:
@@ -1689,7 +1942,7 @@ def main():
             test_files,
             patch_size=patch_size,
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -1700,7 +1953,7 @@ def main():
         test_dataset = CachedWaveDataset(
             test_files,
             excluded_columns=excluded_columns,
-            target_column=target_column,
+            target_columns=target_columns,
             predict_bias=predict_bias,
             subsample_step=subsample_step,
             normalizer=normalizer,
@@ -1710,12 +1963,28 @@ def main():
         )
     # Create test loader (use training batch size)
     # Note: num_workers=0 for reproducible evaluation
+    # test_loader = DataLoader(
+    #     test_dataset,
+    #     batch_size=training_config["batch_size"],
+    #     shuffle=False,
+    #     num_workers=0,  # Single-threaded for deterministic batch order
+    #     pin_memory=training_config["pin_memory"],
+    # )
+
+    def seed_worker(worker_id):
+        import random
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
     test_loader = DataLoader(
         test_dataset,
         batch_size=training_config["batch_size"],
         shuffle=False,
-        num_workers=0,  # Single-threaded for deterministic batch order
-        pin_memory=training_config["pin_memory"],
+        num_workers=4,
+        worker_init_fn=seed_worker,
+        generator=torch.Generator().manual_seed(42),  # Crucial!
+        persistent_workers=False,  # Avoid state carryover
     )
 
     # Create train loader for binwise correction (if needed)
@@ -1727,7 +1996,7 @@ def main():
                 train_files,
                 patch_size=patch_size,
                 excluded_columns=excluded_columns,
-                target_column=target_column,
+                target_columns=target_columns,
                 predict_bias=predict_bias,
                 subsample_step=subsample_step,
                 normalizer=normalizer,
@@ -1738,7 +2007,7 @@ def main():
             train_dataset = CachedWaveDataset(
                 train_files,
                 excluded_columns=excluded_columns,
-                target_column=target_column,
+                target_columns=target_columns,
                 predict_bias=predict_bias,
                 subsample_step=subsample_step,
                 normalizer=normalizer,
@@ -1844,12 +2113,12 @@ def main():
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
             test_files=test_files_parq,
-            subsample_step=1,
+            subsample_step=subsample_step if subsample_step is not None else 5,  # Match preprocessed data subsampling
             apply_binwise_correction_flag=args.apply_binwise_correction,
             bias_loader=train_loader,  # Use train set to compute bin biases
             geo_bounds=geo_bounds,
             use_mdn=model.use_mdn,
-            target_column=target_column,
+            target_columns=target_columns,
             apply_bilateral_filter=False,
         )
 
