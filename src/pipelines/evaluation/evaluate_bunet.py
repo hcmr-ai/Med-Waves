@@ -26,7 +26,8 @@ import logging
 
 from src.classifiers.lightning_trainer import WaveBiasCorrector
 from src.classifiers.networks.mdn import mdn_expected_value
-from src.commons.dataloaders import CachedWaveDataset, GridPatchWaveDataset
+from src.commons.datasets.cache_wave_dataset import CachedWaveDataset
+from src.commons.datasets.grid_patched_dataset import GridPatchWaveDataset
 from src.commons.helpers import SeasonHelper
 from src.commons.postprocessing.post_processing import (
     apply_bilateral_filter,
@@ -64,11 +65,8 @@ from src.evaluation.metrics import (
     compute_snr,
 )
 from src.evaluation.visuals import load_coordinates_from_parquet
-from src.pipelines.training.dnn_trainer import (
-    DNNConfig,
-    get_file_list,
-    split_files_by_year,
-)
+from src.commons.helpers import DNNConfig
+from src.commons.helpers import get_file_list, split_files_by_year
 
 logger = logging.getLogger(__name__)
 
@@ -1813,7 +1811,7 @@ class ModelEvaluator:
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
         # self.plot_vhm0_distributions()
-        # self.plot_error_distribution_histograms()
+        self.plot_error_distribution_histograms()
         # self.plot_error_boxplots()
         # self.plot_error_violins()
         # self.plot_error_cdfs()

@@ -34,7 +34,7 @@ def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
 
     # Check if we have any valid pixels
     if not combined_mask.any():
-        return torch.tensor(0.0, device=y_true.device)
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     y_clean = torch.nan_to_num(y_true, nan=0.0)
     y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
@@ -46,9 +46,87 @@ def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
         print(f"Warning: NaN loss detected. y_pred stats: min={y_pred.min()}, max={y_pred.max()}, mean={y_pred.mean()}")
         print(f"y_true stats: min={y_true.min()}, max={y_true.max()}, mean={y_true.mean()}")
         print(f"mask stats: valid_pixels={combined_mask.sum()}, total_pixels={combined_mask.numel()}")
-        return torch.tensor(0.0, device=y_true.device)
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     return loss
+
+def masked_mse_loss_b(y_pred, y_true, mask, eps=1e-6):
+    """
+    Masked MSE over valid (sea) pixels only.
+
+    Args:
+        y_pred: (B, C, H, W)
+        y_true: (B, C, H, W)
+        mask:   (B, C, H, W) bool
+    """
+    # Hard safety checks (fail fast)
+    assert y_pred.shape == y_true.shape == mask.shape, \
+        f"Shape mismatch: pred={y_pred.shape}, true={y_true.shape}, mask={mask.shape}"
+
+    # Ensure mask is boolean
+    mask = mask.bool()
+
+    # Count valid pixels
+    n_valid = mask.sum()
+
+    if n_valid == 0:
+        # No valid pixels → return zero loss (no gradient contribution)
+        print("Warning: No valid pixels in batch - returning zero loss")
+        return torch.tensor(0.0, device=y_pred.device, requires_grad=True)
+
+    diff2 = (y_pred - y_true) ** 2
+
+    loss = diff2[mask].sum() / (n_valid.float() + eps)
+    return loss
+
+def masked_mse_loss_with_calm_shrink(
+    y_pred, y_true, vhm0_true, mask,
+    beta=0.1, calm_thr=2.0
+):
+    # Main loss (your current masked MSE)
+    diff = y_pred - y_true
+    loss_main = (diff[mask] ** 2).mean()
+
+    # Calm shrink penalty
+    calm = (vhm0_true < calm_thr) & mask
+    if calm.any():
+        loss_calm = (y_pred[calm] ** 2).mean()
+    else:
+        loss_calm = 0.0
+
+    return loss_main + beta * loss_calm
+
+import torch
+
+def masked_mse_loss_calm_emphasis_and_shrink(
+    y_pred, y_true, vhm0_raw, mask,
+    beta=2.0,          # calm emphasis
+    gamma=0.05,        # calm shrink strength
+    calm_thr=1.0,      # use 1.0 since your worst bin is 0-1m
+    eps=1e-8
+):
+    """
+    - MSE everywhere
+    - beta * MSE on calm pixels (vhm0_raw < calm_thr)
+    - + gamma * mean(y_pred^2) on calm pixels (discourage overcorrection)
+    """
+    assert y_pred.shape == y_true.shape == vhm0_raw.shape == mask.shape
+    mask = mask.bool()
+
+    diff2 = (y_pred - y_true) ** 2
+
+    calm = (vhm0_raw < calm_thr) & mask
+    rough = (~calm) & mask
+
+    # Base losses
+    loss_rough = diff2[rough].mean() if rough.any() else torch.zeros((), device=y_pred.device)
+    loss_calm  = diff2[calm].mean()  if calm.any()  else torch.zeros((), device=y_pred.device)
+
+    # Shrink: push predicted correction toward 0 in calm
+    shrink = (y_pred[calm] ** 2).mean() if calm.any() else torch.zeros((), device=y_pred.device)
+
+    return loss_rough + beta * loss_calm + gamma * shrink
+
 
 
 def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, epsilon=1e-6):
@@ -77,7 +155,7 @@ def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, ep
 
     # Check if we have any valid pixels
     if not combined_mask.any():
-        return torch.tensor(0.0, device=y_true.device)
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     y_clean = torch.nan_to_num(y_true, nan=0.0)
     y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
@@ -89,7 +167,7 @@ def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, ep
     weight_sum = weights[combined_mask].sum()
 
     if weight_sum == 0:
-        return torch.tensor(0.0, device=y_true.device)
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     loss = diff[combined_mask].sum() / (weight_sum + epsilon)
 
@@ -145,7 +223,7 @@ def masked_multi_bin_weighted_mse(
     vhm0 = vhm0[:, :, :min_h, :min_w]
 
     if not mask.any():
-        return torch.tensor(0.0, device=y_true.device)
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     # Clean numeric input
     y_clean = torch.nan_to_num(y_true, nan=0.0)

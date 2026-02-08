@@ -64,6 +64,7 @@ class TimestepPatchWaveDataset(Dataset):
         add_sea_mask_channel: bool = True,    # recommended
         seed: Optional[int] = None,
         return_coords: bool = True,
+        region_filter: Optional[str] = None,  # "atlantic", "mediterranean", "eastern_med", or None
     ):
         self.file_paths = file_paths
         self.excluded_columns = excluded_columns or []
@@ -217,17 +218,17 @@ class TimestepPatchWaveDataset(Dataset):
             return self._rng.randint(0, self.H - ph), self._rng.randint(0, self.W - pw)
         return self._rng.choice(self.valid_anchors)
 
-    def _sample_patch_coords(self, vhm0_full: torch.Tensor, idx: int) -> Tuple[int, int, int]:
+    def _sample_patch_coords(self, vhm0_full: torch.Tensor, idx: int, forced_bin: int | None = None) -> Tuple[int, int, int]:
         """
         Returns (i_start, j_start, patch_bin).
-        If stratified and no forced_bin_id, uses round-robin bin targets based on idx.
+        If stratified and no forced_bin, uses round-robin bin targets based on idx.
         """
         ph, pw = self.patch_cfg.patch_size
 
         # Decide target bin
         n_bins = len(self.patch_cfg.bin_edges_m) + 1
         if self.sampling_mode == "stratified":
-            target_bin = self.forced_bin_id
+            target_bin = forced_bin or self.forced_bin_id
             if target_bin is None:
                 target_bin = idx % n_bins
         else:
@@ -263,8 +264,13 @@ class TimestepPatchWaveDataset(Dataset):
         return best_i, best_j, best_bin
 
     # ---------------- main ----------------
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int | tuple):
+        forced_bin = None
+        if isinstance(idx, tuple):
+            idx, forced_bin = idx
+
         file_idx, hour_idx = self.index_map[idx]
+    
         path = self.file_paths[file_idx]
 
         tensor, feature_cols = self._get_file_tensor(path)
@@ -289,7 +295,7 @@ class TimestepPatchWaveDataset(Dataset):
         vhm0_full = hour_data[..., vhm0_idx:vhm0_idx+1]  # (H,W,1) raw meters (NaN on land)
 
         # Sample patch coords
-        i0, j0, patch_bin = self._sample_patch_coords(vhm0_full, idx)
+        i0, j0, patch_bin = self._sample_patch_coords(vhm0_full, idx, forced_bin)
 
         ph, pw = self.patch_cfg.patch_size
         X = X_full[i0:i0+ph, j0:j0+pw, :]

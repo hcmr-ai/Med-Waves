@@ -60,6 +60,7 @@ class WaveBiasCorrector(pl.LightningModule):
         discriminator_lr_multiplier=1.0,
         normalizer=None,
         normalize_target=False,
+        use_patch_sampling=False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=['normalizer'])
@@ -82,7 +83,7 @@ class WaveBiasCorrector(pl.LightningModule):
         self.optimizer_type = optimizer_type
         self.lambda_adv = lambda_adv
         self.model_type = model_type
-
+        self.use_patch_sampling = use_patch_sampling
         # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
         # Use provided tasks_config and ensure each task has a loss_type
         self.tasks_config = tasks_config
@@ -387,8 +388,12 @@ class WaveBiasCorrector(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
+        """Training step with multi-task support."""
         # Unpack batch: targets can be dict (multi-task) or tensor (single-task)
-        X, targets, mask, vhm0_for_reconstruction = batch
+        if self.use_patch_sampling:
+            X, targets, mask, vhm0_for_reconstruction, patch_bin, coords = batch
+        else:
+            X, targets, mask, vhm0_for_reconstruction = batch
 
         # Non-GAN models use automatic optimization
         if self.model_type != "transunet_gan":
