@@ -57,6 +57,8 @@ def compute_loss(
     """
     if loss_type == "mse":
         return masked_mse_loss(y_pred, y_true, mask)
+    elif loss_type == "mse_with_calm_shrink":
+        return masked_mse_loss_with_calm_shrink(y_pred, y_true, vhm0_true, mask)
 
     elif loss_type == "smooth_l1":
         if criterion is None:

@@ -3,27 +3,36 @@
 
 # Data configuration
 data:
-  data_path: "/opt/dlami/nvme/preprocessed/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
-  file_pattern: "WAVEAN*_h*.pt"
-  train_year: [2020, 2021]
+  data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  file_pattern: "WAVEAN*.pt"
+  train_year: [2018, 2019, 2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
   test_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-  patch_size: [256, 256] # Smaller patches = faster training (was [128, 128])
-  stride: [256, 256] # Stride for sliding window
+  patch_size: null # [256, 256] # Smaller patches = faster training (was [128, 128])
+  stride: null # [256, 256] # Stride for sliding window
   min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
   use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null # Data already subsampled in files, no additional runtime subsampling
-  use_cache: false  # Cache files in memory (reduces repeated I/O)
-  max_cache_size: 20  # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
+  use_cache: false # Cache files in memory (reduces repeated I/O)
+  max_cache_size: 20 # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
+  use_patch_sampling: true # Use patch sampling
+  add_sea_mask_channel: false # Add sea mask channel to input
+  predict_log_correction: false # Predict log correction (log(DA+eps) - log(raw+eps))
+  predict_bias: true # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
+  bin_sampling_weights: null # [3,2,1] # Sampling weights for each bin
+
 
   # Data preprocessing
-  target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
-  predict_bias: false # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
-  normalize_target: true
+  # target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
+  target_columns: # Multi-task: {task_name: column_name}. Single-task: {task_name: column_name}
+    vhm0: "corrected_VHM0"
+    # vtm02: "corrected_VTM02"
+
+  normalize_target: false
   excluded_columns: [
       "time",
       "latitude",
@@ -71,27 +80,33 @@ model:
     step_size: 10 # For StepLR: epochs between LR reductions
     gamma: 0.1 # For StepLR/ExponentialLR: LR reduction factor
 
+  # Task configuration. Used for both single and multi-task training. Define one task if single-task training, or multiple tasks if multi-task training.
+  tasks_config:
+    - name: "vhm0"
+      weight: 1.0
+    # - name: "vtm02"
+    #   weight: 0.5
 # Training configuration
 training:
-  batch_size: 12
-  accumulate_grad_batches: 3  # Larger batches for 64x64 patches (4x smaller than 128x128)
+  batch_size: 64
+  accumulate_grad_batches: 1 # Larger batches for 64x64 patches (4x smaller than 128x128)
   max_epochs: 100
   num_workers: 4
-  persistent_workers: true  # Not needed with num_workers=0
+  persistent_workers: true # Not needed with num_workers=0
   pin_memory: true
   accelerator: "gpu" # Options: "gpu", "cpu", "auto"
   devices: 1
   precision: "32" # Full precision training (16 or 32)
   log_every_n_steps: 20
-  early_stopping_patience: 20
-  save_top_k: 25
+  early_stopping_patience: 30
+  save_top_k: 50
   monitor: "val_loss"
   mode: "min"
   fast_dev_run: false
   check_val_every_n_epoch: 1
-  num_sanity_val_steps: 2
+  num_sanity_val_steps: 0
   benchmark: false
-  prefetch_factor: 2  # Increased from 1: prefetch 2 batches per worker (helps with I/O)
+  prefetch_factor: 2 # Increased from 1: prefetch 2 batches per worker (helps with I/O)
   val_check_interval: null
   use_swa: false
   use_ema: false
@@ -103,16 +118,26 @@ training:
   aggressive_freeze: false
 # Checkpoint configuration
 checkpoint:
-  resume_from_checkpoint: null # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_full_20-21_mse_64_lambda_lr_256" # Local directory for fast access
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_full_20-21_mse_64_lambda_lr_256" # S3 backup for spot instances
+  resume_from_checkpoint: /opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights/epoch=18-val_loss=0.02.ckpt # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
+  checkpoint_dir: "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
+  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights" # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/logs_full_20-21_mse_64_lambda_lr_256"
-  experiment_name: "dnn_training_full_20-21_mse_64_lambda_lr_256"
+  log_dir: "/opt/dlami/nvme/logs_dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
+  experiment_name: "dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
   use_comet: true
-  comet_tags: ["wave_height", "transunet", "mse", "bias_correction", "lambda_lr", "full_dataset", "256_patch_size"]
+  comet_tags:
+    [
+      "wave_height",
+      "transunet",
+      "mse",
+      "bias_correction",
+      "predict_bias",
+      "lambda_lr",
+      "patch_sampling",
+      "bin_sampling_weights",
+    ]
   comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"

@@ -26,14 +26,31 @@ from src.commons.scheduler_factory import create_scheduler
 
 
 class WaveBiasCorrector(pl.LightningModule):
+    """
+    Lightning module for wave bias correction with multi-task learning support.
+
+    Multi-task configuration via tasks_config:
+        - Single task (default): tasks_config=None → ['vhm0'] with loss_type from parameter
+        - Multi-task: tasks_config=[
+            {'name': 'vhm0', 'loss_type': 'weighted_mse', 'weight': 1.0},
+            {'name': 'vtm02', 'loss_type': 'mse', 'weight': 0.5}
+          ]
+        - Task names (auxiliary_tasks) are automatically inferred from tasks_config
+    """
     def __init__(
-        self, in_channels=3, lr=1e-3, loss_type="weighted_mse", lr_scheduler_config=None, predict_bias=False,
+        self,
+        tasks_config, # List of tasks: [{'name': 'vhm0', 'loss_type': 'mse', 'weight': 1.0}, ...]
+        in_channels=3,
+        lr=1e-3,
+        loss_type="weighted_mse",
+        lr_scheduler_config=None,
+        predict_bias=False,
         filters=None,
         dropout=0.2,
         add_vhm0_residual=False,
         vhm0_channel_index=0,
         weight_decay=1e-4,
-        model_type="nick",
+        model_type="transunet",
         upsample_mode="nearest",
         pixel_switch_threshold_m=0.45,
         use_mdn=False,
@@ -41,9 +58,12 @@ class WaveBiasCorrector(pl.LightningModule):
         lambda_adv=0.01,
         n_discriminator_updates=3,
         discriminator_lr_multiplier=1.0,
+        normalizer=None,
+        normalize_target=False,
+        use_patch_sampling=False,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['normalizer'])
         self.loss_type = loss_type
         self.n_discriminator_updates = n_discriminator_updates
         self.discriminator_lr_multiplier = discriminator_lr_multiplier
@@ -56,10 +76,25 @@ class WaveBiasCorrector(pl.LightningModule):
         if self.loss_type == "mse_ssim_perceptual" or self.loss_type == "mse_ssim":
             self.ssim_loss = SSIMLoss()
 
+        if self.loss_type == "smooth_l1" or self.loss_type == "multi_bin_weighted_smooth_l1":
+            self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="none")
+
         self.use_mdn = use_mdn
         self.optimizer_type = optimizer_type
         self.lambda_adv = lambda_adv
         self.model_type = model_type
+        self.use_patch_sampling = use_patch_sampling
+        # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
+        # Use provided tasks_config and ensure each task has a loss_type
+        self.tasks_config = tasks_config
+        # Add loss_type to each task if not already present
+        for task in self.tasks_config:
+            if 'loss_type' not in task:
+                task['loss_type'] = self.loss_type
+        self.auxiliary_tasks = [task['name'] for task in tasks_config]
+
+        # Store whether we're in multi-task mode
+        self.is_multi_task = len(self.auxiliary_tasks) > 1
 
         if model_type == "transunet_gan":
             self.automatic_optimization = False
@@ -74,17 +109,79 @@ class WaveBiasCorrector(pl.LightningModule):
             vhm0_channel_index=vhm0_channel_index,
             upsample_mode=upsample_mode,
             use_mdn=use_mdn,
+            auxiliary_tasks=self.auxiliary_tasks,
         )
 
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
-        if loss_type == "smooth_l1" or loss_type == "multi_bin_weighted_smooth_l1":
-            self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="none")
+        self.normalizer = normalizer
+        self.normalize_target = normalize_target
 
     def forward(self, x):
         # Handle NaN values in input by replacing with zeros
         x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return self.model(x_clean)
+
+    def _denormalize_bias_prediction(self, prediction, task_name):
+        """
+        Denormalize predictions if normalization was applied during training.
+        Works for both bias predictions and direct wave height predictions.
+        
+        Args:
+            prediction: Normalized prediction tensor (any shape)
+            task_name: Name of the task (e.g., 'vhm0', 'vtm02')
+        
+        Returns:
+            Denormalized prediction tensor (same shape as input)
+        """
+        if not self.normalize_target or self.normalizer is None:
+            return prediction
+        
+        # Get the target column name for this task
+        # This assumes the normalizer has access to the task column mappings
+        # For vhm0, the target is typically 'corrected_VHM0'
+        target_column_map = {
+            'vhm0': 'corrected_VHM0',
+            'vtm02': 'corrected_VTM02',
+        }
+        target_col = target_column_map.get(task_name, f'corrected_{task_name.upper()}')
+        
+        # Set up the normalizer to use the correct target stats
+        if target_col in self.normalizer.feature_order_:
+            target_idx = self.normalizer.feature_order_.index(target_col)
+            if target_idx in self.normalizer.stats_:
+                self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+        
+        # Denormalize
+        original_shape = prediction.shape
+        
+        # inverse_transform_torch expects (H, W) or (1, H, W) or (H, W, 1)
+        # prediction is typically (B, C, H, W) for batches
+        if len(original_shape) == 4:  # (B, C, H, W)
+            B, C, H, W = original_shape
+            # Process each sample in the batch
+            denormalized = torch.zeros_like(prediction)
+            for b in range(B):
+                for c in range(C):
+                    slice_2d = prediction[b, c]  # (H, W)
+                    denormalized[b, c] = self.normalizer.inverse_transform_torch(slice_2d)
+            return denormalized
+        elif len(original_shape) == 3:  # (C, H, W) or (B, H, W)
+            # Assume (C, H, W) for single sample
+            C, H, W = original_shape
+            denormalized = torch.zeros_like(prediction)
+            for c in range(C):
+                slice_2d = prediction[c]  # (H, W)
+                denormalized[c] = self.normalizer.inverse_transform_torch(slice_2d)
+            return denormalized
+        elif len(original_shape) == 2:  # (H, W)
+            return self.normalizer.inverse_transform_torch(prediction)
+        elif len(original_shape) == 1:  # Flattened (N,)
+            # Cannot denormalize flattened without spatial structure
+            # Return as-is (should not happen in practice)
+            return prediction
+        else:
+            return prediction
 
     def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction, pi=None, mu=None, sigma=None):
         """Compute loss using the unified loss wrapper from losses.py"""
@@ -97,218 +194,220 @@ class WaveBiasCorrector(pl.LightningModule):
             pi=pi,
             mu=mu,
             sigma=sigma,
-            criterion=self.criterion,
-            pixel_switch_threshold_m=self.pixel_switch_threshold_m,
-            perceptual_loss=self.perceptual_loss,
-            ssim_loss=self.ssim_loss,
+            criterion=self.criterion if hasattr(self, 'criterion') else None,
+            pixel_switch_threshold_m=self.pixel_switch_threshold_m if hasattr(self, 'pixel_switch_threshold_m') else None,
+            perceptual_loss=self.perceptual_loss if hasattr(self, 'perceptual_loss') else None,
+            ssim_loss=self.ssim_loss if hasattr(self, 'ssim_loss') else None,
         )
 
-    def _training_step(self, batch, batch_idx):
-        X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id we don't need
-        if self.use_mdn:
-            pi, mu, sigma = self(X)
-            y_pred = mdn_expected_value(pi, mu)
-            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
-        else:
-            y_pred = self(X)
-            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+    def compute_multi_task_loss(self, predictions, targets, mask, vhm0_for_reconstruction):
+        """
+        Compute weighted sum of task-specific losses for multi-task learning.
 
-        # Enhanced metrics for Comet
-        with torch.no_grad():
-            # Calculate additional metrics
-            min_h = min(y_pred.shape[2], y.shape[2])
-            min_w = min(y_pred.shape[3], y.shape[3])
+        Args:
+            predictions: Dict of predictions {'task_name': tensor} or single tensor for backward compat
+            targets: Dict of targets {'task_name': tensor} or single tensor for backward compat
+            mask: Valid pixel mask
+            vhm0_for_reconstruction: VHM0 values for reconstruction
+
+        Returns:
+            total_loss: Weighted sum of all task losses
+            task_losses: Dict of individual task losses {'task_name': loss_value}
+        """
+        # Backward compatibility: single task
+        if not isinstance(predictions, dict):
+            loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction)
+            # Use actual task name instead of hardcoding 'vhm0'
+            task_name = self.auxiliary_tasks[0]
+            return loss, {task_name: loss}
+
+        # Multi-task: compute weighted sum
+        total_loss = 0.0
+        task_losses = {}
+
+        for task_config in self.tasks_config:
+            task_name = task_config['name']
+            weight = task_config['weight']
+            loss_type = task_config['loss_type']
+
+            y_pred = predictions[task_name]
+            y_true = targets[task_name]
+
+            # Use task-specific loss type
+            task_loss = compute_loss(
+                loss_type=loss_type,
+                y_pred=y_pred,
+                y_true=y_true,
+                mask=mask,
+                vhm0_for_reconstruction=vhm0_for_reconstruction,
+                criterion=self.criterion if hasattr(self, 'criterion') else None,
+                pixel_switch_threshold_m=self.pixel_switch_threshold_m if hasattr(self, 'pixel_switch_threshold_m') else None,
+                perceptual_loss=self.perceptual_loss if hasattr(self, 'perceptual_loss') else None,
+                ssim_loss=self.ssim_loss if hasattr(self, 'ssim_loss') else None,
+            )
+
+            total_loss += weight * task_loss
+            task_losses[task_name] = task_loss.detach()
+
+        return total_loss, task_losses
+
+    def _compute_and_log_task_metrics(self, predictions, targets, mask, prefix="train"):
+        """
+        Compute and log metrics for each task.
+
+        Args:
+            predictions: Dict of predictions or single tensor
+            targets: Dict of targets or single tensor
+            mask: Valid pixel mask
+            prefix: Logging prefix (train/val)
+        """
+        # Handle backward compatibility: single task
+        if not isinstance(predictions, dict):
+            # Use actual task name instead of hardcoding 'vhm0'
+            task_name = self.auxiliary_tasks[0]
+            predictions = {task_name: predictions}
+            targets = {task_name: targets}
+
+        # Compute metrics per task
+        for task_name in self.auxiliary_tasks:
+            y_pred = predictions[task_name]
+            y_true = targets[task_name]
+
+            # Align shapes
+            min_h = min(y_pred.shape[2], y_true.shape[2])
+            min_w = min(y_pred.shape[3], y_true.shape[3])
             y_pred = y_pred[:, :, :min_h, :min_w]
-            y = y[:, :, :min_h, :min_w]
-            mask = mask[:, :, :min_h, :min_w]
+            y_true = y_true[:, :, :min_h, :min_w]
+            mask_crop = mask[:, :, :min_h, :min_w]
 
-            mae = torch.abs(y_pred - y)[mask].mean()
-            mse = ((y_pred - y) ** 2)[mask].mean()
+            # Calculate metrics
+            mae = torch.abs(y_pred - y_true)[mask_crop].mean()
+            mse = ((y_pred - y_true) ** 2)[mask_crop].mean()
             rmse = torch.sqrt(mse)
 
-            # Log metrics
-            self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_mae", mae, on_step=True, on_epoch=True)
-            self.log("train_mse", mse, on_step=True, on_epoch=True)
-            self.log("train_rmse", rmse, on_step=True, on_epoch=True)
-            self.log("train_error_min", (y_pred - y)[mask].min(), on_step=True, on_epoch=True)
-            self.log("train_error_max", (y_pred - y)[mask].max(), on_step=True, on_epoch=True)
-            self.log("train_error_mean", (y_pred - y)[mask].mean(), on_step=True, on_epoch=True)
-            self.log("train_error_p95", torch.quantile(torch.abs(y_pred - y)[mask], 0.95), on_step=True, on_epoch=True)
-
-            # Log data statistics
-            self.log("train_y_mean", y[mask].mean(), on_step=True, on_epoch=True)
-            self.log("train_y_std", y[mask].std(), on_step=True, on_epoch=True)
-            self.log(
-                "train_pred_mean", y_pred[mask].mean(), on_step=True, on_epoch=True
-            )
-            self.log("train_pred_std", y_pred[mask].std(), on_step=True, on_epoch=True)
-            self.log(
-                "train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True
-            )
-
-            # Log sea-bin metrics for training
-            if self.predict_bias and vhm0_for_reconstruction is not None:
-                vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
-                y_true_wave_heights = vhm0_for_reconstruction + y[mask]  # matches: corrected = vhm0 + bias
-                y_pred_wave_heights = vhm0_for_reconstruction + y_pred[mask]
-                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "train")
-                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "train_baseline")
-            else:
-                self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
-                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "train_baseline")
-
-        return loss
-
-    def _training_step_no_gan(self, X, y, mask, vhm0_for_reconstruction):
-        if self.use_mdn:
-            pi, mu, sigma = self(X)
-            y_pred = mdn_expected_value(pi, mu)
-            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
-        else:
-            y_pred = self(X)
-            loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
-
-        # Enhanced metrics for Comet
-        with torch.no_grad():
-            # Calculate additional metrics
-            min_h = min(y_pred.shape[2], y.shape[2])
-            min_w = min(y_pred.shape[3], y.shape[3])
-            y_pred = y_pred[:, :, :min_h, :min_w]
-            y = y[:, :, :min_h, :min_w]
-            mask = mask[:, :, :min_h, :min_w]
-
-            mae = torch.abs(y_pred - y)[mask].mean()
-            mse = ((y_pred - y) ** 2)[mask].mean()
-            rmse = torch.sqrt(mse)
+            # Task-specific metric names
+            task_suffix = f"_{task_name}" if self.is_multi_task else ""
 
             # Log metrics
-            self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_mae", mae, on_step=True, on_epoch=True)
-            self.log("train_mse", mse, on_step=True, on_epoch=True)
-            self.log("train_rmse", rmse, on_step=True, on_epoch=True)
-            self.log("train_error_min", (y_pred - y)[mask].min(), on_step=True, on_epoch=True)
-            self.log("train_error_max", (y_pred - y)[mask].max(), on_step=True, on_epoch=True)
-            self.log("train_error_mean", (y_pred - y)[mask].mean(), on_step=True, on_epoch=True)
-            self.log("train_error_p95", torch.quantile(torch.abs(y_pred - y)[mask], 0.95), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_mae{task_suffix}", mae, on_step=True, on_epoch=True)
+            self.log(f"{prefix}_mse{task_suffix}", mse, on_step=True, on_epoch=True)
+            self.log(f"{prefix}_rmse{task_suffix}", rmse, on_step=True, on_epoch=True)
+            self.log(f"{prefix}_error_min{task_suffix}", (y_pred - y_true)[mask_crop].min(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_error_max{task_suffix}", (y_pred - y_true)[mask_crop].max(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_error_mean{task_suffix}", (y_pred - y_true)[mask_crop].mean(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_error_p95{task_suffix}", torch.quantile(torch.abs(y_pred - y_true)[mask_crop], 0.95), on_step=True, on_epoch=True)
 
             # Log data statistics
-            self.log("train_y_mean", y[mask].mean(), on_step=True, on_epoch=True)
-            self.log("train_y_std", y[mask].std(), on_step=True, on_epoch=True)
-            self.log(
-                "train_pred_mean", y_pred[mask].mean(), on_step=True, on_epoch=True
-            )
-            self.log("train_pred_std", y_pred[mask].std(), on_step=True, on_epoch=True)
-            self.log(
-                "train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True
-            )
+            self.log(f"{prefix}_y_mean{task_suffix}", y_true[mask_crop].mean(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_y_std{task_suffix}", y_true[mask_crop].std(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_pred_mean{task_suffix}", y_pred[mask_crop].mean(), on_step=True, on_epoch=True)
+            self.log(f"{prefix}_pred_std{task_suffix}", y_pred[mask_crop].std(), on_step=True, on_epoch=True)
+
+    def _training_step_no_gan(self, X, targets, mask, vhm0_for_reconstruction):
+        """Training step for non-GAN models with multi-task support."""
+        # Forward pass (returns dict for multi-task or tensor for single-task)
+        # For MDN: returns (pi, mu, sigma) tuples per task
+        model_output = self(X)
+
+        # Handle MDN vs non-MDN
+        if self.use_mdn:
+            # Single-task MDN (multi-task MDN not fully supported yet)
+            if not isinstance(model_output, dict):
+                pi, mu, sigma = model_output
+                predictions = mdn_expected_value(pi, mu)
+                loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction, pi, mu, sigma)
+                # Use actual task name instead of hardcoding 'vhm0'
+                task_name = self.auxiliary_tasks[0]
+                task_losses = {task_name: loss}
+            else:
+                # Multi-task MDN: extract expected values for each task
+                # Note: MDN loss computation for multi-task needs enhancement
+                predictions = {}
+                for task_name, (pi, mu, _) in model_output.items():
+                    predictions[task_name] = mdn_expected_value(pi, mu)
+                loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+        else:
+            # Non-MDN: standard loss computation
+            predictions = model_output
+            loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+
+        # Log total loss
+        self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
+
+        # Log individual task losses
+        for task_name, task_loss in task_losses.items():
+            if self.is_multi_task:
+                self.log(f"train_loss_{task_name}", task_loss, on_step=True, on_epoch=True)
+
+        # Compute and log per-task metrics
+        with torch.no_grad():
+            self._compute_and_log_task_metrics(predictions, targets, mask, prefix="train")
+            self.log("train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True)
 
             # Log sea-bin metrics for training
-            if self.predict_bias and vhm0_for_reconstruction is not None:
-                vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
-                y_true_wave_heights = vhm0_for_reconstruction + y[mask]  # matches: corrected = vhm0 + bias
-                y_pred_wave_heights = vhm0_for_reconstruction + y_pred[mask]
-                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "train")
-                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "train_baseline")
-            else:
-                self._log_sea_bin_metrics(y[mask], y_pred[mask], "train")
-                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "train_baseline")
+            # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
+            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
+            
+            for task_name in tasks_to_log:
+                if isinstance(predictions, dict):
+                    y_pred_task = predictions[task_name]
+                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                else:
+                    y_pred_task = predictions
+                    y_true_task = targets
+
+                # Align shapes for sea-bin computation
+                min_h = min(y_pred_task.shape[2], y_true_task.shape[2])
+                min_w = min(y_pred_task.shape[3], y_true_task.shape[3])
+                y_pred_task = y_pred_task[:, :, :min_h, :min_w]
+                y_true_task = y_true_task[:, :, :min_h, :min_w]
+                mask_crop = mask[:, :, :min_h, :min_w]
+
+                # Denormalize predictions for sea-bin metrics (if targets were normalized)
+                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
+                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
+                
+                # Create task-specific prefix for multi-task logging
+                prefix = f"train_{task_name}" if isinstance(predictions, dict) else "train"
+                baseline_prefix = f"train_baseline_{task_name}" if isinstance(predictions, dict) else "train_baseline"
+                
+                if self.predict_bias and vhm0_for_reconstruction is not None:
+                    # Reconstruct full wave heights from bias
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
+                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
+                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                else:
+                    # Direct wave height prediction - use denormalized values
+                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
+                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    if vhm0_crop is not None:
+                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
 
         return loss
-
-    def _training_step_G(self, X, y, mask, vhm0_for_reconstruction):
-        """
-        Generator training step (optimizer_idx == 0).
-        Includes:
-        - MDN or normal forward pass
-        - supervised loss via compute_loss()
-        - adversarial loss L_G
-        - masked discriminator forward
-        """
-
-        # ---------------------------------------
-        # Forward pass (MDN or normal)
-        # ---------------------------------------
-        if self.use_mdn:
-            pi, mu, sigma = self(X)
-            y_pred = mdn_expected_value(pi, mu)
-            base_loss = self.compute_loss(
-                y_pred, y, mask, vhm0_for_reconstruction,
-                pi, mu, sigma
-            )
-        else:
-            y_pred = self(X)
-            base_loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
-
-        # ---------------------------------------
-        # GAN adversarial loss
-        # ---------------------------------------
-        # Mask land — important!
-        y_pred_masked = y_pred * mask
-
-        D_fake = self.model.D(y_pred_masked)
-        loss_adv = adversarial_loss_G(D_fake)
-
-        # Combine
-        total_loss = base_loss + self.hparams.lambda_adv * loss_adv
-
-        # ---------------------------------------
-        # Log (just the GAN component + total)
-        # ---------------------------------------
-        self.log("train/G_base_loss", base_loss, on_step=True, on_epoch=True)
-        self.log("train/G_adv_loss", loss_adv, on_step=True, on_epoch=True)
-        self.log("train/G_total_loss", total_loss, on_step=True, on_epoch=True, prog_bar=True)
-
-        return total_loss
-
-    def _training_step_D(self, X, y, mask):
-        """
-        Discriminator training step (optimizer_idx == 1).
-        Includes:
-        - real masked ocean field
-        - fake masked ocean field (stop gradient)
-        - LSGAN discriminator loss
-        """
-
-        # ---------------------------------------
-        # Real field
-        # ---------------------------------------
-        y_real_masked = y * mask
-        D_real = self.model.D(y_real_masked)
-
-        # ---------------------------------------
-        # Fake field (detach from generator graph)
-        # ---------------------------------------
-        with torch.no_grad():
-            if self.use_mdn:
-                pi, mu, sigma = self(X)
-                y_pred = mdn_expected_value(pi, mu)
-            else:
-                y_pred = self(X)
-
-        y_fake_masked = y_pred * mask
-        D_fake = self.model.D(y_fake_masked)
-
-        # ---------------------------------------
-        # GAN loss
-        # ---------------------------------------
-        loss_D = adversarial_loss_D(D_real, D_fake)
-
-        # Log
-        self.log("train/D_loss", loss_D, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/D_real_mean", D_real.mean(), on_step=True, on_epoch=True)
-        self.log("train/D_fake_mean", D_fake.mean(), on_step=True, on_epoch=True)
-
-        return loss_D
 
     def training_step(self, batch, batch_idx):
-        X, y, mask, vhm0_for_reconstruction = batch
+        """Training step with multi-task support."""
+        # Unpack batch: targets can be dict (multi-task) or tensor (single-task)
+        if self.use_patch_sampling:
+            X, targets, mask, vhm0_for_reconstruction, patch_bin, coords = batch
+        else:
+            X, targets, mask, vhm0_for_reconstruction = batch
 
         # Non-GAN models use automatic optimization
         if self.model_type != "transunet_gan":
-            return self._training_step_no_gan(X, y, mask, vhm0_for_reconstruction)
+            return self._training_step_no_gan(X, targets, mask, vhm0_for_reconstruction)
 
         # GAN models use manual optimization
+        # NOTE: GAN training currently only supports single-task
+        if isinstance(targets, dict):
+            # Multi-task not supported for GAN yet - use first task
+            y = targets[self.auxiliary_tasks[0]]
+            print(f"WARNING: GAN training with multi-task not fully implemented. Using task '{self.auxiliary_tasks[0]}' only.")
+        else:
+            y = targets
+
         opt_g, opt_d = self.optimizers()
 
         # ========================================
@@ -402,24 +501,56 @@ class WaveBiasCorrector(pl.LightningModule):
         print(f"\n>>> ON_VALIDATION_EPOCH_START CALLED - Epoch {self.current_epoch}")
 
     def validation_step(self, batch, batch_idx):
+        """Validation step with multi-task support."""
         if batch_idx == 0:
             print(f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}")
 
         try:
-            X, y, mask, vhm0_for_reconstruction = batch  # _ is the bin_id
+            # Unpack batch: targets can be dict (multi-task) or tensor (single-task)
+            X, targets, mask, vhm0_for_reconstruction = batch
             if batch_idx == 0:
-                print(f"Batch unpacked: X={X.shape}, y={y.shape}, mask={mask.shape}")
+                if isinstance(targets, dict):
+                    print(f"Batch unpacked: X={X.shape}, targets={list(targets.keys())}, mask={mask.shape}")
+                else:
+                    print(f"Batch unpacked: X={X.shape}, targets={targets.shape}, mask={mask.shape}")
 
+            # Forward pass (returns dict for multi-task or tensor for single-task)
+            # For MDN: returns (pi, mu, sigma) tuples per task
+            model_output = self(X)
+
+            # Handle MDN vs non-MDN
             if self.use_mdn:
-                pi, mu, sigma = self(X)
-                y_pred = mdn_expected_value(pi, mu)
-                loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
+                # Single-task MDN (multi-task MDN not fully supported yet)
+                if not isinstance(model_output, dict):
+                    pi, mu, sigma = model_output
+                    predictions = mdn_expected_value(pi, mu)
+                    loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction, pi, mu, sigma)
+                    # Use actual task name instead of hardcoding 'vhm0'
+                    task_name = self.auxiliary_tasks[0]
+                    task_losses = {task_name: loss}
+                else:
+                    # Multi-task MDN: extract expected values for each task
+                    # Note: MDN loss computation for multi-task needs enhancement
+                    predictions = {}
+                    for task_name, (pi, mu, _) in model_output.items():
+                        predictions[task_name] = mdn_expected_value(pi, mu)
+                    loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
             else:
-                y_pred = self(X)
-                loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
+                # Non-MDN: standard loss computation
+                predictions = model_output
+                loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
 
+            # GAN-specific validation: log discriminator metrics
             if self.model_type == "transunet_gan":
                 with torch.no_grad():
+                    # Extract single task prediction for GAN discriminator
+                    if isinstance(predictions, dict):
+                        y_pred = predictions[self.auxiliary_tasks[0]]
+                        y = targets[self.auxiliary_tasks[0]] if isinstance(targets, dict) else targets
+                    else:
+                        y_pred = predictions
+                        y = targets
+
                     y_pred_masked = y_pred * mask
                     y_real_masked = y * mask
 
@@ -438,53 +569,61 @@ class WaveBiasCorrector(pl.LightningModule):
             traceback.print_exc()
             raise
 
-        # Enhanced validation metrics
+        # Log total loss
+        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+
+        # Log individual task losses
+        for task_name, task_loss in task_losses.items():
+            if self.is_multi_task:
+                self.log(f"val_loss_{task_name}", task_loss, on_step=False, on_epoch=True)
+
+        # Compute and log per-task metrics
         with torch.no_grad():
-            # Calculate additional metrics
-            min_h = min(y_pred.shape[2], y.shape[2])
-            min_w = min(y_pred.shape[3], y.shape[3])
-            y_pred = y_pred[:, :, :min_h, :min_w]
-            y = y[:, :, :min_h, :min_w]
-            mask = mask[:, :, :min_h, :min_w]
-
-            mae = torch.abs(y_pred - y)[mask].mean()
-            mse = ((y_pred - y) ** 2)[mask].mean()
-            rmse = torch.sqrt(mse)
-            log_on_step = False
-            # if self.trainer is not None and hasattr(self.trainer, 'val_check_interval'):
-            #     # val_check_interval can be None, int (steps), or float (fraction of epoch)
-            #     log_on_step = self.trainer.val_check_interval is not None
-            # print(f"log_on_step: {log_on_step}")
-
-            # Log validation metrics
-            self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
-            self.log("val_mae", mae, on_step=log_on_step, on_epoch=True)
-            self.log("val_mse", mse, on_step=log_on_step, on_epoch=True)
-            self.log("val_rmse", rmse, on_step=log_on_step, on_epoch=True)
-            self.log("val_error_min", (y_pred - y)[mask].min(), on_step=log_on_step, on_epoch=True)
-            self.log("val_error_max", (y_pred - y)[mask].max(), on_step=log_on_step, on_epoch=True)
-            self.log("val_error_mean", (y_pred - y)[mask].mean(), on_step=log_on_step, on_epoch=True)
-            self.log("val_error_p95", torch.quantile(torch.abs(y_pred - y)[mask], 0.95), on_step=log_on_step, on_epoch=True)
-
-            # Log validation data statistics
-            self.log("val_y_mean", y[mask].mean(), on_epoch=True)
-            self.log("val_y_std", y[mask].std(), on_epoch=True)
-            self.log("val_pred_mean", y_pred[mask].mean(), on_epoch=True)
-            self.log("val_pred_std", y_pred[mask].std(), on_epoch=True)
+            self._compute_and_log_task_metrics(predictions, targets, mask, prefix="val")
             self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
 
             # Log sea-bin metrics for validation
-            if self.predict_bias and vhm0_for_reconstruction is not None:
-                vhm0_for_reconstruction = vhm0_for_reconstruction[mask]
-                y_true_wave_heights = vhm0_for_reconstruction + y[mask]
-                y_pred_wave_heights = vhm0_for_reconstruction + y_pred[mask]
-                self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, "val")
-                self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction, "val_baseline")
-            else:
-                self._log_sea_bin_metrics(y[mask], y_pred[mask], "val")
-                self._log_sea_bin_metrics(y[mask], vhm0_for_reconstruction[mask], "val_baseline")
+            # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
+            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
+            
+            for task_name in tasks_to_log:
+                if isinstance(predictions, dict):
+                    y_pred_task = predictions[task_name]
+                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                else:
+                    y_pred_task = predictions
+                    y_true_task = targets
 
-        return {"loss": loss, "pred": y_pred}
+                # Align shapes for sea-bin computation
+                min_h = min(y_pred_task.shape[2], y_true_task.shape[2])
+                min_w = min(y_pred_task.shape[3], y_true_task.shape[3])
+                y_pred_task = y_pred_task[:, :, :min_h, :min_w]
+                y_true_task = y_true_task[:, :, :min_h, :min_w]
+                mask_crop = mask[:, :, :min_h, :min_w]
+
+                # Denormalize predictions for sea-bin metrics (if targets were normalized)
+                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
+                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
+                
+                # Create task-specific prefix for multi-task logging
+                prefix = f"val_{task_name}" if isinstance(predictions, dict) else "val"
+                baseline_prefix = f"val_baseline_{task_name}" if isinstance(predictions, dict) else "val_baseline"
+                
+                if self.predict_bias and vhm0_for_reconstruction is not None:
+                    # Reconstruct full wave heights from bias
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
+                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
+                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                else:
+                    # Direct wave height prediction - use denormalized values
+                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
+                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    if vhm0_crop is not None:
+                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
+
+        return {"loss": loss, "pred": predictions}
 
     def on_train_start(self) -> None:
         """Log scheduler info and other hyperparameters when training starts."""
@@ -521,6 +660,7 @@ class WaveBiasCorrector(pl.LightningModule):
         y_pred_np = y_pred.cpu().numpy()
 
         # Define sea-bin ranges (same as in config)
+        # Last bin is unbounded to capture all extreme wave heights
         sea_bins = [
             {"name": "calm", "min": 0.0, "max": 1.0},
             {"name": "light", "min": 1.0, "max": 2.0},
@@ -536,7 +676,7 @@ class WaveBiasCorrector(pl.LightningModule):
             {"name": "extreme_11_12", "min": 11.0, "max": 12.0},
             {"name": "extreme_12_13", "min": 12.0, "max": 13.0},
             {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
-            {"name": "extreme_14_15", "min": 14.0, "max": 15.0}
+            {"name": "extreme_14plus", "min": 14.0, "max": float("inf")}
         ]
 
         for bin_config in sea_bins:
@@ -545,7 +685,11 @@ class WaveBiasCorrector(pl.LightningModule):
             bin_max = bin_config["max"]
 
             # Filter data for this sea state bin
-            mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
+            # Use <= for the last bin to capture all values >= bin_min
+            if bin_max == float("inf"):
+                mask = y_true_np >= bin_min
+            else:
+                mask = (y_true_np >= bin_min) & (y_true_np < bin_max)
             bin_count = np.sum(mask)
 
             if bin_count > 0:
