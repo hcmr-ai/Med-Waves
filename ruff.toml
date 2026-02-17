@@ -4,11 +4,12 @@ exclude = [
   "notebooks",
   "data",
   "models",
+  "scripts",
 ]
 
 [lint]
 select = ["E", "F", "B", "I", "W"]
-ignore = ["E501", "E402"]
+ignore = ["E501", "E402", "I001"]
 
 [format]
 quote-style = "double"
