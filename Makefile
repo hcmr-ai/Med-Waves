@@ -119,4 +119,4 @@ setup-full: install-poetry setup-path install-dev pre-commit-install ## Complete
 	@echo "Run 'make help' to see available commands."
 
 test-unit: ## Run unit tests
-	poetry run python -m pytest tests/unit/test_dataloaders/ --cov=src --cov-report=term-missing --cov-report=xml -v
+	poetry run python -m pytest tests/unit/ --cov=src --cov-report=term-missing --cov-report=xml -v

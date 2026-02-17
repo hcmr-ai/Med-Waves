@@ -4,10 +4,12 @@ on:
   pull_request:
     branches: ["master"]
     paths:
+      - "src/**"
       - "tests/unit/**"
 jobs:
-  test:
+  unit-tests:
     runs-on: ubuntu-latest
+    name: Unit Tests
 
     steps:
       - name: Checkout code
