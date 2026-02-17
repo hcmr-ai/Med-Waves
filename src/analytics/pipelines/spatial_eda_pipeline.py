@@ -8,26 +8,37 @@ from src.analytics.plots.spatial_plots import (
 )
 
 SEASON_MAP = {
-    12: "WINTER", 1: "WINTER", 2: "WINTER",
-    3: "AUTUMN", 4: "AUTUMN", 5: "AUTUMN",
-    6: "SUMMER", 7: "SUMMER", 8: "SUMMER",
-    9: "SPRING", 10: "SPRING", 11: "SPRING",
+    12: "WINTER",
+    1: "WINTER",
+    2: "WINTER",
+    3: "AUTUMN",
+    4: "AUTUMN",
+    5: "AUTUMN",
+    6: "SUMMER",
+    7: "SUMMER",
+    8: "SUMMER",
+    9: "SPRING",
+    10: "SPRING",
+    11: "SPRING",
 }
+
 
 def add_season_columns(df):
     """Add 'season' and 'season_year' columns for climatological analysis."""
 
-    df = df.with_columns([
-        pl.col("month").map_elements(lambda m: SEASON_MAP.get(m), return_dtype=pl.String).alias("season"),
-        pl.col("year").alias("season_year"),  # Calendar year, no shifting!
-    ])
+    df = df.with_columns(
+        [
+            pl.col("month")
+            .map_elements(lambda m: SEASON_MAP.get(m), return_dtype=pl.String)
+            .alias("season"),
+            pl.col("year").alias("season_year"),  # Calendar year, no shifting!
+        ]
+    )
     return df
 
+
 class SpatialEDAPipeline:
-    def __init__(
-        self,
-        parquet_files_path: str
-    ):
+    def __init__(self, parquet_files_path: str):
         self.parquet_files = parquet_files_path
 
     def load_data(self):
@@ -39,8 +50,14 @@ class SpatialEDAPipeline:
         """Plot percentage of missing values for each grid cell."""
         print("Computing missing data statistics...")
 
-        miss_pd = df.to_pandas().pivot(index="latitude", columns="longitude", values=f"{self.feature_col}_pct_missing")
-        out_path = self.output_dir / f"missing_heatmap{('_' + label) if label else ''}.png"
+        miss_pd = df.to_pandas().pivot(
+            index="latitude",
+            columns="longitude",
+            values=f"{self.feature_col}_pct_missing",
+        )
+        out_path = (
+            self.output_dir / f"missing_heatmap{('_' + label) if label else ''}.png"
+        )
         plot_missing_spatial_heatmap(miss_pd, out_path)
 
         print(f"Saved missing heatmap to {out_path}")
@@ -49,7 +66,10 @@ class SpatialEDAPipeline:
         """Plot mean and std feature as spatial scatter heatmaps."""
         # Plot mean
         stats = df.to_pandas()
-        out_mean = self.output_dir / f"{self.feature_col.lower()}_mean_map{('_' + label) if label else ''}.png"
+        out_mean = (
+            self.output_dir
+            / f"{self.feature_col.lower()}_mean_map{('_' + label) if label else ''}.png"
+        )
         plot_spatial_feature_heatmap(
             df=stats,
             feature_col=f"{self.feature_col}_mean",
@@ -60,7 +80,10 @@ class SpatialEDAPipeline:
         print(f"Saved mean map to {out_mean}")
 
         # Plot std
-        out_std = self.output_dir / f"{self.feature_col.lower()}_std_map{('_' + label) if label else ''}.png"
+        out_std = (
+            self.output_dir
+            / f"{self.feature_col.lower()}_std_map{('_' + label) if label else ''}.png"
+        )
         plot_spatial_feature_heatmap(
             df=stats,
             feature_col=f"{self.feature_col}_std",
@@ -72,13 +95,18 @@ class SpatialEDAPipeline:
 
     def aggregate_annual(self):
         """Aggregate all months in a year per grid cell (mean, std, missing%)."""
-        agg = (
-            self.df.group_by(["latitude", "longitude"])
-            .agg([
-                pl.col(f"{self.feature_col}_mean").mean().alias(f"{self.feature_col}_mean"),
-                pl.col(f"{self.feature_col}_std").mean().alias(f"{self.feature_col}_std"),
-                pl.col(f"{self.feature_col}_pct_missing").mean().alias(f"{self.feature_col}_pct_missing"),
-            ])
+        agg = self.df.group_by(["latitude", "longitude"]).agg(
+            [
+                pl.col(f"{self.feature_col}_mean")
+                .mean()
+                .alias(f"{self.feature_col}_mean"),
+                pl.col(f"{self.feature_col}_std")
+                .mean()
+                .alias(f"{self.feature_col}_std"),
+                pl.col(f"{self.feature_col}_pct_missing")
+                .mean()
+                .alias(f"{self.feature_col}_pct_missing"),
+            ]
         )
         return agg
 
@@ -86,13 +114,12 @@ class SpatialEDAPipeline:
         """Return a Polars DataFrame of seasonal averages per grid point."""
         df = add_season_columns(self.df)
         # For each (lat, lon, season), mean over all years (seasonal climatology)
-        agg = (
-            df.group_by(["latitude", "longitude", "season"])
-            .agg([
+        agg = df.group_by(["latitude", "longitude", "season"]).agg(
+            [
                 pl.col(f"{self.feature_col}_mean").mean(),
                 pl.col(f"{self.feature_col}_std").mean(),
                 pl.col(f"{self.feature_col}_pct_missing").mean(),
-            ])
+            ]
         )
         return agg
 
@@ -123,9 +150,18 @@ class SpatialEDAPipeline:
 
 if __name__ == "__main__":
     years = ["2022"]
-    feature_cols = [ "WSPD", "VHM0", "VTM02", "WDIR", "VMDR" ]
-    feature_cols = ['WSPD', 'VHM0', 'VTM02', 'corrected_VHM0', 'corrected_VTM02', 'U10', 'V10',
-    'wave_dir_sin', 'wave_dir_cos']
+    feature_cols = ["WSPD", "VHM0", "VTM02", "WDIR", "VMDR"]
+    feature_cols = [
+        "WSPD",
+        "VHM0",
+        "VTM02",
+        "corrected_VHM0",
+        "corrected_VTM02",
+        "U10",
+        "V10",
+        "wave_dir_sin",
+        "wave_dir_cos",
+    ]
     data_origin = "augmented_with_labels"
 
     for year in years:

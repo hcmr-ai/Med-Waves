@@ -8,8 +8,10 @@ import pyarrow.parquet as pq
 import torch
 
 # 📂 Configuration
-INPUT_DIR = "s3://medwav-dev-data/parquet/hourly/year=2022/"   # folder with WAVEAN*.parquet
-OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_hourly/"        # output directory
+INPUT_DIR = (
+    "s3://medwav-dev-data/parquet/hourly/year=2022/"  # folder with WAVEAN*.parquet
+)
+OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_hourly/"  # output directory
 
 # 🔧 SAVE_HOURLY option:
 #   True:  Save each hour as separate file (e.g., WAVEAN20200101_h00.pt ... _h23.pt)
@@ -23,9 +25,13 @@ SAVE_HOURLY = True
 if not OUTPUT_DIR.startswith("s3://"):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
 # 🛠️ Helper to load parquet into dense tensor (T,H,W,C)
-def load_parquet_as_tensor(path, excluded_columns=None, subsample_step=5, is_s3_input=False):
+def load_parquet_as_tensor(
+    path, excluded_columns=None, subsample_step=5, is_s3_input=False
+):
     import gc
+
     excluded_columns = excluded_columns or []
     if is_s3_input:
         # Open the S3 object to a real file-like handle for pyarrow
@@ -75,12 +81,17 @@ from multiprocessing import Pool
 
 def process_file(path):
     import gc
-    base = os.path.basename(path).replace(".parquet", "")  # Remove .parquet only, no .pt yet
+
+    base = os.path.basename(path).replace(
+        ".parquet", ""
+    )  # Remove .parquet only, no .pt yet
 
     print(f"⚙ Processing: {path}")
     is_s3_input = path.startswith("s3://")
     is_s3_output = OUTPUT_DIR.startswith("s3://")
-    tensor, feature_cols = load_parquet_as_tensor(path, excluded_columns=None, subsample_step=1, is_s3_input=is_s3_input)
+    tensor, feature_cols = load_parquet_as_tensor(
+        path, excluded_columns=None, subsample_step=1, is_s3_input=is_s3_input
+    )
     T = tensor.shape[0]
 
     if SAVE_HOURLY:
@@ -114,7 +125,11 @@ def process_file(path):
                 pass
 
             # Save hour with compression (pickle protocol 4 is more efficient)
-            data = {"tensor": hour_tensor, "feature_cols": feature_cols, "hour": hour_idx}
+            data = {
+                "tensor": hour_tensor,
+                "feature_cols": feature_cols,
+                "hour": hour_idx,
+            }
             if is_s3_output:
                 with fsspec.open(out_path, "wb") as f:
                     torch.save(data, f, pickle_protocol=4)
@@ -129,7 +144,9 @@ def process_file(path):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        result = f"Done {base}: {len([s for s in saved_files if 'saved' in s])}/{T} hours"
+        result = (
+            f"Done {base}: {len([s for s in saved_files if 'saved' in s])}/{T} hours"
+        )
         return result
     else:
         # Original: Save entire day as one file
@@ -165,6 +182,7 @@ def process_file(path):
 
         return f"Done {out_filename}"
 
+
 if __name__ == "__main__":
     if INPUT_DIR.startswith("s3://"):
         fs = fsspec.filesystem("s3")
@@ -174,10 +192,10 @@ if __name__ == "__main__":
     else:
         files = sorted(glob.glob(os.path.join(INPUT_DIR, "WAVEAN2021*.parquet")))
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Found {len(files)} total files to process")
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     skipped_count = 0
     processed_count = 0
@@ -210,12 +228,12 @@ if __name__ == "__main__":
         pool.join()
         print("✓ Worker pool closed successfully.")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Summary:")
     print(f"  Processed: {processed_count}")
     print(f"  Skipped:   {skipped_count}")
     print(f"  Total:     {len(files)}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 # if __name__ == "__main__":
 #     main()

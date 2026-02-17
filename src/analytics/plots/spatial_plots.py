@@ -41,8 +41,10 @@ def plot_spatial_feature_map(
     elif "lat" in df_pd.columns and "lon" in df_pd.columns:
         lat_col, lon_col = "lat", "lon"
     else:
-        raise ValueError("DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns")
-    
+        raise ValueError(
+            "DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns"
+        )
+
     plt.figure(figsize=(10, 8))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
@@ -60,16 +62,20 @@ def plot_spatial_feature_map(
         vmax=vmax,
     )
     plt.colorbar(sc, ax=ax, orientation="vertical", label=colorbar_label)
-    ax.set_extent([
-        df_pd[lon_col].min(),
-        df_pd[lon_col].max(),
-        df_pd[lat_col].min(),
-        df_pd[lat_col].max()
-    ], crs=ccrs.PlateCarree())
+    ax.set_extent(
+        [
+            df_pd[lon_col].min(),
+            df_pd[lon_col].max(),
+            df_pd[lat_col].min(),
+            df_pd[lat_col].max(),
+        ],
+        crs=ccrs.PlateCarree(),
+    )
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     plt.savefig(save_path, bbox_inches="tight")
     plt.close()
+
 
 def plot_spatial_feature_heatmap(
     df: pd.DataFrame,
@@ -77,7 +83,7 @@ def plot_spatial_feature_heatmap(
     output_dir: str,
     stat_name: str = "mean",
     cmap: str = "viridis",
-    label: str = ""
+    label: str = "",
 ) -> None:
     """
     Plot and save a spatial heatmap of a given statistic for a grid feature.
@@ -99,8 +105,10 @@ def plot_spatial_feature_heatmap(
     elif "lat" in df.columns and "lon" in df.columns:
         lat_col, lon_col = "lat", "lon"
     else:
-        raise ValueError("DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns")
-    
+        raise ValueError(
+            "DataFrame must contain either 'latitude'/'longitude' or 'lat'/'lon' columns"
+        )
+
     plt.figure(figsize=(12, 9))
     ax = plt.axes(projection=ccrs.PlateCarree())
     ax.coastlines()
@@ -111,9 +119,14 @@ def plot_spatial_feature_heatmap(
         cmap="viridis",
         s=10,
         alpha=0.8,
-        transform=ccrs.PlateCarree()
+        transform=ccrs.PlateCarree(),
     )
-    plt.colorbar(c, ax=ax, orientation="vertical", label=f"{stat_name.capitalize()} {feature_col} (m)")
+    plt.colorbar(
+        c,
+        ax=ax,
+        orientation="vertical",
+        label=f"{stat_name.capitalize()} {feature_col} (m)",
+    )
     title = f"{stat_name.capitalize()} {feature_col} per grid cell"
     if label:
         title += f" ({label})"

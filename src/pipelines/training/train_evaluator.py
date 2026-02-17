@@ -30,7 +30,7 @@ def save_corrector_model(corrector, output_dir: Path, corrector_name: str, run_i
         params = {
             "corrector_type": "DeltaCorrector",
             "bias_per_variable": corrector.bias_per_variable,
-            "run_id": run_id
+            "run_id": run_id,
         }
     elif isinstance(corrector, EDCDFCorrector):
         # For EDCDF, we can't easily serialize the interpolators, but we can save metadata
@@ -38,35 +38,37 @@ def save_corrector_model(corrector, output_dir: Path, corrector_name: str, run_i
             "corrector_type": "EDCDFCorrector",
             "variables": list(corrector.cdf_models.keys()),
             "run_id": run_id,
-            "note": "CDF interpolators saved in joblib file"
+            "note": "CDF interpolators saved in joblib file",
         }
     else:
-        params = {
-            "corrector_type": str(type(corrector)),
-            "run_id": run_id
-        }
+        params = {"corrector_type": str(type(corrector)), "run_id": run_id}
 
-    with open(params_path, 'w') as f:
+    with open(params_path, "w") as f:
         json.dump(params, f, indent=2, default=str)
     print(f"💾 Saved parameters to: {params_path}")
 
     return model_path, params_path
 
+
 def incremental_fit_delta_corrector(
     train_files: List[Path],
     variables: list[str],
     corrected_suffix: str = "corrected_",
-    batch_size: int = 5
+    batch_size: int = 5,
 ) -> DeltaCorrector:
     """Incrementally fit DeltaCorrector by computing running means across batches."""
     print("🔄 Incrementally fitting DeltaCorrector...")
 
     # Initialize running statistics
-    running_stats = {var: {"model_sum": 0.0, "obs_sum": 0.0, "count": 0} for var in variables}
+    running_stats = {
+        var: {"model_sum": 0.0, "obs_sum": 0.0, "count": 0} for var in variables
+    }
 
     # Process training files in batches
-    for i in tqdm(range(0, len(train_files), batch_size), desc="Training batches", unit="batch"):
-        batch_files = train_files[i:i + batch_size]
+    for i in tqdm(
+        range(0, len(train_files), batch_size), desc="Training batches", unit="batch"
+    ):
+        batch_files = train_files[i : i + batch_size]
 
         # Load and concatenate batch files
         batch_dfs = []
@@ -110,12 +112,13 @@ def incremental_fit_delta_corrector(
 
     return corrector
 
+
 def incremental_fit_edcdf_corrector(
     train_files: List[Path],
     variables: list[str],
     corrected_suffix: str = "corrected_",
     batch_size: int = 5,
-    quantile_resolution: int = 10000  # Number of quantiles for CDF approximation
+    quantile_resolution: int = 10000,  # Number of quantiles for CDF approximation
 ) -> EDCDFCorrector:
     """Memory-efficient EDCDF corrector using quantile-based CDF approximation."""
     print("🔄 Incrementally fitting EDCDFCorrector (quantile-based approach)...")
@@ -127,8 +130,10 @@ def incremental_fit_edcdf_corrector(
     total_samples = {var: 0 for var in variables}
 
     # Process training files in batches
-    for i in tqdm(range(0, len(train_files), batch_size), desc="Training batches", unit="batch"):
-        batch_files = train_files[i:i + batch_size]
+    for i in tqdm(
+        range(0, len(train_files), batch_size), desc="Training batches", unit="batch"
+    ):
+        batch_files = train_files[i : i + batch_size]
 
         # Load and concatenate batch files
         batch_dfs = []
@@ -159,20 +164,38 @@ def incremental_fit_edcdf_corrector(
                         # Update quantiles incrementally
                         if total_samples[var] == 0:
                             # First batch: compute initial quantiles
-                            quantiles[var]["model"] = np.percentile(model_values, np.linspace(0, 100, quantile_resolution))
-                            quantiles[var]["obs"] = np.percentile(obs_values, np.linspace(0, 100, quantile_resolution))
+                            quantiles[var]["model"] = np.percentile(
+                                model_values, np.linspace(0, 100, quantile_resolution)
+                            )
+                            quantiles[var]["obs"] = np.percentile(
+                                obs_values, np.linspace(0, 100, quantile_resolution)
+                            )
                         else:
                             # Subsequent batches: update quantiles using weighted approach
                             # Combine current quantiles with new data quantiles
-                            new_model_quantiles = np.percentile(model_values, np.linspace(0, 100, quantile_resolution))
-                            new_obs_quantiles = np.percentile(obs_values, np.linspace(0, 100, quantile_resolution))
+                            new_model_quantiles = np.percentile(
+                                model_values, np.linspace(0, 100, quantile_resolution)
+                            )
+                            new_obs_quantiles = np.percentile(
+                                obs_values, np.linspace(0, 100, quantile_resolution)
+                            )
 
                             # Weighted average (more weight to larger datasets)
-                            weight_old = total_samples[var] / (total_samples[var] + len(model_values))
-                            weight_new = len(model_values) / (total_samples[var] + len(model_values))
+                            weight_old = total_samples[var] / (
+                                total_samples[var] + len(model_values)
+                            )
+                            weight_new = len(model_values) / (
+                                total_samples[var] + len(model_values)
+                            )
 
-                            quantiles[var]["model"] = weight_old * quantiles[var]["model"] + weight_new * new_model_quantiles
-                            quantiles[var]["obs"] = weight_old * quantiles[var]["obs"] + weight_new * new_obs_quantiles
+                            quantiles[var]["model"] = (
+                                weight_old * quantiles[var]["model"]
+                                + weight_new * new_model_quantiles
+                            )
+                            quantiles[var]["obs"] = (
+                                weight_old * quantiles[var]["obs"]
+                                + weight_new * new_obs_quantiles
+                            )
 
                         total_samples[var] += len(model_values)
 
@@ -189,16 +212,29 @@ def incremental_fit_edcdf_corrector(
 
             # Create interpolators
             from scipy.interpolate import interp1d
-            f_model_inv = interp1d(cdf_values, model_quantiles, bounds_error=False, fill_value="extrapolate")
-            f_obs_inv = interp1d(cdf_values, obs_quantiles, bounds_error=False, fill_value="extrapolate")
-            f_model_cdf = interp1d(model_quantiles, cdf_values, bounds_error=False, fill_value=(0,1))
+
+            f_model_inv = interp1d(
+                cdf_values,
+                model_quantiles,
+                bounds_error=False,
+                fill_value="extrapolate",
+            )
+            f_obs_inv = interp1d(
+                cdf_values, obs_quantiles, bounds_error=False, fill_value="extrapolate"
+            )
+            f_model_cdf = interp1d(
+                model_quantiles, cdf_values, bounds_error=False, fill_value=(0, 1)
+            )
 
             # Store in corrector
             corrector.cdf_models[var] = (f_model_inv, f_obs_inv, f_model_cdf)
 
-            print(f"   {var}: CDF computed with {total_samples[var]:,} total samples using {quantile_resolution} quantiles")
+            print(
+                f"   {var}: CDF computed with {total_samples[var]:,} total samples using {quantile_resolution} quantiles"
+            )
 
     return corrector
+
 
 def incremental_fit_eqm_corrector(
     train_files: List[Path],
@@ -207,11 +243,11 @@ def incremental_fit_eqm_corrector(
     batch_size: int = 5,
     quantile_resolution: int = 1000,
     use_kde: bool = True,
-    max_samples_per_batch: int = 100000
+    max_samples_per_batch: int = 100000,
 ) -> EQMCorrector:
     """
     Incrementally fit EQM corrector using quantile-based approach for large datasets.
-    
+
     Args:
         train_files: List of training file paths
         variables: Variables to correct
@@ -220,27 +256,29 @@ def incremental_fit_eqm_corrector(
         quantile_resolution: Number of quantiles for CDF approximation
         use_kde: Whether to use kernel density estimation
         max_samples_per_batch: Maximum samples to use per batch (for memory efficiency)
-        
+
     Returns:
         Fitted EQM corrector
     """
     print("🔄 Incrementally fitting EQM corrector...")
-    
+
     # Initialize EQM corrector
     corrector = EQMCorrector(
         quantile_resolution=quantile_resolution,
         extrapolation_method="constant",
-        kde_bandwidth=None  # Auto bandwidth
+        kde_bandwidth=None,  # Auto bandwidth
     )
-    
+
     # Store aggregated data for each variable
     aggregated_data = {var: {"model": [], "obs": []} for var in variables}
     total_samples = {var: 0 for var in variables}
-    
+
     # Process training files in batches
-    for i in tqdm(range(0, len(train_files), batch_size), desc="Training batches", unit="batch"):
-        batch_files = train_files[i:i + batch_size]
-        
+    for i in tqdm(
+        range(0, len(train_files), batch_size), desc="Training batches", unit="batch"
+    ):
+        batch_files = train_files[i : i + batch_size]
+
         # Load and concatenate batch files
         batch_dfs = []
         for file_path in batch_files:
@@ -250,38 +288,36 @@ def incremental_fit_eqm_corrector(
             except Exception as e:
                 print(f"⚠️ Error loading {file_path}: {e}")
                 continue
-        
+
         if batch_dfs:
             batch_df = pl.concat(batch_dfs)
-            
+
             # Process each variable
             for var in variables:
                 model_col = var
                 obs_col = corrected_suffix + var
-                
+
                 if model_col in batch_df.columns and obs_col in batch_df.columns:
                     # Drop nulls for this variable
                     valid_data = batch_df.drop_nulls(subset=[model_col, obs_col])
-                    
+
                     if len(valid_data) > 0:
                         model_values = valid_data[model_col].to_numpy()
                         obs_values = valid_data[obs_col].to_numpy()
-                        
+
                         # Sample if too many values (for memory efficiency)
                         if len(model_values) > max_samples_per_batch:
                             indices = np.random.choice(
-                                len(model_values), 
-                                max_samples_per_batch, 
-                                replace=False
+                                len(model_values), max_samples_per_batch, replace=False
                             )
                             model_values = model_values[indices]
                             obs_values = obs_values[indices]
-                        
+
                         # Store data for later fitting
                         aggregated_data[var]["model"].append(model_values)
                         aggregated_data[var]["obs"].append(obs_values)
                         total_samples[var] += len(model_values)
-    
+
     # Create training DataFrame from aggregated data
     training_data = {}
     for var in variables:
@@ -289,41 +325,41 @@ def incremental_fit_eqm_corrector(
             # Concatenate all batches for this variable
             model_all = np.concatenate(aggregated_data[var]["model"])
             obs_all = np.concatenate(aggregated_data[var]["obs"])
-            
+
             training_data[var] = model_all
             training_data[corrected_suffix + var] = obs_all
-            
+
             print(f"   {var}: {total_samples[var]:,} total samples")
-    
+
     # Create DataFrame for fitting
     if training_data:
         training_df = pl.DataFrame(training_data)
-        
+
         # Fit EQM corrector
         corrector.fit(
-            training_df, 
-            variables, 
-            corrected_suffix=corrected_suffix,
-            use_kde=use_kde
+            training_df, variables, corrected_suffix=corrected_suffix, use_kde=use_kde
         )
-        
+
         # Print correction statistics
         stats = corrector.get_correction_stats()
         for var, var_stats in stats.items():
-            print(f"   {var}: bias={var_stats['bias']:.4f}, relative_bias={var_stats['bias_relative']:.1f}%")
-    
+            print(
+                f"   {var}: bias={var_stats['bias']:.4f}, relative_bias={var_stats['bias_relative']:.1f}%"
+            )
+
     return corrector
 
+
 def train_and_evaluate_corrector(
-    corrector_class: Type,               # DeltaCorrector, EDCDFCorrector, or EQMCorrector
-    train_files: List[Path],             # List of training file paths
-    test_files: List[Path],              # List of test file paths
+    corrector_class: Type,  # DeltaCorrector, EDCDFCorrector, or EQMCorrector
+    train_files: List[Path],  # List of training file paths
+    test_files: List[Path],  # List of test file paths
     comet_experiment: Experiment,
     variables: list[str],
     run_id: str,
     corrected_suffix: str = "corrected_",
-    batch_size: int = 5,                 # Number of files to process in each batch
-    **corrector_kwargs                   # Additional arguments for corrector-specific fitting
+    batch_size: int = 5,  # Number of files to process in each batch
+    **corrector_kwargs,  # Additional arguments for corrector-specific fitting
 ):
     print(f"📈 Training corrector: {corrector_class.__name__}")
     print(f"   Training files: {len(train_files)}")
@@ -337,7 +373,11 @@ def train_and_evaluate_corrector(
         )
     elif corrector_class == EDCDFCorrector:
         corrector = incremental_fit_edcdf_corrector(
-            train_files, variables, corrected_suffix, batch_size, quantile_resolution=10000
+            train_files,
+            variables,
+            corrected_suffix,
+            batch_size,
+            quantile_resolution=10000,
         )
     elif corrector_class == EQMCorrector:
         corrector = incremental_fit_eqm_corrector(
@@ -347,7 +387,9 @@ def train_and_evaluate_corrector(
         raise ValueError(f"Unsupported corrector class: {corrector_class}")
 
     # Create output directory structure
-    output_dir = Path(f"/data/tsolis/AI_project/output/experiments/{corrector_class.__name__}/{run_id}")
+    output_dir = Path(
+        f"/data/tsolis/AI_project/output/experiments/{corrector_class.__name__}/{run_id}"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate predictions and save individual files
@@ -357,8 +399,10 @@ def train_and_evaluate_corrector(
 
     total_predictions = 0
 
-    for i in tqdm(range(0, len(test_files), batch_size), desc="Prediction batches", unit="batch"):
-        batch_files = test_files[i:i + batch_size]
+    for i in tqdm(
+        range(0, len(test_files), batch_size), desc="Prediction batches", unit="batch"
+    ):
+        batch_files = test_files[i : i + batch_size]
 
         for file_path in batch_files:
             try:
@@ -378,7 +422,9 @@ def train_and_evaluate_corrector(
                 print(f"⚠️ Error processing predictions for {file_path}: {e}")
                 continue
 
-    print(f"💾 Saved {total_predictions} total predictions to: {individual_predictions_dir}")
+    print(
+        f"💾 Saved {total_predictions} total predictions to: {individual_predictions_dir}"
+    )
 
     # Save model and parameters
     model_path, params_path = save_corrector_model(
@@ -397,11 +443,11 @@ def train_and_evaluate_corrector(
         "total_predictions": total_predictions,
         "model_path": str(model_path),
         "params_path": str(params_path),
-        "individual_predictions_dir": str(individual_predictions_dir)
+        "individual_predictions_dir": str(individual_predictions_dir),
     }
 
     metadata_path = output_dir / "run_metadata.json"
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2, default=str)
     print(f"💾 Saved metadata to: {metadata_path}")
 
@@ -419,16 +465,15 @@ def train_and_evaluate_corrector(
         for var, bias in corrector.bias_per_variable.items():
             comet_experiment.log_parameter(f"bias_{var}", bias)
 
-
     print(f"✅ Run complete for {corrector_class.__name__} [Run ID: {run_id}]")
     print(f"📁 All outputs saved to: {output_dir}")
 
 
 experiment = Experiment(
-                api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-                project_name="hcmr-ai",
-                workspace="ioannisgkinis"
-            )
+    api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
+    project_name="hcmr-ai",
+    workspace="ioannisgkinis",
+)
 
 # Define data directory and patterns
 train_dir = Path("/data/tsolis/AI_project/parquet/augmented_with_labels/hourly")
@@ -471,5 +516,5 @@ train_and_evaluate_corrector(
     comet_experiment=experiment,
     variables=["VHM0", "VTM02"],
     run_id="run_edcdf_v1",
-    batch_size=5
+    batch_size=5,
 )
