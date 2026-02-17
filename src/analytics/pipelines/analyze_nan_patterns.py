@@ -389,7 +389,9 @@ def create_nan_visualizations(
     ax2.set_xlabel("Region")
 
     # Add count labels on bars
-    for bar, count, pct in zip(bars2, invalid_counts, invalid_percentages, strict=False):
+    for bar, count, pct in zip(
+        bars2, invalid_counts, invalid_percentages, strict=False
+    ):
         height = bar.get_height()
         ax2.text(
             bar.get_x() + bar.get_width() / 2.0,

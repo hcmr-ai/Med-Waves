@@ -893,11 +893,11 @@ class WaveBiasCorrector(pl.LightningModule):
         # Define sea-bin ranges (same as in config)
         # Last bin is unbounded to capture all extreme wave heights
         sea_bins = [
-            {"name": "calm", "min": 0.0, "max": 1.0},
-            {"name": "light", "min": 1.0, "max": 2.0},
-            {"name": "moderate", "min": 2.0, "max": 3.0},
-            {"name": "rough", "min": 3.0, "max": 4.0},
-            {"name": "very_rough", "min": 4.0, "max": 5.0},
+            {"name": "calm_0_1", "min": 0.0, "max": 1.0},
+            {"name": "light_1_2", "min": 1.0, "max": 2.0},
+            {"name": "moderate_2_3", "min": 2.0, "max": 3.0},
+            {"name": "rough_3_4", "min": 3.0, "max": 4.0},
+            {"name": "very_rough_4_5", "min": 4.0, "max": 5.0},
             {"name": "extreme_5_6", "min": 5.0, "max": 6.0},
             {"name": "extreme_6_7", "min": 6.0, "max": 7.0},
             {"name": "extreme_7_8", "min": 7.0, "max": 8.0},
