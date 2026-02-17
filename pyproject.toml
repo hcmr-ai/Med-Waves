@@ -51,6 +51,10 @@ opencv-python = "^4.13.0.92"
 ruff = "^0.12.1"
 pre-commit = "^4.2.0"
 
+[tool.poetry.group.test.dependencies]
+pytest = "^8.0"
+pytest-cov = "^6.0"
+
 
 [[tool.poetry.source]]
 name = "torch-stable"

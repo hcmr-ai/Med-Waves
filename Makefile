@@ -28,7 +28,7 @@ clean: ## Clean Poetry cache and virtual environment
 
 # Code quality
 lint: ## Run linting with ruff
-	poetry run ruff check .
+	poetry run ruff check src/
 
 format: ## Format code with ruff
 	poetry run ruff format .
@@ -117,3 +117,6 @@ setup: install-dev pre-commit-install ## Complete setup for new developers
 setup-full: install-poetry setup-path install-dev pre-commit-install ## Complete setup including Poetry installation
 	@echo "Full setup complete! Poetry installed and dependencies ready."
 	@echo "Run 'make help' to see available commands."
+
+test-unit: ## Run unit tests
+	poetry run python -m pytest tests/unit/
