@@ -69,9 +69,12 @@ evaluation: ## Run evaluation
 
 eval-bunet:
 	poetry run python src/pipelines/evaluation/evaluate_bunet.py
+
+eval-bunet-geographic:
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-geographic-filtering
 	
 eval-bunet-bitwise:
-	poetry run python scripts/evaluate_bunet.py --apply-binwise-correction
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-binwise-correction
 # Scripts
 run-manual-exp: ## Create manual experiment
 	poetry run python scripts/create_manual_experiment.py

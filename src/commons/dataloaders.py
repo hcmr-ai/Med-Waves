@@ -1,18 +1,23 @@
-import s3fs
-
-from src.commons.datasets.time_step_patch_dataset import TimestepPatchWaveDataset, PatchSamplingConfig
-from src.commons.datasets.cache_wave_dataset import CachedWaveDataset
-from src.commons.helpers import DNNConfig
-from src.commons.helpers import get_file_list, split_files_by_year
-from torch.utils.data import DataLoader
-from src.commons.datasets.samplers import BalancedBinBatchSampler
-from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from logging import getLogger
+
+import s3fs
+from torch.utils.data import DataLoader
+
+from src.commons.datasets.cache_wave_dataset import CachedWaveDataset
+from src.commons.datasets.samplers import BalancedBinBatchSampler
+from src.commons.datasets.time_step_patch_dataset import (
+    PatchSamplingConfig,
+    TimestepPatchWaveDataset,
+)
+from src.commons.helpers import DNNConfig, get_file_list, split_files_by_year
+from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
+
 logger = getLogger(__name__)
+
 
 def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     """Create train and validation data loaders
-    
+
     Supports region filtering via data_config["region_filter"]:
         - "atlantic": lon < -6.0
         - "mediterranean": -6.0 <= lon <= 25.0
@@ -51,14 +56,18 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     target_columns = data_config.get("target_columns", {"vhm0": "corrected_VHM0"})
     predict_bias = data_config.get("predict_bias", False)
     subsample_step = data_config.get("subsample_step", None)
-    region_filter = data_config.get("region_filter", None)  # None, "atlantic", "mediterranean", "eastern_med"
+    region_filter = data_config.get(
+        "region_filter", None
+    )  # None, "atlantic", "mediterranean", "eastern_med"
 
-    normalizer = WaveNormalizer.load_from_s3("medwav-dev-data",data_config["normalizer_path"])
+    normalizer = WaveNormalizer.load_from_s3(
+        "medwav-dev-data", data_config["normalizer_path"]
+    )
     # normalizer = WaveNormalizer.load_from_disk(data_config["normalizer_path"])
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
-    if data_config.get("use_patch_sampling") is not None:
+    if data_config.get("use_patch_sampling"):
         # Create patch sampling configuration
         patch_cfg = PatchSamplingConfig(
             patch_size=tuple(patch_size) if patch_size else (32, 96),
@@ -66,9 +75,9 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             score=data_config.get("patch_score", "p90"),
             bin_edges_m=tuple(data_config.get("bin_edges_m", [2.0, 4.0])),
             min_valid_fraction=data_config.get("min_valid_pixels", 0.6),
-            precompute_valid_anchors=data_config.get("precompute_valid_anchors", True)
+            precompute_valid_anchors=data_config.get("precompute_valid_anchors", True),
         )
-        
+
         train_dataset = TimestepPatchWaveDataset(
             train_files,
             target_columns=target_columns,
@@ -86,7 +95,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             features_order=data_config.get("features_order", None),
             add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
             seed=data_config.get("random_seed", 42),
-            return_coords=data_config.get("return_coords", True)
+            return_coords=data_config.get("return_coords", True),
+            region_filter=region_filter,
         )
     else:
         train_dataset = CachedWaveDataset(
@@ -101,7 +111,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             use_cache=data_config.get("use_cache", False),
             normalize_target=data_config.get("normalize_target", False),
             fs=fs,
-            max_cache_size=data_config.get("max_cache_size", 20)
+            max_cache_size=data_config.get("max_cache_size", 20),
+            region_filter=region_filter,
         )
 
     # if data_config.get("patch_size_deactivate", None) is not None:
@@ -114,7 +125,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     #         min_valid_fraction=data_config.get("min_valid_pixels", 0.6),
     #         precompute_valid_anchors=data_config.get("precompute_valid_anchors", True)
     #     )
-        
+
     #     val_dataset = TimestepPatchWaveDataset(
     #         val_files,
     #         target_columns=target_columns,
@@ -147,7 +158,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         use_cache=data_config.get("use_cache", False),
         normalize_target=data_config.get("normalize_target", False),
         fs=fs,
-        max_cache_size=data_config.get("max_cache_size", 20)
+        max_cache_size=data_config.get("max_cache_size", 20),
+        region_filter=region_filter,
     )
 
     # # Pre-compute wave bins and filter patches (if using patched dataset)
@@ -171,33 +183,38 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     #     else:
     #         logger.info("Using uniform random sampling (shuffle=True, no sampler)")
 
-    n_bins = len(train_dataset.patch_cfg.bin_edges_m) + 1
-
     if data_config.get("use_patch_sampling", False):
+        n_bins = len(train_dataset.patch_cfg.bin_edges_m) + 1
         n_hours = len(train_files) * 24  # or compute from len(file_paths)*24
         steps_per_epoch = int(n_hours / training_config["batch_size"])
-        
+
         # Get bin sampling distribution from config or use default
         bin_sampling_weights = data_config.get("bin_sampling_weights", None)
-        
+
         if bin_sampling_weights is not None:
             # User-specified weights: [weight_bin0, weight_bin1, weight_bin2, ...]
             total_weight = sum(bin_sampling_weights)
             bins_per_batch = []
             for bin_id, weight in enumerate(bin_sampling_weights):
-                count = int(round(weight / total_weight * training_config["batch_size"]))
+                count = int(
+                    round(weight / total_weight * training_config["batch_size"])
+                )
                 bins_per_batch.extend([bin_id] * count)
             # Adjust if rounding caused mismatch
             while len(bins_per_batch) < training_config["batch_size"]:
                 bins_per_batch.append(0)  # Add to first bin
-            bins_per_batch = bins_per_batch[:training_config["batch_size"]]  # Trim if over
+            bins_per_batch = bins_per_batch[
+                : training_config["batch_size"]
+            ]  # Trim if over
             logger.info(f"Using custom bin sampling weights: {bin_sampling_weights}")
-            logger.info(f"Resulting bins_per_batch distribution: {[bins_per_batch.count(i) for i in range(n_bins)]}")
+            logger.info(
+                f"Resulting bins_per_batch distribution: {[bins_per_batch.count(i) for i in range(n_bins)]}"
+            )
         else:
             # Default: None (equal distribution handled by BalancedBinBatchSampler)
             bins_per_batch = None
             logger.info(f"Using equal bin sampling distribution across {n_bins} bins")
-        
+
         batch_sampler = BalancedBinBatchSampler(
             dataset_len=len(train_dataset),
             n_bins=n_bins,
@@ -209,7 +226,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
 
         train_loader = DataLoader(
             train_dataset,
-            batch_sampler=batch_sampler,   # ✅ only batch_sampler
+            batch_sampler=batch_sampler,  # ✅ only batch_sampler
             num_workers=training_config["num_workers"],
             pin_memory=training_config["pin_memory"],
             persistent_workers=training_config.get(
@@ -236,7 +253,9 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         shuffle=False,
         num_workers=training_config["num_workers"],
         pin_memory=training_config["pin_memory"],
-        persistent_workers=training_config.get("persistent_workers", training_config["num_workers"] > 0),
+        persistent_workers=training_config.get(
+            "persistent_workers", training_config["num_workers"] > 0
+        ),
         prefetch_factor=None,
         sampler=None,
         # timeout=300  # 5 minute timeout for S3 loading

@@ -1,9 +1,11 @@
-from torch.utils.data import Dataset
 import random
+
 import numpy as np
-import torch
 import pyarrow.parquet as pq
 import s3fs
+import torch
+from torch.utils.data import Dataset
+
 
 class CachedWaveDataset(Dataset):
     """
@@ -25,19 +27,50 @@ class CachedWaveDataset(Dataset):
         normalize_target: Normalize target values
         fs: S3 filesystem instance
         max_cache_size: Maximum number of files to cache
+        region_filter: Region filter string ("atlantic", "mediterranean", or None)
+                      Filters pixels based on Gibraltar Strait boundary (lon=-5.5°)
 
     Returns:
         Single task: X, y_tensor, mask, vhm0
         Multi-task: X, targets_dict, mask, vhm0
     """
-    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
-    def __init__(self, file_paths,
-                 target_columns = None
-,
-                 excluded_columns=None, normalizer=None,
-                 patch_size=None, subsample_step=None, predict_bias=False,
-                 enable_profiler=False, use_cache=True, normalize_target=False, fs=None,
-                 max_cache_size=20):
+
+    FEATURES_ORDER = [
+        "VHM0",
+        "WSPD",
+        "VTM02",
+        "U10",
+        "V10",
+        "sin_hour",
+        "cos_hour",
+        "sin_doy",
+        "cos_doy",
+        "sin_month",
+        "cos_month",
+        "lat_norm",
+        "lon_norm",
+        "wave_dir_sin",
+        "wave_dir_cos",
+        "corrected_VHM0",
+        "corrected_VTM02",
+    ]
+
+    def __init__(
+        self,
+        file_paths,
+        target_columns=None,
+        excluded_columns=None,
+        normalizer=None,
+        patch_size=None,
+        subsample_step=None,
+        predict_bias=False,
+        enable_profiler=False,
+        use_cache=True,
+        normalize_target=False,
+        fs=None,
+        max_cache_size=20,
+        region_filter=None,
+    ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
         self.file_paths = file_paths
@@ -63,21 +96,89 @@ class CachedWaveDataset(Dataset):
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
         # worker-local cache with LRU eviction
         from collections import OrderedDict
+
         self._cache = OrderedDict()
         self.use_cache = use_cache
         self.max_cache_size = max_cache_size  # Number of files to keep in cache
         self.normalize_target = normalize_target
-        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        self.features_order = (
+            self.normalizer.feature_order_
+            if self.normalizer is not None
+            else self.FEATURES_ORDER
+        )
+        self.region_filter = (
+            region_filter  # Region filter: "atlantic", "mediterranean", or None
+        )
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
 
-         # Auto-detect file type (hourly vs daily)
+        # Auto-detect file type (hourly vs daily) and precompute region mask
+        self.region_mask = None
         if len(file_paths) > 0:
             print(f"Detecting file format from: {file_paths[0]}")
-            sample_tensor, _ = self._load_file_pt(file_paths[0])
-            self.is_hourly = (sample_tensor.ndim == 3)  # 3D=hourly, 4D=daily
+            sample_tensor, sample_feature_cols = self._load_file_pt(file_paths[0])
+            self.is_hourly = sample_tensor.ndim == 3  # 3D=hourly, 4D=daily
             print(f"  Tensor shape: {sample_tensor.shape}")
             print(f"  File type: {'HOURLY' if self.is_hourly else 'DAILY'}")
+
+            # Precompute spatial crop indices for region filtering
+            self.crop_h_indices = None
+            self.crop_w_indices = None
+            self.cropped_lat_grid = None
+            self.cropped_lon_grid = None
+            if self.region_filter is not None:
+                lat_idx = sample_feature_cols.index("latitude")
+                lon_idx = sample_feature_cols.index("longitude")
+
+                # Extract coordinates (same for hourly and daily)
+                if self.is_hourly:  # (H, W, C)
+                    lat_data = sample_tensor[..., lat_idx]
+                    lon_data = sample_tensor[..., lon_idx]
+                else:  # Daily (T, H, W, C) - use first timestep
+                    lat_data = sample_tensor[0, ..., lat_idx]
+                    lon_data = sample_tensor[0, ..., lon_idx]
+
+                # Gibraltar boundary
+                GIBRALTAR_LON = -5.5
+
+                # Find which columns (longitude) and rows (latitude) to keep
+                # For each column, check if ANY pixel in that column is in the target region
+                if self.region_filter == "atlantic":
+                    region_condition = lon_data < GIBRALTAR_LON
+                elif self.region_filter == "mediterranean":
+                    region_condition = lon_data >= GIBRALTAR_LON
+                else:
+                    raise ValueError(f"Unknown region_filter: {self.region_filter}")
+
+                # Find columns with at least one valid pixel in target region
+                valid_coords = (
+                    region_condition & ~torch.isnan(lat_data) & ~torch.isnan(lon_data)
+                )
+                cols_with_region = valid_coords.any(dim=0)  # Check each column
+                rows_with_region = valid_coords.any(dim=1)  # Check each row
+
+                # Get indices of columns/rows to keep
+                self.crop_w_indices = torch.where(cols_with_region)[0]
+                self.crop_h_indices = torch.where(rows_with_region)[0]
+
+                # Store cropped coordinate grids for evaluation
+                self.cropped_lat_grid = lat_data[self.crop_h_indices, :][
+                    :, self.crop_w_indices
+                ]
+                self.cropped_lon_grid = lon_data[self.crop_h_indices, :][
+                    :, self.crop_w_indices
+                ]
+
+                original_size = lat_data.shape[0] * lat_data.shape[1]
+                cropped_size = len(self.crop_h_indices) * len(self.crop_w_indices)
+                print(
+                    f"  Spatial cropping: {lat_data.shape} → ({len(self.crop_h_indices)}, {len(self.crop_w_indices)})"
+                )
+                print(
+                    f"  Removed {original_size - cropped_size} pixels ({(1 - cropped_size / original_size) * 100:.1f}% reduction)"
+                )
+                print(f"  Keeping only {self.region_filter} region")
+
             self._fs = None  # Reset after sample load
             self._cache.clear()
         else:
@@ -95,19 +196,38 @@ class CachedWaveDataset(Dataset):
             ]
             print(f"  Index map: {len(self.index_map)} samples (24 per file)")
 
+        # Log region filtering status
+        if self.region_filter is not None:
+            print("\n=== REGION FILTERING ACTIVE ===")
+            print(f"  Filtering to: {self.region_filter.upper()}")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            if self.region_filter == "atlantic":
+                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+            elif self.region_filter == "mediterranean":
+                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+            print("================================\n")
+        else:
+            print("  No region filtering (using all pixels)")
+
         if self.normalizer is not None:
-            print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
+            print(
+                f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}"
+            )
             print(f"Features order: {self.normalizer.feature_order_}")
             print(f"Features order expected: {self.FEATURES_ORDER}")
 
             print("\n=== NORMALIZER DEBUG ===")
             print(f"Target column in config: {self.target_column}")
-            print(f"Normalizer target_feature_name_: {self.normalizer.target_feature_name_}")
+            print(
+                f"Normalizer target_feature_name_: {self.normalizer.target_feature_name_}"
+            )
             print(f"Feature order: {self.normalizer.feature_order_}")
 
             if self.normalize_target and self.normalizer.feature_order_:
                 try:
-                    target_idx = self.normalizer.feature_order_.index(self.target_column)
+                    target_idx = self.normalizer.feature_order_.index(
+                        self.target_column
+                    )
                     print(f"✓ Found '{self.target_column}' at index {target_idx}")
 
                     # Check what stats exist
@@ -115,7 +235,9 @@ class CachedWaveDataset(Dataset):
                         stats = self.normalizer.stats_[target_idx]
                         if isinstance(stats, tuple):
                             mean, std = stats
-                            print(f"  Stats at index {target_idx}: mean={mean:.4f}, std={std:.4f}")
+                            print(
+                                f"  Stats at index {target_idx}: mean={mean:.4f}, std={std:.4f}"
+                            )
                         else:
                             print(f"  Stats at index {target_idx}: {type(stats)}")
 
@@ -123,9 +245,11 @@ class CachedWaveDataset(Dataset):
                         self.normalizer.target_stats_ = stats
                         print(f"✓ Set target_stats_ to index {target_idx}")
                     else:
-                        print(f"✗ Index {target_idx} not in stats_! Available: {list(self.normalizer.stats_.keys())}")
+                        print(
+                            f"✗ Index {target_idx} not in stats_! Available: {list(self.normalizer.stats_.keys())}"
+                        )
 
-                    if hasattr(stats, 'mean_') and hasattr(stats, 'scale_'):
+                    if hasattr(stats, "mean_") and hasattr(stats, "scale_"):
                         print(f"  StandardScaler mean_: {stats.mean_[0]:.4f}")
                         print(f"  StandardScaler scale_ (std): {stats.scale_[0]:.4f}")
                     else:
@@ -140,6 +264,7 @@ class CachedWaveDataset(Dataset):
         if self._fs is None:
             import os
             import time
+
             # Stagger S3 connection creation across workers to avoid thundering herd
             worker_id = os.getpid() % 8  # Simple worker ID based on PID
             if worker_id > 0:
@@ -180,9 +305,12 @@ class CachedWaveDataset(Dataset):
 
     def _load_file_pt(self, path):
         import os
+
         # Handle S3 paths
         if isinstance(path, str) and path.startswith("s3://"):
-            print(f"[Worker PID {os.getpid()}] Opening S3 file: {os.path.basename(path)}")
+            print(
+                f"[Worker PID {os.getpid()}] Opening S3 file: {os.path.basename(path)}"
+            )
             with self.fs.open(path, "rb") as f:
                 print(f"[Worker PID {os.getpid()}] File opened, loading with torch...")
                 data = torch.load(f, map_location="cpu")
@@ -227,11 +355,16 @@ class CachedWaveDataset(Dataset):
 
         tensor, feature_cols = self._get_file_tensor(path)
 
-         # Auto-detect file type (hourly vs daily)
+        # Auto-detect file type (hourly vs daily)
         if self.is_hourly:
             hour_data = tensor  # Already single hour: (H, W, C)
         else:
             hour_data = tensor[hour_idx]
+
+        # Apply spatial cropping if region filtering is enabled
+        if self.crop_h_indices is not None and self.crop_w_indices is not None:
+            # Crop to only include target region (e.g., Mediterranean only)
+            hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
 
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X
@@ -254,44 +387,62 @@ class CachedWaveDataset(Dataset):
         # Extract uncorrected version for reconstruction (use first target's uncorrected version)
         # e.g., "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
         uncorrected_column = self.target_column.replace("corrected_", "")
-        vhm0 = hour_data[..., feature_cols.index(uncorrected_column):feature_cols.index(uncorrected_column)+1]
+        vhm0 = hour_data[
+            ...,
+            feature_cols.index(uncorrected_column) : feature_cols.index(
+                uncorrected_column
+            )
+            + 1,
+        ]
 
         # Extract targets for each task
         targets = {}
         for task_name, target_col in self.target_columns.items():
             if self.predict_bias:
                 # Predict bias: corrected - uncorrected
-                corrected = hour_data[..., feature_cols.index(target_col):feature_cols.index(target_col)+1]
+                corrected = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
                 uncorr_col = target_col.replace("corrected_", "")
-                uncorr = hour_data[..., feature_cols.index(uncorr_col):feature_cols.index(uncorr_col)+1]
+                uncorr = hour_data[
+                    ...,
+                    feature_cols.index(uncorr_col) : feature_cols.index(uncorr_col) + 1,
+                ]
                 targets[task_name] = corrected - uncorr
             else:
                 # Predict corrected value directly
-                targets[task_name] = hour_data[..., feature_cols.index(target_col):feature_cols.index(target_col)+1]
+                targets[task_name] = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
 
         # Use first task's mask (all tasks should have same valid pixels)
+        # Note: Spatial cropping already removed non-target region if filtering is enabled
         first_target = targets[list(self.target_columns.keys())[0]]
         mask = ~torch.isnan(first_target)
 
         # Subsample
         if self.subsample_step is not None:
-            X = X[::self.subsample_step, ::self.subsample_step, :]
-            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            X = X[:: self.subsample_step, :: self.subsample_step, :]
+            vhm0 = vhm0[:: self.subsample_step, :: self.subsample_step, :]
             for task_name in targets:
-                targets[task_name] = targets[task_name][::self.subsample_step, ::self.subsample_step, :]
+                targets[task_name] = targets[task_name][
+                    :: self.subsample_step, :: self.subsample_step, :
+                ]
 
-         # Patch sampling
+        # Patch sampling
         if self.patch_size is not None:
             H, W, _ = X.shape
             ph, pw = self.patch_size
             if H > ph and W > pw:
                 i = random.randint(0, H - ph)
                 j = random.randint(0, W - pw)
-                X = X[i:i+ph, j:j+pw, :]
-                vhm0 = vhm0[i:i+ph, j:j+pw, :]
-                mask = mask[i:i+ph, j:j+pw, :]
+                X = X[i : i + ph, j : j + pw, :]
+                vhm0 = vhm0[i : i + ph, j : j + pw, :]
+                mask = mask[i : i + ph, j : j + pw, :]
                 for task_name in targets:
-                    targets[task_name] = targets[task_name][i:i+ph, j:j+pw, :]
+                    targets[task_name] = targets[task_name][i : i + ph, j : j + pw, :]
 
         if self.normalizer is not None:
             if self.normalize_target:
@@ -306,7 +457,9 @@ class CachedWaveDataset(Dataset):
                     if target_col in self.normalizer.feature_order_:
                         target_idx = self.normalizer.feature_order_.index(target_col)
                         if target_idx in self.normalizer.stats_:
-                            self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                            self.normalizer.target_stats_ = self.normalizer.stats_[
+                                target_idx
+                            ]
 
                     # Normalize this target with its own stats
                     _, normalized_target = self.normalizer.transform_torch(
@@ -338,3 +491,30 @@ class CachedWaveDataset(Dataset):
 
     def __len__(self):
         return len(self.index_map)
+
+    def get_coordinates(self):
+        """
+        Get coordinate grids (lat, lon) for the dataset.
+
+        Returns:
+            tuple: (lat_grid, lon_grid) as numpy arrays
+                  - If region filtering is active, returns cropped coordinates
+                  - Otherwise, returns full coordinates from first file
+        """
+        if self.cropped_lat_grid is not None and self.cropped_lon_grid is not None:
+            # Return cropped coordinates (for region filtering)
+            return self.cropped_lat_grid.numpy(), self.cropped_lon_grid.numpy()
+        else:
+            # Load coordinates from first file (no region filtering)
+            sample_tensor, sample_feature_cols = self._load_file_pt(self.file_paths[0])
+            lat_idx = sample_feature_cols.index("latitude")
+            lon_idx = sample_feature_cols.index("longitude")
+
+            if self.is_hourly:
+                lat_grid = sample_tensor[..., lat_idx].numpy()
+                lon_grid = sample_tensor[..., lon_idx].numpy()
+            else:
+                lat_grid = sample_tensor[0, ..., lat_idx].numpy()
+                lon_grid = sample_tensor[0, ..., lon_idx].numpy()
+
+            return lat_grid, lon_grid
