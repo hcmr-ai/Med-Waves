@@ -50,11 +50,13 @@ class OptimizedAzureBlobUploader:
         except AzureError as e:
             print(f"✗ Container error: {e}")
 
-    def upload_file_chunked(self,
-                           local_file_path: Path,
-                           container_name: str,
-                           blob_name: str,
-                           overwrite: bool = True) -> tuple[bool, str]:
+    def upload_file_chunked(
+        self,
+        local_file_path: Path,
+        container_name: str,
+        blob_name: str,
+        overwrite: bool = True,
+    ) -> tuple[bool, str]:
         """
         Upload file in chunks with retry logic optimized for slow connections.
         """
@@ -63,8 +65,7 @@ class OptimizedAzureBlobUploader:
         for attempt in range(max_retries):
             try:
                 blob_client = self.blob_service_client.get_blob_client(
-                    container=container_name,
-                    blob=blob_name
+                    container=container_name, blob=blob_name
                 )
 
                 # Check if blob exists and skip if not overwriting
@@ -81,10 +82,7 @@ class OptimizedAzureBlobUploader:
                 if file_size < self.block_size:
                     with open(local_file_path, "rb") as data:
                         blob_client.upload_blob(
-                            data,
-                            overwrite=overwrite,
-                            timeout=600,
-                            max_concurrency=1
+                            data, overwrite=overwrite, timeout=600, max_concurrency=1
                         )
                     return True, f"✓ {local_file_path.name}"
 
@@ -108,13 +106,13 @@ class OptimizedAzureBlobUploader:
                                     block_id=block_id_encoded,
                                     data=chunk,
                                     length=len(chunk),
-                                    timeout=300
+                                    timeout=300,
                                 )
                                 break
                             except Exception as block_error:
                                 if block_attempt == 2:
                                     raise block_error
-                                time.sleep(2 ** block_attempt)
+                                time.sleep(2**block_attempt)
 
                         block_list.append(BlobBlock(block_id=block_id_encoded))
                         block_num += 1
@@ -125,27 +123,32 @@ class OptimizedAzureBlobUploader:
 
             except AzureError as e:
                 if attempt < max_retries - 1:
-                    wait_time = min(2 ** attempt, 30)  # Cap at 30 seconds
+                    wait_time = min(2**attempt, 30)  # Cap at 30 seconds
                     time.sleep(wait_time)
                     continue
                 else:
                     error_msg = str(e)
                     if "timeout" in error_msg.lower():
-                        return False, f"✗ {local_file_path.name}: TIMEOUT (connection too slow)"
+                        return (
+                            False,
+                            f"✗ {local_file_path.name}: TIMEOUT (connection too slow)",
+                        )
                     return False, f"✗ {local_file_path.name}: {error_msg[:80]}"
             except Exception as e:
                 return False, f"✗ {local_file_path.name}: {str(e)[:80]}"
 
         return False, f"✗ {local_file_path.name}: Max retries"
 
-    def upload_directory_parallel(self,
-                                  local_directory: Path,
-                                  container_name: str,
-                                  blob_prefix: str = "",
-                                  pattern: str = "*",
-                                  recursive: bool = True,
-                                  overwrite: bool = True,
-                                  resume_file: Optional[Path] = None) -> tuple[int, int]:
+    def upload_directory_parallel(
+        self,
+        local_directory: Path,
+        container_name: str,
+        blob_prefix: str = "",
+        pattern: str = "*",
+        recursive: bool = True,
+        overwrite: bool = True,
+        resume_file: Optional[Path] = None,
+    ) -> tuple[int, int]:
         """Upload directory with parallel processing."""
 
         if not local_directory.exists():
@@ -167,7 +170,7 @@ class OptimizedAzureBlobUploader:
         # Load resume state
         uploaded_files = set()
         if resume_file and resume_file.exists():
-            with open(resume_file, 'r') as f:
+            with open(resume_file, "r") as f:
                 uploaded_files = set(json.load(f))
             print(f"✓ Resume: {len(uploaded_files)} files already uploaded")
 
@@ -175,7 +178,11 @@ class OptimizedAzureBlobUploader:
         files_to_upload = []
         for file_path in files:
             relative_path = file_path.relative_to(local_directory)
-            blob_name = str(Path(blob_prefix) / relative_path) if blob_prefix else str(relative_path)
+            blob_name = (
+                str(Path(blob_prefix) / relative_path)
+                if blob_prefix
+                else str(relative_path)
+            )
             blob_name = blob_name.replace("\\", "/")
 
             if blob_name not in uploaded_files:
@@ -185,9 +192,13 @@ class OptimizedAzureBlobUploader:
             print("✓ All files uploaded!")
             return len(uploaded_files), 0
 
-        total_size_gb = sum(f[0].stat().st_size for f in files_to_upload) / 1024 / 1024 / 1024
+        total_size_gb = (
+            sum(f[0].stat().st_size for f in files_to_upload) / 1024 / 1024 / 1024
+        )
         print(f"Uploading {len(files_to_upload)} files ({total_size_gb:.2f} GB)")
-        print(f"Workers: {self.max_workers}, Block size: {self.block_size / 1024 / 1024:.0f}MB")
+        print(
+            f"Workers: {self.max_workers}, Block size: {self.block_size / 1024 / 1024:.0f}MB"
+        )
 
         successful = len(uploaded_files)
         failed = 0
@@ -202,7 +213,7 @@ class OptimizedAzureBlobUploader:
                     file_path,
                     container_name,
                     blob_name,
-                    overwrite
+                    overwrite,
                 ): (file_path, blob_name)
                 for file_path, blob_name in files_to_upload
             }
@@ -220,18 +231,29 @@ class OptimizedAzureBlobUploader:
 
                             # Save progress every 5 files
                             if resume_file and successful % 5 == 0:
-                                with open(resume_file, 'w') as f:
+                                with open(resume_file, "w") as f:
                                     json.dump(list(uploaded_files), f)
 
                             # Show speed estimate
                             elapsed = time.time() - start_time
-                            rate = (successful - len(uploaded_files) + len(files_to_upload)) / elapsed if elapsed > 0 else 0
+                            rate = (
+                                (
+                                    successful
+                                    - len(uploaded_files)
+                                    + len(files_to_upload)
+                                )
+                                / elapsed
+                                if elapsed > 0
+                                else 0
+                            )
 
-                            pbar.set_postfix({
-                                'ok': successful,
-                                'fail': failed,
-                                'rate': f'{rate:.1f}/min'
-                            })
+                            pbar.set_postfix(
+                                {
+                                    "ok": successful,
+                                    "fail": failed,
+                                    "rate": f"{rate:.1f}/min",
+                                }
+                            )
                         else:
                             failed += 1
                             failed_files.append(message)
@@ -247,12 +269,12 @@ class OptimizedAzureBlobUploader:
 
         # Save final state
         if resume_file:
-            with open(resume_file, 'w') as f:
+            with open(resume_file, "w") as f:
                 json.dump(list(uploaded_files), f)
 
         # Summary
         if failed_files:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Failed uploads ({len(failed_files)}):")
             for msg in failed_files[:15]:
                 print(f"  {msg}")
@@ -263,7 +285,9 @@ class OptimizedAzureBlobUploader:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Optimized Azure upload for slow connections")
+    parser = argparse.ArgumentParser(
+        description="Optimized Azure upload for slow connections"
+    )
     parser.add_argument("--directory", "-d", required=True, help="Directory to upload")
     parser.add_argument("--container", "-c", required=True, help="Container name")
     parser.add_argument("--prefix", "-p", default="", help="Blob prefix")
@@ -271,7 +295,9 @@ def main():
     parser.add_argument("--no-recursive", action="store_true")
     parser.add_argument("--no-overwrite", action="store_true")
     parser.add_argument("--create-container", action="store_true")
-    parser.add_argument("--workers", "-w", type=int, default=5, help="Parallel workers (default: 5)")
+    parser.add_argument(
+        "--workers", "-w", type=int, default=5, help="Parallel workers (default: 5)"
+    )
     parser.add_argument("--resume-file", type=str)
 
     args = parser.parse_args()
@@ -287,7 +313,11 @@ def main():
         if args.create_container:
             uploader.create_container_if_not_exists(args.container)
 
-        resume_file = Path(args.resume_file) if args.resume_file else Path(f".resume_{args.container.replace('/', '_')}.json")
+        resume_file = (
+            Path(args.resume_file)
+            if args.resume_file
+            else Path(f".resume_{args.container.replace('/', '_')}.json")
+        )
 
         start = time.time()
         successful, failed = uploader.upload_directory_parallel(
@@ -297,16 +327,16 @@ def main():
             pattern=args.pattern,
             recursive=not args.no_recursive,
             overwrite=not args.no_overwrite,
-            resume_file=resume_file
+            resume_file=resume_file,
         )
 
         elapsed = time.time() - start
 
-        print(f"\n{'='*60}")
-        print(f"Summary: {successful} ok, {failed} failed, {elapsed/60:.1f} min")
+        print(f"\n{'=' * 60}")
+        print(f"Summary: {successful} ok, {failed} failed, {elapsed / 60:.1f} min")
         if successful > 0:
-            print(f"Average: {successful/(elapsed/60):.1f} files/min")
-        print(f"{'='*60}")
+            print(f"Average: {successful / (elapsed / 60):.1f} files/min")
+        print(f"{'=' * 60}")
 
         if failed == 0 and resume_file.exists():
             resume_file.unlink()

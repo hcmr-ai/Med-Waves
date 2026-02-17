@@ -63,12 +63,23 @@ def convert_netcdf_to_parquet_hourly(netcdf_file_path) -> pl.DataFrame:
 
     return pl_df
 
-def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry_run: bool = False, concurrency: int = 1):
+
+def process_all_lazy(
+    degraded_dir: str,
+    corrected_dir: str,
+    output_dir: str,
+    dry_run: bool = False,
+    concurrency: int = 1,
+):
     is_s3_degraded = degraded_dir.startswith("s3://")
     is_s3_corrected = corrected_dir.startswith("s3://")
     is_s3_output = output_dir.startswith("s3://")
 
-    fs = fsspec.filesystem("s3") if (is_s3_degraded or is_s3_corrected or is_s3_output) else None
+    fs = (
+        fsspec.filesystem("s3")
+        if (is_s3_degraded or is_s3_corrected or is_s3_output)
+        else None
+    )
 
     # Prepare output directory only for local paths
     if not dry_run and not is_s3_output:
@@ -87,7 +98,11 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
         names_parquet = [f.name for f in files_parquet]
         names_netcdf = [f.name for f in files_netcdf]
 
-    mode = "parquet" if len(names_parquet) > 0 else ("netcdf" if len(names_netcdf) > 0 else None)
+    mode = (
+        "parquet"
+        if len(names_parquet) > 0
+        else ("netcdf" if len(names_netcdf) > 0 else None)
+    )
     if mode is None:
         print("Found 0 files to process under degraded directory.")
         return
@@ -112,13 +127,22 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                 corrected_exists = Path(corrected_path).exists()
 
             if not corrected_exists:
-                return file_name, False, "corrected file not found", time.time() - start_time
+                return (
+                    file_name,
+                    False,
+                    "corrected file not found",
+                    time.time() - start_time,
+                )
 
             # Determine output file name and skip if already exists in output_dir
             if mode == "parquet":
                 out_file_name = file_name
             else:
-                out_file_name = file_name[:-3] + ".parquet" if file_name.endswith(".nc") else (file_name + ".parquet")
+                out_file_name = (
+                    file_name[:-3] + ".parquet"
+                    if file_name.endswith(".nc")
+                    else (file_name + ".parquet")
+                )
 
             if is_s3_output:
                 target_path = output_dir.rstrip("/") + f"/{out_file_name}"
@@ -138,10 +162,12 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                 df_deg = df_deg_pl.lazy()
                 df_cor = df_cor_pl.lazy()
 
-            df_cor_labels = df_cor.select([
-                pl.col("VHM0").alias("corrected_VHM0"),
-                pl.col("VTM02").alias("corrected_VTM02")
-            ])
+            df_cor_labels = df_cor.select(
+                [
+                    pl.col("VHM0").alias("corrected_VHM0"),
+                    pl.col("VTM02").alias("corrected_VTM02"),
+                ]
+            )
 
             df_combined = pl.concat([df_deg, df_cor_labels], how="horizontal")
             df_aug = add_features_lazy(df_combined)
@@ -171,7 +197,9 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                 tqdm.write(f"✅ Finished {fname} in {dur:.2f}s")
             else:
                 if msg == "dry-run":
-                    tqdm.write(f"ℹ️ Dry-run: would write {(output_dir.rstrip('/') + '/' + (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname)) if is_s3_output else str(Path(output_dir) / (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname))}")
+                    tqdm.write(
+                        f"ℹ️ Dry-run: would write {(output_dir.rstrip('/') + '/' + (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname)) if is_s3_output else str(Path(output_dir) / (fname[:-3] + '.parquet' if fname.endswith('.nc') else fname))}"
+                    )
                 elif msg == "corrected file not found":
                     tqdm.write(f"⚠️  Skipping {fname} – corrected file not found.")
                 elif msg == "exists":
@@ -187,8 +215,14 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
                     if ok and msg == "ok":
                         tqdm.write(f"✅ Finished {fname} in {dur:.2f}s")
                     elif ok and msg == "dry-run":
-                        out_name = fname[:-3] + ".parquet" if fname.endswith(".nc") else fname
-                        target_desc = (output_dir.rstrip("/") + f"/{out_name}") if is_s3_output else str(Path(output_dir) / out_name)
+                        out_name = (
+                            fname[:-3] + ".parquet" if fname.endswith(".nc") else fname
+                        )
+                        target_desc = (
+                            (output_dir.rstrip("/") + f"/{out_name}")
+                            if is_s3_output
+                            else str(Path(output_dir) / out_name)
+                        )
                         tqdm.write(f"ℹ️ Dry-run: would write {target_desc}")
                     elif msg == "corrected file not found":
                         tqdm.write(f"⚠️  Skipping {fname} – corrected file not found.")
@@ -208,11 +242,25 @@ def main():
     Supports both local paths and S3 URIs (s3://bucket/prefix).
     """
     parser = argparse.ArgumentParser(description="Augment parquet features with labels")
-    parser.add_argument("--degraded-dir", required=False, default="s3://medwav-dev-data/raw/without_reduced/year=2020")
-    parser.add_argument("--corrected-dir", required=False, default="s3://medwav-dev-data/raw/with_reduced/year=2020")
-    parser.add_argument("--output-dir", required=False, default="s3://medwav-dev-data/parquet/hourly/year=2020")
+    parser.add_argument(
+        "--degraded-dir",
+        required=False,
+        default="s3://medwav-dev-data/raw/without_reduced/year=2020",
+    )
+    parser.add_argument(
+        "--corrected-dir",
+        required=False,
+        default="s3://medwav-dev-data/raw/with_reduced/year=2020",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=False,
+        default="s3://medwav-dev-data/parquet/hourly/year=2020",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Don't write outputs")
-    parser.add_argument("--concurrency", type=int, default=4, help="Number of parallel workers")
+    parser.add_argument(
+        "--concurrency", type=int, default=4, help="Number of parallel workers"
+    )
     args = parser.parse_args()
 
     process_all_lazy(

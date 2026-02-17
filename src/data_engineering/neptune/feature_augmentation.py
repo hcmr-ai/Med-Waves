@@ -7,76 +7,109 @@ from tqdm import tqdm
 
 
 def add_features(df: pl.DataFrame) -> pl.DataFrame:
-    wind_dir_rad = df['WDIR'] * np.pi / 180
-    wave_dir_rad = df['VMDR'] * np.pi / 180
+    wind_dir_rad = df["WDIR"] * np.pi / 180
+    wave_dir_rad = df["VMDR"] * np.pi / 180
 
-    df = df.with_columns([
-        (df['WSPD'] * wind_dir_rad.sin()).alias('U10'),
-        (df['WSPD'] * wind_dir_rad.cos()).alias('V10'),
-        wave_dir_rad.sin().alias('wave_dir_sin'),
-        wave_dir_rad.cos().alias('wave_dir_cos'),
-        pl.col("time").cast(pl.Datetime).alias("timestamp")
-    ])
+    df = df.with_columns(
+        [
+            (df["WSPD"] * wind_dir_rad.sin()).alias("U10"),
+            (df["WSPD"] * wind_dir_rad.cos()).alias("V10"),
+            wave_dir_rad.sin().alias("wave_dir_sin"),
+            wave_dir_rad.cos().alias("wave_dir_cos"),
+            pl.col("time").cast(pl.Datetime).alias("timestamp"),
+        ]
+    )
 
     # Time encodings
-    df = df.with_columns([
-        (2 * np.pi * df["timestamp"].dt.hour() / 24).sin().alias("sin_hour"),
-        (2 * np.pi * df["timestamp"].dt.hour() / 24).cos().alias("cos_hour"),
-        (2 * np.pi * df["timestamp"].dt.month() / 12).sin().alias("sin_month"),
-        (2 * np.pi * df["timestamp"].dt.month() / 12).cos().alias("cos_month"),
-        (2 * np.pi * df["timestamp"].dt.ordinal_day() / 365.0).sin().alias("sin_doy"),
-        (2 * np.pi * df["timestamp"].dt.ordinal_day() / 365.0).cos().alias("cos_doy"),
-    ])
+    df = df.with_columns(
+        [
+            (2 * np.pi * df["timestamp"].dt.hour() / 24).sin().alias("sin_hour"),
+            (2 * np.pi * df["timestamp"].dt.hour() / 24).cos().alias("cos_hour"),
+            (2 * np.pi * df["timestamp"].dt.month() / 12).sin().alias("sin_month"),
+            (2 * np.pi * df["timestamp"].dt.month() / 12).cos().alias("cos_month"),
+            (2 * np.pi * df["timestamp"].dt.ordinal_day() / 365.0)
+            .sin()
+            .alias("sin_doy"),
+            (2 * np.pi * df["timestamp"].dt.ordinal_day() / 365.0)
+            .cos()
+            .alias("cos_doy"),
+        ]
+    )
 
     # Normalize lat/lon
-    lat_norm = (df["latitude"] - df["latitude"].min()) / (df["latitude"].max() - df["latitude"].min())
-    lon_norm = (df["longitude"] - df["longitude"].min()) / (df["longitude"].max() - df["longitude"].min())
+    lat_norm = (df["latitude"] - df["latitude"].min()) / (
+        df["latitude"].max() - df["latitude"].min()
+    )
+    lon_norm = (df["longitude"] - df["longitude"].min()) / (
+        df["longitude"].max() - df["longitude"].min()
+    )
 
-    df = df.with_columns([
-        lat_norm.alias("lat_norm"),
-        lon_norm.alias("lon_norm")
-    ])
+    df = df.with_columns([lat_norm.alias("lat_norm"), lon_norm.alias("lon_norm")])
 
     return df
 
+
 def add_features_lazy(df: pl.LazyFrame) -> pl.LazyFrame:
     # Wind & wave directions (radians)
-    wind_dir_rad = pl.col('WDIR') * np.pi / 180
-    wave_dir_rad = pl.col('VMDR') * np.pi / 180
+    wind_dir_rad = pl.col("WDIR") * np.pi / 180
+    wave_dir_rad = pl.col("VMDR") * np.pi / 180
 
-    df = df.with_columns([
-        (pl.col('WSPD') * wind_dir_rad.sin()).alias('U10'),
-        (pl.col('WSPD') * wind_dir_rad.cos()).alias('V10'),
-        wave_dir_rad.sin().alias('wave_dir_sin'),
-        wave_dir_rad.cos().alias('wave_dir_cos'),
-        pl.col("time").cast(pl.Datetime).alias("timestamp")
-    ])
+    df = df.with_columns(
+        [
+            (pl.col("WSPD") * wind_dir_rad.sin()).alias("U10"),
+            (pl.col("WSPD") * wind_dir_rad.cos()).alias("V10"),
+            wave_dir_rad.sin().alias("wave_dir_sin"),
+            wave_dir_rad.cos().alias("wave_dir_cos"),
+            pl.col("time").cast(pl.Datetime).alias("timestamp"),
+        ]
+    )
 
     # Cyclic time encodings
-    df = df.with_columns([
-        (2 * np.pi * pl.col("timestamp").dt.hour() / 24).sin().alias("sin_hour"),
-        (2 * np.pi * pl.col("timestamp").dt.hour() / 24).cos().alias("cos_hour"),
-        (2 * np.pi * pl.col("timestamp").dt.ordinal_day() / 365.0).sin().alias("sin_doy"),
-        (2 * np.pi * pl.col("timestamp").dt.ordinal_day() / 365.0).cos().alias("cos_doy"),
-        (2 * np.pi * pl.col("timestamp").dt.month() / 12.0).sin().alias("sin_month"),
-        (2 * np.pi * pl.col("timestamp").dt.month() / 12.0).cos().alias("cos_month"),
-    ])
+    df = df.with_columns(
+        [
+            (2 * np.pi * pl.col("timestamp").dt.hour() / 24).sin().alias("sin_hour"),
+            (2 * np.pi * pl.col("timestamp").dt.hour() / 24).cos().alias("cos_hour"),
+            (2 * np.pi * pl.col("timestamp").dt.ordinal_day() / 365.0)
+            .sin()
+            .alias("sin_doy"),
+            (2 * np.pi * pl.col("timestamp").dt.ordinal_day() / 365.0)
+            .cos()
+            .alias("cos_doy"),
+            (2 * np.pi * pl.col("timestamp").dt.month() / 12.0)
+            .sin()
+            .alias("sin_month"),
+            (2 * np.pi * pl.col("timestamp").dt.month() / 12.0)
+            .cos()
+            .alias("cos_month"),
+        ]
+    )
 
     # Normalize lat/lon lazily (min/max per file)
-    lat_norm = (pl.col("latitude") - pl.col("latitude").min()) / (pl.col("latitude").max() - pl.col("latitude").min())
-    lon_norm = (pl.col("longitude") - pl.col("longitude").min()) / (pl.col("longitude").max() - pl.col("longitude").min())
+    lat_norm = (pl.col("latitude") - pl.col("latitude").min()) / (
+        pl.col("latitude").max() - pl.col("latitude").min()
+    )
+    lon_norm = (pl.col("longitude") - pl.col("longitude").min()) / (
+        pl.col("longitude").max() - pl.col("longitude").min()
+    )
 
-    df = df.with_columns([
-        lat_norm.alias("lat_norm"),
-        lon_norm.alias("lon_norm")
-    ])
+    df = df.with_columns([lat_norm.alias("lat_norm"), lon_norm.alias("lon_norm")])
 
-    float32_feats = ["sin_hour", "cos_hour", "sin_doy", "cos_doy", "sin_month", "cos_month"]
+    float32_feats = [
+        "sin_hour",
+        "cos_hour",
+        "sin_doy",
+        "cos_doy",
+        "sin_month",
+        "cos_month",
+    ]
     df = df.with_columns([pl.col(f).cast(pl.Float32) for f in float32_feats])
 
     return df
 
-def process_all(degraded_dir: str, corrected_dir: str, output_dir: str, dry_run: bool = False):
+
+def process_all(
+    degraded_dir: str, corrected_dir: str, output_dir: str, dry_run: bool = False
+):
     degraded_dir = Path(degraded_dir)
     corrected_dir = Path(corrected_dir)
     output_dir = Path(output_dir)
@@ -105,10 +138,12 @@ def process_all(degraded_dir: str, corrected_dir: str, output_dir: str, dry_run:
             #     df_cor["VTM02"].alias("corrected_VTM02"),
             # ])
             # lazy
-            df_cor_labels = df_cor.select([
-                pl.col("VHM0").alias("corrected_VHM0"),
-                pl.col("VTM02").alias("corrected_VTM02")
-            ])
+            df_cor_labels = df_cor.select(
+                [
+                    pl.col("VHM0").alias("corrected_VHM0"),
+                    pl.col("VTM02").alias("corrected_VTM02"),
+                ]
+            )
             df_combined = pl.concat([df_deg, df_cor_labels], how="horizontal")
 
             df_aug = add_features_lazy(df_combined)
@@ -122,7 +157,9 @@ def process_all(degraded_dir: str, corrected_dir: str, output_dir: str, dry_run:
     print("✅ Dry-run complete." if dry_run else "✅ All files processed.")
 
 
-def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry_run: bool = False):
+def process_all_lazy(
+    degraded_dir: str, corrected_dir: str, output_dir: str, dry_run: bool = False
+):
     degraded_dir = Path(degraded_dir)
     corrected_dir = Path(corrected_dir)
     output_dir = Path(output_dir)
@@ -146,10 +183,12 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
             df_deg = pl.scan_parquet(str(file))
             df_cor = pl.scan_parquet(str(corrected_file))
 
-            df_cor_labels = df_cor.select([
-                pl.col("VHM0").alias("corrected_VHM0"),
-                pl.col("VTM02").alias("corrected_VTM02")
-            ])
+            df_cor_labels = df_cor.select(
+                [
+                    pl.col("VHM0").alias("corrected_VHM0"),
+                    pl.col("VTM02").alias("corrected_VTM02"),
+                ]
+            )
 
             df_combined = pl.concat([df_deg, df_cor_labels], how="horizontal")
             df_aug = add_features_lazy(df_combined)
@@ -168,11 +207,12 @@ def process_all_lazy(degraded_dir: str, corrected_dir: str, output_dir: str, dry
 
     print("🏁 All files processed." if not dry_run else "✅ Dry-run complete.")
 
+
 # --- Run ---
 if __name__ == "__main__":
     process_all_lazy(
         degraded_dir="/data/tsolis/AI_project/parquet/without_reduced/hourly",
         corrected_dir="/data/tsolis/AI_project/parquet/with_reduced/hourly",
         output_dir="/data/tsolis/AI_project/parquet/augmented_with_labels/hourly",
-        dry_run=False
+        dry_run=False,
     )

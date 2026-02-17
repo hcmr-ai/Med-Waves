@@ -7,7 +7,9 @@ import xarray as xr
 from tqdm import tqdm
 
 
-def convert_netcdf_to_parquet_hourly(netcdf_file_path: Path, output_dir: Path, log_steps: bool = False) -> None:
+def convert_netcdf_to_parquet_hourly(
+    netcdf_file_path: Path, output_dir: Path, log_steps: bool = False
+) -> None:
     """
     Convert a NetCDF file into a flat hourly Parquet file using Polars.
 

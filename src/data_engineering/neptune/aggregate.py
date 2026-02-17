@@ -4,9 +4,7 @@ import polars as pl
 
 
 def aggregate_hourly_mean(
-    year: str,
-    main_parquet_data_path: str,
-    exclude_cols: set | None = None
+    year: str, main_parquet_data_path: str, exclude_cols: set | None = None
 ):
     """
     Aggregates the hourly mean for all columns in the specified Parquet files for a given year, excluding the columns 'time', 'latitude', and 'longitude'.
@@ -46,7 +44,9 @@ def aggregate_hourly_mean(
     if data_path.exists():
         print(f"File {data_path} already exists. Skipping aggregation.")
     else:
-        print(f"Loading raw data from {parquet_files_path} and aggregating hourly means...")
+        print(
+            f"Loading raw data from {parquet_files_path} and aggregating hourly means..."
+        )
         ts_scanned = pl.scan_parquet(parquet_files_path)
         ts_schema = ts_scanned.collect_schema()
         agg_cols = [col for col in ts_schema if col not in exclude_cols]
@@ -54,8 +54,7 @@ def aggregate_hourly_mean(
 
         agg_exprs = [pl.col(col).mean().alias(f"{col}_mean") for col in agg_cols]
         ts_df = (
-            ts_scanned
-            .drop_nulls(cols_to_check)
+            ts_scanned.drop_nulls(cols_to_check)
             .group_by("time")
             .agg(agg_exprs)
             .sort("time")
@@ -67,6 +66,10 @@ def aggregate_hourly_mean(
 
     print("Data aggregation process completed.")
 
+
 if __name__ == "__main__":
     for year in ["2023"]:
-        aggregate_hourly_mean(year=year, main_parquet_data_path="/data/tsolis/AI_project/parquet/augmented_with_labels")
+        aggregate_hourly_mean(
+            year=year,
+            main_parquet_data_path="/data/tsolis/AI_project/parquet/augmented_with_labels",
+        )

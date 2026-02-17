@@ -22,10 +22,13 @@ from tqdm import tqdm
 class ParallelAzureBlobUploader:
     """Handle parallel uploads to Azure Blob Storage."""
 
-    def __init__(self, connection_string: Optional[str] = None,
-                 account_name: Optional[str] = None,
-                 account_key: Optional[str] = None,
-                 max_workers: int = 10):
+    def __init__(
+        self,
+        connection_string: Optional[str] = None,
+        account_name: Optional[str] = None,
+        account_key: Optional[str] = None,
+        max_workers: int = 10,
+    ):
         """
         Initialize the Azure Blob uploader with parallel support.
 
@@ -36,12 +39,13 @@ class ParallelAzureBlobUploader:
             max_workers: Maximum number of parallel upload threads
         """
         if connection_string:
-            self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+            self.blob_service_client = BlobServiceClient.from_connection_string(
+                connection_string
+            )
         elif account_name and account_key:
             account_url = f"https://{account_name}.blob.core.windows.net"
             self.blob_service_client = BlobServiceClient(
-                account_url=account_url,
-                credential=account_key
+                account_url=account_url, credential=account_key
             )
         else:
             raise ValueError(
@@ -63,13 +67,15 @@ class ParallelAzureBlobUploader:
             print(f"✗ Error creating container: {e}")
             raise
 
-    def upload_file_with_retry(self,
-                                local_file_path: Path,
-                                container_name: str,
-                                blob_name: str,
-                                overwrite: bool = True,
-                                max_retries: int = 3,
-                                timeout: int = 600) -> tuple[bool, str]:
+    def upload_file_with_retry(
+        self,
+        local_file_path: Path,
+        container_name: str,
+        blob_name: str,
+        overwrite: bool = True,
+        max_retries: int = 3,
+        timeout: int = 600,
+    ) -> tuple[bool, str]:
         """
         Upload a single file with retry logic.
 
@@ -79,8 +85,7 @@ class ParallelAzureBlobUploader:
         for attempt in range(max_retries):
             try:
                 blob_client = self.blob_service_client.get_blob_client(
-                    container=container_name,
-                    blob=blob_name
+                    container=container_name, blob=blob_name
                 )
 
                 with open(local_file_path, "rb") as data:
@@ -88,14 +93,14 @@ class ParallelAzureBlobUploader:
                         data,
                         overwrite=overwrite,
                         timeout=timeout,
-                        max_concurrency=4  # Parallel block uploads for large files
+                        max_concurrency=4,  # Parallel block uploads for large files
                     )
 
                 return True, f"✓ {local_file_path.name}"
 
             except AzureError as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
+                    wait_time = 2**attempt  # Exponential backoff
                     time.sleep(wait_time)
                     continue
                 else:
@@ -105,14 +110,16 @@ class ParallelAzureBlobUploader:
 
         return False, f"✗ {local_file_path.name}: Max retries exceeded"
 
-    def upload_directory_parallel(self,
-                                   local_directory: Path,
-                                   container_name: str,
-                                   blob_prefix: str = "",
-                                   pattern: str = "*",
-                                   recursive: bool = True,
-                                   overwrite: bool = True,
-                                   resume_file: Optional[Path] = None) -> tuple[int, int]:
+    def upload_directory_parallel(
+        self,
+        local_directory: Path,
+        container_name: str,
+        blob_prefix: str = "",
+        pattern: str = "*",
+        recursive: bool = True,
+        overwrite: bool = True,
+        resume_file: Optional[Path] = None,
+    ) -> tuple[int, int]:
         """
         Upload directory with parallel processing.
 
@@ -138,7 +145,7 @@ class ParallelAzureBlobUploader:
         # Load resume state
         uploaded_files = set()
         if resume_file and resume_file.exists():
-            with open(resume_file, 'r') as f:
+            with open(resume_file, "r") as f:
                 uploaded_files = set(json.load(f))
             print(f"✓ Loaded resume file: {len(uploaded_files)} files already uploaded")
 
@@ -146,7 +153,11 @@ class ParallelAzureBlobUploader:
         files_to_upload = []
         for file_path in files:
             relative_path = file_path.relative_to(local_directory)
-            blob_name = str(Path(blob_prefix) / relative_path) if blob_prefix else str(relative_path)
+            blob_name = (
+                str(Path(blob_prefix) / relative_path)
+                if blob_prefix
+                else str(relative_path)
+            )
             blob_name = blob_name.replace("\\", "/")
 
             if blob_name not in uploaded_files:
@@ -156,7 +167,9 @@ class ParallelAzureBlobUploader:
             print("✓ All files already uploaded!")
             return len(uploaded_files), 0
 
-        print(f"Found {len(files_to_upload)} files to upload ({len(uploaded_files)} already done)")
+        print(
+            f"Found {len(files_to_upload)} files to upload ({len(uploaded_files)} already done)"
+        )
 
         # Calculate total size
         total_size = sum(f[0].stat().st_size for f in files_to_upload)
@@ -175,13 +188,15 @@ class ParallelAzureBlobUploader:
                     file_path,
                     container_name,
                     blob_name,
-                    overwrite
+                    overwrite,
                 ): (file_path, blob_name)
                 for file_path, blob_name in files_to_upload
             }
 
             # Process completed tasks with progress bar
-            with tqdm(total=len(files_to_upload), desc="Uploading", unit="file") as pbar:
+            with tqdm(
+                total=len(files_to_upload), desc="Uploading", unit="file"
+            ) as pbar:
                 for future in as_completed(future_to_file):
                     file_path, blob_name = future_to_file[future]
                     try:
@@ -193,7 +208,7 @@ class ParallelAzureBlobUploader:
 
                             # Save resume state periodically (every 10 files)
                             if resume_file and successful % 10 == 0:
-                                with open(resume_file, 'w') as f:
+                                with open(resume_file, "w") as f:
                                     json.dump(list(uploaded_files), f)
                         else:
                             failed += 1
@@ -201,10 +216,7 @@ class ParallelAzureBlobUploader:
                             tqdm.write(message)
 
                         pbar.update(1)
-                        pbar.set_postfix({
-                            'success': successful,
-                            'failed': failed
-                        })
+                        pbar.set_postfix({"success": successful, "failed": failed})
 
                     except Exception as e:
                         failed += 1
@@ -214,7 +226,7 @@ class ParallelAzureBlobUploader:
 
         # Save final resume state
         if resume_file:
-            with open(resume_file, 'w') as f:
+            with open(resume_file, "w") as f:
                 json.dump(list(uploaded_files), f)
             print(f"\n✓ Resume file saved: {resume_file}")
 
@@ -229,10 +241,14 @@ class ParallelAzureBlobUploader:
 
         return successful, failed
 
-    def list_blobs(self, container_name: str, prefix: Optional[str] = None) -> list[str]:
+    def list_blobs(
+        self, container_name: str, prefix: Optional[str] = None
+    ) -> list[str]:
         """List all blobs in a container."""
         try:
-            container_client = self.blob_service_client.get_container_client(container_name)
+            container_client = self.blob_service_client.get_container_client(
+                container_name
+            )
             blobs = container_client.list_blobs(name_starts_with=prefix)
             return [blob.name for blob in blobs]
         except AzureError as e:
@@ -244,53 +260,64 @@ def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="Parallel upload to Azure Blob Storage",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("--directory", "-d", type=str, required=True,
-                       help="Path to directory to upload")
-    parser.add_argument("--container", "-c", type=str, required=True,
-                       help="Azure container name")
-    parser.add_argument("--prefix", "-p", type=str, default="",
-                       help="Blob prefix/folder path")
-    parser.add_argument("--pattern", type=str, default="*",
-                       help="File pattern to match (default: *)")
-    parser.add_argument("--no-recursive", action="store_true",
-                       help="Don't recurse into subdirectories")
-    parser.add_argument("--no-overwrite", action="store_true",
-                       help="Don't overwrite existing blobs")
-    parser.add_argument("--create-container", action="store_true",
-                       help="Create container if it doesn't exist")
-    parser.add_argument("--workers", "-w", type=int, default=10,
-                       help="Number of parallel workers (default: 10)")
-    parser.add_argument("--resume-file", type=str,
-                       help="Path to resume file (auto-generated if not specified)")
-    parser.add_argument("--connection-string", type=str,
-                       help="Azure Storage connection string")
-    parser.add_argument("--account-name", type=str,
-                       help="Azure Storage account name")
-    parser.add_argument("--account-key", type=str,
-                       help="Azure Storage account key")
+    parser.add_argument(
+        "--directory", "-d", type=str, required=True, help="Path to directory to upload"
+    )
+    parser.add_argument(
+        "--container", "-c", type=str, required=True, help="Azure container name"
+    )
+    parser.add_argument(
+        "--prefix", "-p", type=str, default="", help="Blob prefix/folder path"
+    )
+    parser.add_argument(
+        "--pattern", type=str, default="*", help="File pattern to match (default: *)"
+    )
+    parser.add_argument(
+        "--no-recursive", action="store_true", help="Don't recurse into subdirectories"
+    )
+    parser.add_argument(
+        "--no-overwrite", action="store_true", help="Don't overwrite existing blobs"
+    )
+    parser.add_argument(
+        "--create-container",
+        action="store_true",
+        help="Create container if it doesn't exist",
+    )
+    parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=10,
+        help="Number of parallel workers (default: 10)",
+    )
+    parser.add_argument(
+        "--resume-file",
+        type=str,
+        help="Path to resume file (auto-generated if not specified)",
+    )
+    parser.add_argument(
+        "--connection-string", type=str, help="Azure Storage connection string"
+    )
+    parser.add_argument("--account-name", type=str, help="Azure Storage account name")
+    parser.add_argument("--account-key", type=str, help="Azure Storage account key")
 
     args = parser.parse_args()
 
     # Get credentials
-    connection_string = (
-        args.connection_string or
-        os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    connection_string = args.connection_string or os.getenv(
+        "AZURE_STORAGE_CONNECTION_STRING"
     )
-    account_name = (
-        args.account_name or
-        os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
-    )
-    account_key = (
-        args.account_key or
-        os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
-    )
+    account_name = args.account_name or os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    account_key = args.account_key or os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 
     if not connection_string and not (account_name and account_key):
         print("✗ Error: Azure credentials not provided")
-        print("   Set AZURE_STORAGE_CONNECTION_STRING or (AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY)")
+        print(
+            "   Set AZURE_STORAGE_CONNECTION_STRING or (AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY)"
+        )
         sys.exit(1)
 
     try:
@@ -299,7 +326,7 @@ def main():
             connection_string=connection_string,
             account_name=account_name,
             account_key=account_key,
-            max_workers=args.workers
+            max_workers=args.workers,
         )
 
         # Create container if requested
@@ -312,7 +339,7 @@ def main():
             resume_file = Path(args.resume_file)
         else:
             # Auto-generate resume file name
-            safe_container_name = args.container.replace('/', '_')
+            safe_container_name = args.container.replace("/", "_")
             resume_file = Path(f".azure_upload_resume_{safe_container_name}.json")
 
         print(f"Using {args.workers} parallel workers")
@@ -329,19 +356,19 @@ def main():
             pattern=args.pattern,
             recursive=not args.no_recursive,
             overwrite=not args.no_overwrite,
-            resume_file=resume_file
+            resume_file=resume_file,
         )
 
         elapsed_time = time.time() - start_time
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print("Upload Summary:")
         print(f"  Successful: {successful}")
         print(f"  Failed: {failed}")
         print(f"  Time: {elapsed_time / 60:.1f} minutes")
         if successful > 0:
             print(f"  Speed: {successful / (elapsed_time / 60):.1f} files/min")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Clean up resume file if all succeeded
         if failed == 0 and resume_file.exists():

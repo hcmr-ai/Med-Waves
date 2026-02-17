@@ -1,4 +1,5 @@
 import logging
+
 import numpy as np
 import polars as pl
 import xarray as xr
@@ -50,32 +51,35 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
         pl.DataFrame with features and target
     """
     logger.info(f"Loading parquet file: {parquet_path}")
-    
+
     # Load parquet file - handle S3 URLs
     try:
-        if parquet_path.startswith('s3://'):
+        if parquet_path.startswith("s3://"):
             logger.info("Loading from S3...")
             # Handle S3 URLs
-            import boto3
             from io import BytesIO
-            
+
+            import boto3
+
             # Parse S3 URL
             s3_url = parquet_path[5:]  # Remove 's3://'
-            bucket, key = s3_url.split('/', 1)
+            bucket, key = s3_url.split("/", 1)
             logger.info(f"S3 bucket: {bucket}, key: {key}")
-            
+
             # Download from S3
-            s3_client = boto3.client('s3')
+            s3_client = boto3.client("s3")
             response = s3_client.get_object(Bucket=bucket, Key=key)
-            parquet_data = response['Body'].read()
+            parquet_data = response["Body"].read()
             logger.info(f"Downloaded {len(parquet_data)} bytes from S3")
-            
+
             # Read with polars - try with different options for problematic files
             try:
                 df = pl.read_parquet(BytesIO(parquet_data))
             except Exception as e:
                 if "Nested object types" in str(e):
-                    logger.warning(f"File {parquet_path} contains nested object types. Trying with pyarrow backend...")
+                    logger.warning(
+                        f"File {parquet_path} contains nested object types. Trying with pyarrow backend..."
+                    )
                     df = pl.read_parquet(BytesIO(parquet_data), use_pyarrow=True)
                 else:
                     raise e
@@ -86,14 +90,16 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
                 df = pl.read_parquet(parquet_path)
             except Exception as e:
                 if "Nested object types" in str(e):
-                    logger.warning(f"File {parquet_path} contains nested object types. Trying with pyarrow backend...")
+                    logger.warning(
+                        f"File {parquet_path} contains nested object types. Trying with pyarrow backend..."
+                    )
                     df = pl.read_parquet(parquet_path, use_pyarrow=True)
                 else:
                     raise e
     except Exception as e:
         logger.error(f"Error loading parquet file {parquet_path}: {e}")
         raise e
-    
+
     logger.info(f"Loaded DataFrame shape: {df.shape}")
     logger.info(f"Available columns: {df.columns}")
 
@@ -106,7 +112,7 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
 
     # Build feature selection list
     feature_columns = []
-    
+
     # Debug: Log the actual columns we have
     logger.info(f"DataFrame columns: {df.columns}")
 
@@ -114,29 +120,29 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
     columns_list = list(df.columns)
     logger.info(f"Columns as list: {columns_list}")
     logger.info(f"Checking 'vhm0_x' in list: {'vhm0_x' in columns_list}")
-    
+
     # Check if this is already processed data (has vhm0_x, etc.) or raw data (has VHM0, etc.)
     if "vhm0_x" in columns_list:
         # This is already processed data - use columns as-is
         logger.info("Detected pre-processed data, using columns as-is")
         # Just return the DataFrame as-is since it's already processed
         return df
-    
+
     # This is raw data - need to process it
     logger.info("Detected raw data, processing columns")
-    
+
     # Add base features
     if "VHM0" in df.columns:
         feature_columns.append(pl.col("VHM0").alias("vhm0_x"))
     if "WSPD" in df.columns:
         feature_columns.append(pl.col("WSPD").alias("wspd"))
-    
+
     # Handle latitude column (try both possible names)
     if "latitude" in df.columns:
         feature_columns.append(pl.col("latitude").alias("lat"))
     elif "lat" in df.columns:
         feature_columns.append(pl.col("lat"))
-    
+
     # Handle longitude column (try both possible names)
     if "longitude" in df.columns:
         feature_columns.append(pl.col("longitude").alias("lon"))
@@ -157,7 +163,14 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
             feature_columns.append(pl.col(feat))
 
     # Add temporal features if available
-    temporal_features = ["sin_hour", "cos_hour", "sin_doy", "cos_doy", "sin_month", "cos_month"]
+    temporal_features = [
+        "sin_hour",
+        "cos_hour",
+        "sin_doy",
+        "cos_doy",
+        "sin_month",
+        "cos_month",
+    ]
     for feat in temporal_features:
         if feat in df.columns:
             feature_columns.append(pl.col(feat))
@@ -174,7 +187,7 @@ def extract_features_from_parquet(parquet_path, use_dask=False):
     if "wave_dir_cos" in df.columns:
         feature_columns.append(pl.col("wave_dir_cos"))
 
-    if 'time' in df.columns:
+    if "time" in df.columns:
         feature_columns.append(pl.col("time"))
 
     # Create the feature matrix by selecting columns

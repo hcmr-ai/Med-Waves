@@ -10,7 +10,7 @@ class YearlySpatialAggregator:
         parquet_files_output_path: str,
         year: str,
         dry_run: bool = False,
-        exclude_cols: set | None = None
+        exclude_cols: set | None = None,
     ):
         self.year = year
         if exclude_cols is None:
@@ -48,10 +48,12 @@ class YearlySpatialAggregator:
                 pl.col(f).std().alias(f"{f}_std"),
                 (pl.col(f).is_null().sum() / pl.len()).alias(f"{f}_pct_missing"),
             ]
-        df = df.with_columns([
-            pl.col("time").dt.year().alias("year"),
-            pl.col("time").dt.month().alias("month"),
-        ])
+        df = df.with_columns(
+            [
+                pl.col("time").dt.year().alias("year"),
+                pl.col("time").dt.month().alias("month"),
+            ]
+        )
         agg_df = (
             df.group_by(["latitude", "longitude", "year", "month"])
             .agg(agg_exprs)
@@ -76,7 +78,9 @@ class YearlySpatialAggregator:
 
             print("Concatenating monthly data for annual aggregation...")
             year_df = pl.concat(self.agg_dfs)
-            save_path = self.parquet_files_output_path / f"spatial_stats_{self.year}.parquet"
+            save_path = (
+                self.parquet_files_output_path / f"spatial_stats_{self.year}.parquet"
+            )
             year_df.write_parquet(save_path)
             print(f"Saved yearly spatial stats to {save_path}")
             return year_df
@@ -87,7 +91,9 @@ if __name__ == "__main__":
     data_origin = "augmented_with_labels"
 
     parquet_files_path = f"/data/tsolis/AI_project/parquet/{data_origin}/hourly"
-    parquet_files_output_path = f"/data/tsolis/AI_project/parquet/{data_origin}/monthly_spatial_stats"
+    parquet_files_output_path = (
+        f"/data/tsolis/AI_project/parquet/{data_origin}/monthly_spatial_stats"
+    )
 
     aggregator = YearlySpatialAggregator(
         parquet_files_path=parquet_files_path,

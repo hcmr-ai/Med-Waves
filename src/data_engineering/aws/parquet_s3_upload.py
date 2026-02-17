@@ -9,16 +9,17 @@ from tqdm import tqdm
 
 # --- config you change ---
 SRC_DIR = Path("/Users/deeplab/Documents/projects/hcmr/data/ocean2/without_reduced")
-BUCKET  = "medwav-dev-data"
-PREFIX  = "raw/without_reduced"   # base prefix in S3
-PARTITION_BY_YEAR = True     # put files under year=YYYY/
-SKIP_IF_SAME_SIZE = True     # fast resume: skip if object exists with same size
-MAX_CONCURRENCY = 16         # threads for multipart uploads
+BUCKET = "medwav-dev-data"
+PREFIX = "raw/without_reduced"  # base prefix in S3
+PARTITION_BY_YEAR = True  # put files under year=YYYY/
+SKIP_IF_SAME_SIZE = True  # fast resume: skip if object exists with same size
+MAX_CONCURRENCY = 16  # threads for multipart uploads
 CHUNK_MB = 64
-file_suffix = "nc"               # multipart chunk size
+file_suffix = "nc"  # multipart chunk size
 # -------------------------
 
 date_rx = re.compile(r"WAVEAN(?P<y>\d{4})(?P<m>\d{2})(?P<d>\d{2})\.nc$")
+
 
 def s3_key_for(path: Path) -> str:
     m = date_rx.search(path.name)
@@ -26,6 +27,7 @@ def s3_key_for(path: Path) -> str:
         y = m.group("y")
         return f"{PREFIX}/year={y}/{path.name}"
     return f"{PREFIX}/{path.name}"
+
 
 def object_exists_with_size(s3, bucket: str, key: str, size: int) -> bool:
     try:
@@ -35,6 +37,7 @@ def object_exists_with_size(s3, bucket: str, key: str, size: int) -> bool:
         return False
     except Exception:
         return False
+
 
 def main() -> int:
     files = sorted(SRC_DIR.glob(f"WAVEAN202011*.{file_suffix}"))
@@ -46,7 +49,7 @@ def main() -> int:
         "s3",
         config=Config(
             retries={"max_attempts": 10, "mode": "standard"},
-            s3={"addressing_style": "virtual"}
+            s3={"addressing_style": "virtual"},
         ),
     )
 
@@ -62,7 +65,9 @@ def main() -> int:
         for f in files:
             key = s3_key_for(f)
             size = f.stat().st_size
-            do_skip = SKIP_IF_SAME_SIZE and object_exists_with_size(s3_client, BUCKET, key, size)
+            do_skip = SKIP_IF_SAME_SIZE and object_exists_with_size(
+                s3_client, BUCKET, key, size
+            )
             if do_skip:
                 skipped += 1
                 pbar.set_postfix_str(f"skip {f.name}")
@@ -76,6 +81,7 @@ def main() -> int:
     print(f"\nDone. Uploaded: {uploaded}, Skipped: {skipped}, Total: {len(files)}")
     print(f"s3://{BUCKET}/{PREFIX}/")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
