@@ -1,9 +1,9 @@
-from typing import List, Union, Optional, Dict, Any
+from logging import getLogger
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import s3fs
-from pathlib import Path
-from logging import getLogger
 import yaml
 
 logger = getLogger(__name__)
@@ -24,7 +24,7 @@ class SeasonHelper:
         "winter": [12, 1, 2],
         "spring": [3, 4, 5],
         "summer": [6, 7, 8],
-        "autumn": [9, 10, 11]
+        "autumn": [9, 10, 11],
     }
 
     @staticmethod
@@ -52,7 +52,7 @@ class SeasonHelper:
         Returns:
             List of season names corresponding to each timestamp
         """
-        months = timestamps.astype('datetime64[M]').astype(int) % 12 + 1
+        months = timestamps.astype("datetime64[M]").astype(int) % 12 + 1
         return [SeasonHelper.get_season_from_month(month) for month in months]
 
     @staticmethod

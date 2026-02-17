@@ -27,7 +27,9 @@ def adversarial_loss_G(D_fake: torch.Tensor, mask: torch.Tensor = None) -> torch
         return torch.mean((D_fake - 1.0) ** 2)
 
 
-def adversarial_loss_D(D_real: torch.Tensor, D_fake: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+def adversarial_loss_D(
+    D_real: torch.Tensor, D_fake: torch.Tensor, mask: torch.Tensor = None
+) -> torch.Tensor:
     """
     LSGAN discriminator loss:
       D(real) -> 1
@@ -52,12 +54,12 @@ def adversarial_loss_D(D_real: torch.Tensor, D_fake: torch.Tensor, mask: torch.T
 
         # Compute losses only on valid pixels
         loss_real_map = (D_real - 1.0) ** 2
-        loss_fake_map = D_fake ** 2
+        loss_fake_map = D_fake**2
 
         loss_real = loss_real_map[mask].mean()
         loss_fake = loss_fake_map[mask].mean()
     else:
         loss_real = torch.mean((D_real - 1.0) ** 2)
-        loss_fake = torch.mean(D_fake ** 2)
+        loss_fake = torch.mean(D_fake**2)
 
     return 0.5 * (loss_real + loss_fake)

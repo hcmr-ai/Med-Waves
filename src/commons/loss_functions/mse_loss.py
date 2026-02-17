@@ -43,12 +43,19 @@ def masked_mse_loss(y_pred, y_true, mask, epsilon=1e-6):
 
     # Check for NaN in loss
     if torch.isnan(loss):
-        print(f"Warning: NaN loss detected. y_pred stats: min={y_pred.min()}, max={y_pred.max()}, mean={y_pred.mean()}")
-        print(f"y_true stats: min={y_true.min()}, max={y_true.max()}, mean={y_true.mean()}")
-        print(f"mask stats: valid_pixels={combined_mask.sum()}, total_pixels={combined_mask.numel()}")
+        print(
+            f"Warning: NaN loss detected. y_pred stats: min={y_pred.min()}, max={y_pred.max()}, mean={y_pred.mean()}"
+        )
+        print(
+            f"y_true stats: min={y_true.min()}, max={y_true.max()}, mean={y_true.mean()}"
+        )
+        print(
+            f"mask stats: valid_pixels={combined_mask.sum()}, total_pixels={combined_mask.numel()}"
+        )
         return torch.tensor(0.0, device=y_true.device, requires_grad=True)
 
     return loss
+
 
 def masked_mse_loss_b(y_pred, y_true, mask, eps=1e-6):
     """
@@ -60,8 +67,9 @@ def masked_mse_loss_b(y_pred, y_true, mask, eps=1e-6):
         mask:   (B, C, H, W) bool
     """
     # Hard safety checks (fail fast)
-    assert y_pred.shape == y_true.shape == mask.shape, \
+    assert y_pred.shape == y_true.shape == mask.shape, (
         f"Shape mismatch: pred={y_pred.shape}, true={y_true.shape}, mask={mask.shape}"
+    )
 
     # Ensure mask is boolean
     mask = mask.bool()
@@ -79,9 +87,9 @@ def masked_mse_loss_b(y_pred, y_true, mask, eps=1e-6):
     loss = diff2[mask].sum() / (n_valid.float() + eps)
     return loss
 
+
 def masked_mse_loss_with_calm_shrink(
-    y_pred, y_true, vhm0_true, mask,
-    beta=0.1, calm_thr=2.0
+    y_pred, y_true, vhm0_true, mask, beta=0.1, calm_thr=2.0
 ):
     # Main loss (your current masked MSE)
     diff = y_pred - y_true
@@ -96,14 +104,18 @@ def masked_mse_loss_with_calm_shrink(
 
     return loss_main + beta * loss_calm
 
-import torch
+
+
 
 def masked_mse_loss_calm_emphasis_and_shrink(
-    y_pred, y_true, vhm0_raw, mask,
-    beta=2.0,          # calm emphasis
-    gamma=0.05,        # calm shrink strength
-    calm_thr=1.0,      # use 1.0 since your worst bin is 0-1m
-    eps=1e-8
+    y_pred,
+    y_true,
+    vhm0_raw,
+    mask,
+    beta=2.0,  # calm emphasis
+    gamma=0.05,  # calm shrink strength
+    calm_thr=1.0,  # use 1.0 since your worst bin is 0-1m
+    eps=1e-8,
 ):
     """
     - MSE everywhere
@@ -119,17 +131,26 @@ def masked_mse_loss_calm_emphasis_and_shrink(
     rough = (~calm) & mask
 
     # Base losses
-    loss_rough = diff2[rough].mean() if rough.any() else torch.zeros((), device=y_pred.device)
-    loss_calm  = diff2[calm].mean()  if calm.any()  else torch.zeros((), device=y_pred.device)
+    loss_rough = (
+        diff2[rough].mean() if rough.any() else torch.zeros((), device=y_pred.device)
+    )
+    loss_calm = (
+        diff2[calm].mean() if calm.any() else torch.zeros((), device=y_pred.device)
+    )
 
     # Shrink: push predicted correction toward 0 in calm
-    shrink = (y_pred[calm] ** 2).mean() if calm.any() else torch.zeros((), device=y_pred.device)
+    shrink = (
+        (y_pred[calm] ** 2).mean()
+        if calm.any()
+        else torch.zeros((), device=y_pred.device)
+    )
 
     return loss_rough + beta * loss_calm + gamma * shrink
 
 
-
-def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, epsilon=1e-6):
+def masked_weighted_mse(
+    y_pred, y_true, mask, threshold=5.0, high_weight=1.0, epsilon=1e-6
+):
     """
     Weighted MSE loss with higher weight for values above threshold.
 
@@ -173,9 +194,15 @@ def masked_weighted_mse(y_pred, y_true, mask, threshold=5.0, high_weight=1.0, ep
 
     # Check for NaN in loss
     if torch.isnan(loss):
-        print(f"Warning: NaN loss detected. y_pred stats: min={y_pred.min()}, max={y_pred.max()}, mean={y_pred.mean()}")
-        print(f"y_true stats: min={y_clean.min()}, max={y_clean.max()}, mean={y_clean.mean()}")
-        print(f"mask stats: valid_pixels={combined_mask.sum()}, total_pixels={combined_mask.numel()}")
+        print(
+            f"Warning: NaN loss detected. y_pred stats: min={y_pred.min()}, max={y_pred.max()}, mean={y_pred.mean()}"
+        )
+        print(
+            f"y_true stats: min={y_clean.min()}, max={y_clean.max()}, mean={y_clean.mean()}"
+        )
+        print(
+            f"mask stats: valid_pixels={combined_mask.sum()}, total_pixels={combined_mask.numel()}"
+        )
         return torch.tensor(1.0, device=y_true.device)
 
     return loss
@@ -212,7 +239,11 @@ def masked_multi_bin_weighted_mse(
     if bin_thresholds is None:
         bin_thresholds = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 15.0]
     if bin_weights is None:
-        bin_weights = [15.0, 8.0, 4.0, 2.0, 1.0, 1.0, 1.0, 1.0] if focus_on_low_waves else [0.9, 1.0, 1.2, 1.5, 2.2, 3.0, 4.0]
+        bin_weights = (
+            [15.0, 8.0, 4.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+            if focus_on_low_waves
+            else [0.9, 1.0, 1.2, 1.5, 2.2, 3.0, 4.0]
+        )
 
     # Crop shapes to match
     min_h = min(y_pred.shape[2], y_true.shape[2])
@@ -244,7 +275,9 @@ def masked_multi_bin_weighted_mse(
     return weighted_loss
 
 
-def masked_mse_perceptual_loss(y_pred, y_true, mask, perceptual_loss, lambda_perceptual=0.05):
+def masked_mse_perceptual_loss(
+    y_pred, y_true, mask, perceptual_loss, lambda_perceptual=0.05
+):
     """
     Masked MSE + perceptual loss combination.
 
@@ -285,7 +318,9 @@ def masked_mse_ssim_loss(y_pred, y_true, mask, ssim_loss, lambda_ssim=0.1):
     return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss
 
 
-def masked_mse_mdn_loss(pi, mu, sigma, y, mask=None, eps=1e-6, lambda_mse=0.1, lambda_nll=1.0):
+def masked_mse_mdn_loss(
+    pi, mu, sigma, y, mask=None, eps=1e-6, lambda_mse=0.1, lambda_nll=1.0
+):
     """
     Masked MSE + MDN (Mixture Density Network) NLL loss.
 

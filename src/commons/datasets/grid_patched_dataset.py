@@ -29,14 +29,44 @@ class GridPatchWaveDataset(Dataset):
         Single task: X, y_tensor, mask, vhm0
         Multi-task: X, targets_dict, mask, vhm0
     """
-    FEATURES_ORDER = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
 
-    def __init__(self, file_paths, patch_size=(128, 128), stride=None,
-                 target_columns=None, excluded_columns=None,
-                 normalizer=None, subsample_step=None, predict_bias=False,
-                 use_cache=True, normalize_target=False, wave_bins=None,
-                 min_valid_pixels=0.3, fs=None, max_cache_size=20):
+    FEATURES_ORDER = [
+        "VHM0",
+        "WSPD",
+        "VTM02",
+        "U10",
+        "V10",
+        "sin_hour",
+        "cos_hour",
+        "sin_doy",
+        "cos_doy",
+        "sin_month",
+        "cos_month",
+        "lat_norm",
+        "lon_norm",
+        "wave_dir_sin",
+        "wave_dir_cos",
+        "corrected_VHM0",
+        "corrected_VTM02",
+    ]
 
+    def __init__(
+        self,
+        file_paths,
+        patch_size=(128, 128),
+        stride=None,
+        target_columns=None,
+        excluded_columns=None,
+        normalizer=None,
+        subsample_step=None,
+        predict_bias=False,
+        use_cache=True,
+        normalize_target=False,
+        wave_bins=None,
+        min_valid_pixels=0.3,
+        fs=None,
+        max_cache_size=20,
+    ):
         if wave_bins is None:
             wave_bins = [1, 2, 3, 4, 5]
         self.file_paths = file_paths
@@ -45,7 +75,7 @@ class GridPatchWaveDataset(Dataset):
 
         # Default to single task 'vhm0' if not provided
         if target_columns is None:
-            self.target_columns = {'vhm0': 'corrected_VHM0'}
+            self.target_columns = {"vhm0": "corrected_VHM0"}
         else:
             self.target_columns = target_columns
 
@@ -64,11 +94,17 @@ class GridPatchWaveDataset(Dataset):
         self.wave_bins = wave_bins  # m thresholds between bins
         self.min_valid_pixels = min_valid_pixels  # Filter patches with too much land
         self._cache = {}
-        self.features_order = self.normalizer.feature_order_ if self.normalizer is not None else self.FEATURES_ORDER
+        self.features_order = (
+            self.normalizer.feature_order_
+            if self.normalizer is not None
+            else self.FEATURES_ORDER
+        )
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
         if self.normalizer is not None:
-            print(f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}")
+            print(
+                f"Features order mismatch: {self.normalizer.feature_order_ != self.FEATURES_ORDER}"
+            )
             print(f"Features order: {self.normalizer.feature_order_}")
             print(f"Features order expected: {self.FEATURES_ORDER}")
         # Load one file to infer dimensions
@@ -98,7 +134,9 @@ class GridPatchWaveDataset(Dataset):
         # Initialize wave bins
         self.patch_bins = [None] * len(self.index_map)
 
-        print(f"Loaded GridPatchWaveDataset: {len(self.index_map)} patches (before filtering)")
+        print(
+            f"Loaded GridPatchWaveDataset: {len(self.index_map)} patches (before filtering)"
+        )
 
     def compute_all_bins(self):
         """Pre-compute wave bins for all patches and filter patches with insufficient sea pixels."""
@@ -109,7 +147,11 @@ class GridPatchWaveDataset(Dataset):
         valid_indices = []  # Track which patches have sufficient sea pixels
 
         # Process file by file to avoid redundant loading
-        for file_idx, path in tqdm(enumerate(self.file_paths), total=len(self.file_paths), desc="Computing wave bins"):
+        for file_idx, path in tqdm(
+            enumerate(self.file_paths),
+            total=len(self.file_paths),
+            desc="Computing wave bins",
+        ):
             # Load file once
             tensor, feature_cols = self._get_file_tensor(path)
             vhm0_col_idx = feature_cols.index("VHM0")
@@ -117,10 +159,10 @@ class GridPatchWaveDataset(Dataset):
             # Process all hours in this file
             for hour_idx in range(24):
                 hour_data = tensor[hour_idx]
-                vhm0 = hour_data[..., vhm0_col_idx:vhm0_col_idx+1]
+                vhm0 = hour_data[..., vhm0_col_idx : vhm0_col_idx + 1]
 
                 if self.subsample_step is not None:
-                    vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+                    vhm0 = vhm0[:: self.subsample_step, :: self.subsample_step, :]
 
                 # VHM0 is already in raw meters (0-15m), no denormalization needed
 
@@ -131,13 +173,17 @@ class GridPatchWaveDataset(Dataset):
                 for patch_i in range(self.n_patches_h):
                     for patch_j in range(self.n_patches_w):
                         i_start, j_start = patch_i * sh, patch_j * sw
-                        vhm0_patch = vhm0[i_start:i_start+ph, j_start:j_start+pw, :]
+                        vhm0_patch = vhm0[
+                            i_start : i_start + ph, j_start : j_start + pw, :
+                        ]
 
                         # Find corresponding index in index_map
-                        idx = (file_idx * 24 * self.n_patches_h * self.n_patches_w +
-                               hour_idx * self.n_patches_h * self.n_patches_w +
-                               patch_i * self.n_patches_w +
-                               patch_j)
+                        idx = (
+                            file_idx * 24 * self.n_patches_h * self.n_patches_w
+                            + hour_idx * self.n_patches_h * self.n_patches_w
+                            + patch_i * self.n_patches_w
+                            + patch_j
+                        )
 
                         # Check if patch has sufficient valid pixels
                         patch_size = vhm0_patch.numel()
@@ -168,7 +214,9 @@ class GridPatchWaveDataset(Dataset):
                         self.patch_bins[idx] = self.get_wave_bin(max_vhm0)
 
         # Filter index_map and patch_bins to only include valid patches
-        print(f"Filtering patches: {len(valid_indices)}/{len(self.index_map)} have >{self.min_valid_pixels*100:.0f}% valid pixels")
+        print(
+            f"Filtering patches: {len(valid_indices)}/{len(self.index_map)} have >{self.min_valid_pixels * 100:.0f}% valid pixels"
+        )
         set(valid_indices)
         self.index_map = [self.index_map[i] for i in valid_indices]
         self.patch_bins = [self.patch_bins[i] for i in valid_indices]
@@ -176,12 +224,17 @@ class GridPatchWaveDataset(Dataset):
         # Show VHM0 distribution
         if sample_vhm0_values:
             import numpy as np
+
             sample_arr = np.array(sample_vhm0_values)
             print("VHM0 distribution (valid patches, first 1000):")
             print(f"  Min: {sample_arr.min():.2f}m, Max: {sample_arr.max():.2f}m")
-            print(f"  Mean: {sample_arr.mean():.2f}m, Median: {np.median(sample_arr):.2f}m")
-            print(f"  Percentiles: 25%={np.percentile(sample_arr, 25):.2f}m, "
-                  f"75%={np.percentile(sample_arr, 75):.2f}m, 90%={np.percentile(sample_arr, 90):.2f}m")
+            print(
+                f"  Mean: {sample_arr.mean():.2f}m, Median: {np.median(sample_arr):.2f}m"
+            )
+            print(
+                f"  Percentiles: 25%={np.percentile(sample_arr, 25):.2f}m, "
+                f"75%={np.percentile(sample_arr, 75):.2f}m, 90%={np.percentile(sample_arr, 90):.2f}m"
+            )
 
         print(f"Completed: {len(self.index_map)} valid patches after filtering")
 
@@ -195,6 +248,7 @@ class GridPatchWaveDataset(Dataset):
         if self._fs is None:
             import os
             import time
+
             # Stagger S3 connection creation across workers to avoid thundering herd
             worker_id = os.getpid() % 8  # Simple worker ID based on PID
             if worker_id > 0:
@@ -242,36 +296,51 @@ class GridPatchWaveDataset(Dataset):
         # Select input features (exclude all target columns)
         target_column_names = list(self.target_columns.values())
         input_col_indices = [
-            feature_cols.index(feat) for feat in self.features_order
-            if feat in feature_cols and feat not in self.excluded_columns and feat not in target_column_names
+            feature_cols.index(feat)
+            for feat in self.features_order
+            if feat in feature_cols
+            and feat not in self.excluded_columns
+            and feat not in target_column_names
         ]
 
         X = hour_data[..., input_col_indices]
-        vhm0 = hour_data[..., feature_cols.index("VHM0"):feature_cols.index("VHM0")+1]
+        vhm0 = hour_data[
+            ..., feature_cols.index("VHM0") : feature_cols.index("VHM0") + 1
+        ]
 
         # Extract targets for all tasks
         targets = {}
         for task_name, target_col in self.target_columns.items():
             if self.predict_bias:
-                corrected = hour_data[..., feature_cols.index(target_col):feature_cols.index(target_col)+1]
+                corrected = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
                 targets[task_name] = corrected - vhm0
             else:
-                targets[task_name] = hour_data[..., feature_cols.index(target_col):feature_cols.index(target_col)+1]
+                targets[task_name] = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
 
         if self.subsample_step is not None:
-            X = X[::self.subsample_step, ::self.subsample_step, :]
-            vhm0 = vhm0[::self.subsample_step, ::self.subsample_step, :]
+            X = X[:: self.subsample_step, :: self.subsample_step, :]
+            vhm0 = vhm0[:: self.subsample_step, :: self.subsample_step, :]
             for task_name in targets:
-                targets[task_name] = targets[task_name][::self.subsample_step, ::self.subsample_step, :]
+                targets[task_name] = targets[task_name][
+                    :: self.subsample_step, :: self.subsample_step, :
+                ]
 
         # Extract patch
         ph, pw = self.patch_size
         sh, sw = self.stride
         i_start, j_start = patch_i * sh, patch_j * sw
-        X = X[i_start:i_start+ph, j_start:j_start+pw, :]
-        vhm0 = vhm0[i_start:i_start+ph, j_start:j_start+pw, :]
+        X = X[i_start : i_start + ph, j_start : j_start + pw, :]
+        vhm0 = vhm0[i_start : i_start + ph, j_start : j_start + pw, :]
         for task_name in targets:
-            targets[task_name] = targets[task_name][i_start:i_start+ph, j_start:j_start+pw, :]
+            targets[task_name] = targets[task_name][
+                i_start : i_start + ph, j_start : j_start + pw, :
+            ]
 
         # Save wave bin on first access
         if self.patch_bins[idx] is None:
@@ -290,7 +359,9 @@ class GridPatchWaveDataset(Dataset):
                     if target_col in self.normalizer.feature_order_:
                         target_idx = self.normalizer.feature_order_.index(target_col)
                         if target_idx in self.normalizer.stats_:
-                            self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
+                            self.normalizer.target_stats_ = self.normalizer.stats_[
+                                target_idx
+                            ]
 
                     # Normalize this target with its own stats
                     _, normalized_target = self.normalizer.transform_torch(

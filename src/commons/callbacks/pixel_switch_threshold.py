@@ -1,6 +1,7 @@
 import torch
 from lightning.pytorch import Callback
 
+
 class PixelSwitchThresholdCallback(Callback):
     """
     Computes dynamic threshold each validation epoch based on quantile of abs error.
@@ -17,7 +18,9 @@ class PixelSwitchThresholdCallback(Callback):
         self.val_errors = []
 
     @torch.no_grad()
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+    def on_validation_batch_end(
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
+    ):
         """
         Collects validation errors over full epoch
         Assumes batch = (X, y_true, mask, vhm0)
@@ -26,7 +29,7 @@ class PixelSwitchThresholdCallback(Callback):
         y_pred = outputs["pred"]  # must be returned by validation_step
 
         diff = (y_pred - y_true).abs()
-        valid_errors = diff[mask]            # 1-D flattened vector of valid errors
+        valid_errors = diff[mask]  # 1-D flattened vector of valid errors
         self.val_errors.append(valid_errors)  # Keep on GPU
 
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -34,10 +37,14 @@ class PixelSwitchThresholdCallback(Callback):
         all_errors = torch.cat(self.val_errors)  # shape (N_valid_pixels,)
 
         # For very large tensors, subsample to avoid quantile() size limits
-        max_samples = 10_000_000  # 10M samples is more than enough for accurate quantile
+        max_samples = (
+            10_000_000  # 10M samples is more than enough for accurate quantile
+        )
         if all_errors.numel() > max_samples:
             # Randomly sample
-            indices = torch.randperm(all_errors.numel(), device=all_errors.device)[:max_samples]
+            indices = torch.randperm(all_errors.numel(), device=all_errors.device)[
+                :max_samples
+            ]
             sampled_errors = all_errors[indices]
         else:
             sampled_errors = all_errors

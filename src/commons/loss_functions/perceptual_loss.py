@@ -10,6 +10,7 @@ class WaveFeatureExtractor(nn.Module):
     Tiny CNN to extract multi-scale features from 2D wave fields.
     Designed for 1-channel targets (e.g. VHM0 or bias), but can take more.
     """
+
     def __init__(self, in_channels=1, base_channels=16):
         super().__init__()
 
@@ -23,7 +24,9 @@ class WaveFeatureExtractor(nn.Module):
 
         # Block 2: HxW -> H/2 x W/2
         self.block2 = nn.Sequential(
-            nn.Conv2d(base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(
+                base_channels, base_channels * 2, kernel_size=3, stride=2, padding=1
+            ),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -31,7 +34,9 @@ class WaveFeatureExtractor(nn.Module):
 
         # Block 3: H/2 x W/2 -> H/4 x W/4
         self.block3 = nn.Sequential(
-            nn.Conv2d(base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(
+                base_channels * 2, base_channels * 4, kernel_size=3, stride=2, padding=1
+            ),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_channels * 4, base_channels * 4, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -42,9 +47,9 @@ class WaveFeatureExtractor(nn.Module):
         x: [B, C, H, W]
         returns list of feature maps at 3 scales
         """
-        f1 = self.block1(x)      # [B, C,   H,   W]
-        f2 = self.block2(f1)     # [B, 2C,  H/2, W/2]
-        f3 = self.block3(f2)     # [B, 4C,  H/4, W/4]
+        f1 = self.block1(x)  # [B, C,   H,   W]
+        f2 = self.block2(f1)  # [B, 2C,  H/2, W/2]
+        f3 = self.block3(f2)  # [B, 4C,  H/4, W/4]
         return [f1, f2, f3]
 
 
@@ -53,7 +58,10 @@ class PerceptualLoss(nn.Module):
     Perceptual / feature loss for 2D fields.
     Uses a fixed feature extractor (by default, gradients DO NOT flow into it).
     """
-    def __init__(self, feature_extractor: nn.Module, layer_weights=None, detach_target=True):
+
+    def __init__(
+        self, feature_extractor: nn.Module, layer_weights=None, detach_target=True
+    ):
         super().__init__()
         self.feature_extractor = feature_extractor
         self.detach_target = detach_target
@@ -95,7 +103,15 @@ class PerceptualLoss(nn.Module):
         return loss
 
 
-def masked_ssim_perceptual_loss(y_pred, y_true, mask, ssim_loss, perceptual_loss, lambda_ssim=0.1, lambda_perceptual=0.05):
+def masked_ssim_perceptual_loss(
+    y_pred,
+    y_true,
+    mask,
+    ssim_loss,
+    perceptual_loss,
+    lambda_ssim=0.1,
+    lambda_perceptual=0.05,
+):
     """
     Masked SSIM perceptual loss.
     Args:
@@ -105,4 +121,8 @@ def masked_ssim_perceptual_loss(y_pred, y_true, mask, ssim_loss, perceptual_loss
         lambda_ssim: weight for SSIM loss
         lambda_perceptual: weight for perceptual loss
     """
-    return masked_mse_loss(y_pred, y_true, mask) + lambda_ssim * ssim_loss + lambda_perceptual * perceptual_loss(y_pred, y_true)
+    return (
+        masked_mse_loss(y_pred, y_true, mask)
+        + lambda_ssim * ssim_loss
+        + lambda_perceptual * perceptual_loss(y_pred, y_true)
+    )

@@ -31,8 +31,8 @@ def masked_huber_loss(y_pred, y_true, mask, delta=1.0):
     less_than_delta = error < delta
     huber_loss = torch.where(
         less_than_delta,
-        0.5 * (error ** 2) / delta,      # Quadratic regime
-        error - 0.5 * delta               # Linear regime
+        0.5 * (error**2) / delta,  # Quadratic regime
+        error - 0.5 * delta,  # Linear regime
     )
 
     return huber_loss.mean()

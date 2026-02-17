@@ -120,9 +120,7 @@ def compute_global_bin_biases(
     Returns:
         Dictionary mapping bin labels to computed bias values
     """
-    print(
-        "Computing global bin-wise correction biases from training/validation set..."
-    )
+    print("Computing global bin-wise correction biases from training/validation set...")
 
     all_residuals_by_bin = {}
 
@@ -136,7 +134,7 @@ def compute_global_bin_biases(
             # Unpack batch
             X, y, mask, vhm0_batch = batch
             vhm0 = vhm0_batch.to(device) if vhm0_batch is not None else None
-            
+
             # Handle multi-task vs single-task format
             # If y is a dict (multi-task), extract the target for the task we're evaluating
             if isinstance(y, dict):
@@ -148,7 +146,7 @@ def compute_global_bin_biases(
 
             # Get predictions
             y_pred = model(X)
-            
+
             # Handle multi-task predictions
             # If y_pred is a dict (multi-task model), extract the prediction for the task
             if isinstance(y_pred, dict):
@@ -269,7 +267,7 @@ def apply_bilateral_filter(
                 pred_np.astype(np.float32),
                 d=d,
                 sigmaColor=sigma_color,
-                sigmaSpace=sigma_space
+                sigmaSpace=sigma_space,
             )
 
             # Keep land pixels unchanged

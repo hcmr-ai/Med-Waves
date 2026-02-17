@@ -1,8 +1,9 @@
-from torch.utils.data import Sampler
-import numpy as np
 import random
 from typing import Iterator, List, Optional, Sequence, Tuple
+
+import numpy as np
 from torch.utils.data import Sampler
+
 
 class WaveBinBalancedSampler(Sampler):
     def __init__(self, dataset, batch_size, bins_per_batch=None):
@@ -13,7 +14,7 @@ class WaveBinBalancedSampler(Sampler):
         """
         self.dataset = dataset
         self.batch_size = batch_size
-        
+
         # Default: equal distribution across bins
         if bins_per_batch is None:
             unique_bins = np.unique(dataset.patch_bins)
@@ -24,7 +25,7 @@ class WaveBinBalancedSampler(Sampler):
             self.bins_per_batch = {int(b): n_each for b in unique_bins}
         else:
             self.bins_per_batch = bins_per_batch
-        
+
         # Build idx lists per bin
         self.bin_to_idxs = {b: [] for b in self.bins_per_batch.keys()}
         for idx, bin_id in enumerate(self.dataset.patch_bins):
@@ -43,10 +44,14 @@ class WaveBinBalancedSampler(Sampler):
                 n_available = len(self.bin_to_idxs[b])
                 batches_possible = n_available // n_samples_needed
                 batches_per_bin.append(batches_possible)
-                print(f"  Bin {b}: {n_available} samples available, need {n_samples_needed} per batch -> {batches_possible} batches possible")
-        
+                print(
+                    f"  Bin {b}: {n_available} samples available, need {n_samples_needed} per batch -> {batches_possible} batches possible"
+                )
+
         self.total_batches = min(batches_per_bin) if batches_per_bin else 0
-        print(f"Total batches per epoch: {self.total_batches} (batch_size={self.batch_size})")
+        print(
+            f"Total batches per epoch: {self.total_batches} (batch_size={self.batch_size})"
+        )
 
     def __len__(self):
         return self.total_batches * self.batch_size
@@ -56,15 +61,15 @@ class WaveBinBalancedSampler(Sampler):
             batch_idxs = []
             for b, n in self.bins_per_batch.items():
                 batch_idxs.append(
-                    np.random.choice(
-                        self.bin_to_idxs[b], size=n, replace=False
-                    )
+                    np.random.choice(self.bin_to_idxs[b], size=n, replace=False)
                 )
             batch_idxs = np.concatenate(batch_idxs)
             np.random.shuffle(batch_idxs)
             yield from batch_idxs
 
+
 IndexType = Tuple[int, int]  # (base_idx, bin_id)
+
 
 class BalancedBinBatchSampler(Sampler[List[IndexType]]):
     """

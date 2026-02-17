@@ -45,17 +45,24 @@ class SSIMLoss(nn.Module):
         mu_xy = mu_x * mu_y
 
         # Variances & Covariance
-        sigma_x2 = F.conv2d(x * x, window, padding=self.window_size // 2, groups=C) - mu_x2
-        sigma_y2 = F.conv2d(y * y, window, padding=self.window_size // 2, groups=C) - mu_y2
-        sigma_xy = F.conv2d(x * y, window, padding=self.window_size // 2, groups=C) - mu_xy
+        sigma_x2 = (
+            F.conv2d(x * x, window, padding=self.window_size // 2, groups=C) - mu_x2
+        )
+        sigma_y2 = (
+            F.conv2d(y * y, window, padding=self.window_size // 2, groups=C) - mu_y2
+        )
+        sigma_xy = (
+            F.conv2d(x * y, window, padding=self.window_size // 2, groups=C) - mu_xy
+        )
 
         # Stability constants (from SSIM paper)
         C1 = (0.01 * data_range) ** 2
         C2 = (0.03 * data_range) ** 2
 
         # SSIM formula
-        ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / \
-                   ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2))
+        ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / (
+            (mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2)
+        )
 
         return ssim_map.mean()
 

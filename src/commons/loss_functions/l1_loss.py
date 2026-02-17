@@ -16,15 +16,16 @@ def masked_smooth_l1_loss(y_pred, y_true, mask, criterion):
 
     return criterion(y_pred_clean[mask], y_clean[mask])
 
+
 def masked_multi_bin_weighted_smooth_l1(
     y_pred,
     y_true,
     mask,
     vhm0,
     criterion,
-    bin_thresholds = None,
-    bin_weights = None,
-    epsilon=1e-6    # To avoid division by zero
+    bin_thresholds=None,
+    bin_weights=None,
+    epsilon=1e-6,  # To avoid division by zero
 ):
     """
     Physics-aware SmoothL1 loss with wave-height bin weighting.
@@ -40,24 +41,24 @@ def masked_multi_bin_weighted_smooth_l1(
         criterion:      SmoothL1 loss criterion
     """
     if bin_thresholds is None:
-            bin_thresholds = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 15.0]
+        bin_thresholds = [1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 15.0]
     if bin_weights is None:
-        bin_weights = [0.9,  1.0,  1.2,  1.5,  2.2,  3.0,  4.0]
+        bin_weights = [0.9, 1.0, 1.2, 1.5, 2.2, 3.0, 4.0]
 
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]
     y_true = y_true[:, :, :min_h, :min_w]
-    mask   = mask[:, :, :min_h, :min_w]
-    vhm0   = vhm0[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w]
+    vhm0 = vhm0[:, :, :min_h, :min_w]
 
     if not mask.any():
         return torch.tensor(0.0, device=y_true.device)
 
     # --- Clean NaNs ---
-    y_clean     = torch.nan_to_num(y_true, nan=0.0)
-    y_pred_clean= torch.nan_to_num(y_pred, nan=0.0)
-    vhm0_clean  = torch.nan_to_num(vhm0,  nan=0.0)
+    y_clean = torch.nan_to_num(y_true, nan=0.0)
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
+    vhm0_clean = torch.nan_to_num(vhm0, nan=0.0)
 
     # --- Build bin weights using real wave heights (meters) ---
     weights = torch.zeros_like(vhm0_clean)
@@ -67,7 +68,7 @@ def masked_multi_bin_weighted_smooth_l1(
         prev_t = t
 
     # --- SmoothL1Loss per-pixel, but weighted by sea state ---
-    loss_per_pixel = criterion(y_pred_clean, y_clean) * weights     # (B,1,H,W)
+    loss_per_pixel = criterion(y_pred_clean, y_clean) * weights  # (B,1,H,W)
 
     # Apply mask + normalize by total weight in mask
     num = loss_per_pixel[mask].sum()

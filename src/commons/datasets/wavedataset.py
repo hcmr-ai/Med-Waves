@@ -1,9 +1,11 @@
-from torch.utils.data import Dataset
 import random
+
 import numpy as np
-import torch
 import pyarrow.parquet as pq
 import s3fs
+import torch
+from torch.utils.data import Dataset
+
 
 class WaveDataset(Dataset):
     def __init__(
@@ -66,9 +68,7 @@ class WaveDataset(Dataset):
         # Get column names
         column_names = [field.name for field in table.schema]
         # Filter out excluded columns (but keep VHM0 for bias calculation if needed)
-        feature_cols = [
-            col for col in column_names if col not in self.excluded_columns
-        ]
+        feature_cols = [col for col in column_names if col not in self.excluded_columns]
 
         # Convert to numpy arrays directly from PyArrow
         time_data = table.column("time").to_numpy()
@@ -122,6 +122,7 @@ class WaveDataset(Dataset):
         # Log channel order information only once
         if not self._feature_names_logged:
             import logging
+
             logger = logging.getLogger(__name__)
             input_feature_names = [feature_cols[i] for i in input_col_indices]
             logger.info("=" * 80)
@@ -140,10 +141,14 @@ class WaveDataset(Dataset):
             corrected = hour_data[
                 ..., corrected_index : corrected_index + 1
             ]  # shape (H, W, 1)
-            logger.debug(f"VHM0 shape: {vhm0.shape}, stats: mean={vhm0[~np.isnan(vhm0)].mean():.3f}, "
-                        f"std={vhm0[~np.isnan(vhm0)].std():.3f}, NaN count: {np.isnan(vhm0).sum()}")
-            logger.debug(f"Corrected shape: {corrected.shape}, stats: mean={corrected[~np.isnan(corrected)].mean():.3f}, "
-                        f"std={corrected[~np.isnan(corrected)].std():.3f}, NaN count: {np.isnan(corrected).sum()}")
+            logger.debug(
+                f"VHM0 shape: {vhm0.shape}, stats: mean={vhm0[~np.isnan(vhm0)].mean():.3f}, "
+                f"std={vhm0[~np.isnan(vhm0)].std():.3f}, NaN count: {np.isnan(vhm0).sum()}"
+            )
+            logger.debug(
+                f"Corrected shape: {corrected.shape}, stats: mean={corrected[~np.isnan(corrected)].mean():.3f}, "
+                f"std={corrected[~np.isnan(corrected)].std():.3f}, NaN count: {np.isnan(corrected).sum()}"
+            )
 
             y = corrected - vhm0  # Target is the bias (correction field)
         else:
@@ -152,7 +157,6 @@ class WaveDataset(Dataset):
             y = hour_data[
                 ..., target_col_index : target_col_index + 1
             ]  # shape (H, W, 1)
-
 
         # Optional patch sampling
         if self.patch_size is not None:

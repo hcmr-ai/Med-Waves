@@ -7,8 +7,8 @@ def pixel_switch_loss(
     y_pred,
     y_true,
     mask,
-    threshold_m=None,      # 1 meter threshold in real space
-    std=None,             # std used during normalization (required!)
+    threshold_m=None,  # 1 meter threshold in real space
+    std=None,  # std used during normalization (required!)
     weight_normal=0.0,
     weight_hard=1.0,
 ):
@@ -31,7 +31,7 @@ def pixel_switch_loss(
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]
     y_true = y_true[:, :, :min_h, :min_w]
-    mask   = mask[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w]
 
     mask = mask.bool()
     y_true = torch.nan_to_num(y_true, nan=0.0)
@@ -55,16 +55,17 @@ def pixel_switch_loss(
     weighted_loss = loss_per_pixel * weights
     return weighted_loss[mask].mean()
 
+
 def pixel_switch_loss_stable_old(
     y_pred,
     y_true,
     mask,
-    threshold_m=None,   # threshold in meters (optional)
-    std=None,           # normalization std if threshold_m is in meters
+    threshold_m=None,  # threshold in meters (optional)
+    std=None,  # normalization std if threshold_m is in meters
     weight_normal=0.1,  # soft weight for "easy" pixels
-    weight_hard=1.0,    # weight for "hard" pixels
+    weight_hard=1.0,  # weight for "hard" pixels
     dynamic_quantile=0.90,  # used if threshold_m is None
-    smooth_mix=0.2,     # fraction of SmoothL1 stabilizer
+    smooth_mix=0.2,  # fraction of SmoothL1 stabilizer
     epsilon=1e-6,
 ):
     """
@@ -133,13 +134,15 @@ def pixel_switch_loss_stable(
     y_true: torch.Tensor,
     mask: torch.Tensor,
     *,
-    threshold_m: float | None = None,   # threshold in meters (optional)
-    std: float | torch.Tensor | None = None,  # normalization std if threshold_m is in meters
-    weight_normal: float = 0.1,         # weight for "easy" pixels
-    weight_hard: float = 1.0,           # weight for "hard" pixels
-    dynamic_quantile: float = 0.90,     # used if threshold_m is None
-    smooth_mix: float = 0.2,            # fraction of SmoothL1 stabilizer
-    normalize_weights: bool = True,     # keeps loss scale stable across batches
+    threshold_m: float | None = None,  # threshold in meters (optional)
+    std: float
+    | torch.Tensor
+    | None = None,  # normalization std if threshold_m is in meters
+    weight_normal: float = 0.1,  # weight for "easy" pixels
+    weight_hard: float = 1.0,  # weight for "hard" pixels
+    dynamic_quantile: float = 0.90,  # used if threshold_m is None
+    smooth_mix: float = 0.2,  # fraction of SmoothL1 stabilizer
+    normalize_weights: bool = True,  # keeps loss scale stable across batches
     epsilon: float = 1e-6,
 ) -> torch.Tensor:
     """
@@ -197,7 +200,10 @@ def pixel_switch_loss_stable(
             thr = threshold_m / std
         else:
             thr = threshold_m
-        thresholds = [torch.as_tensor(thr, device=y_pred.device, dtype=y_pred.dtype) for _ in range(B)]
+        thresholds = [
+            torch.as_tensor(thr, device=y_pred.device, dtype=y_pred.dtype)
+            for _ in range(B)
+        ]
         thresholds = torch.stack(thresholds, dim=0)
     else:
         # per-sample masked quantile threshold
@@ -205,7 +211,9 @@ def pixel_switch_loss_stable(
             mb = mask[b]
             eb = abs_err[b][mb]
             if eb.numel() == 0:
-                thresholds.append(torch.zeros((), device=y_pred.device, dtype=y_pred.dtype))
+                thresholds.append(
+                    torch.zeros((), device=y_pred.device, dtype=y_pred.dtype)
+                )
             else:
                 q = torch.quantile(eb, dynamic_quantile)
                 thresholds.append(q)

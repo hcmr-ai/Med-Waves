@@ -3,7 +3,8 @@ name: Unit Tests
 on:
   pull_request:
     branches: ["master"]
-
+    paths:
+      - "tests/unit/**"
 jobs:
   test:
     runs-on: ubuntu-latest
