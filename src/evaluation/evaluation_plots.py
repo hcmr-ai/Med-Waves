@@ -69,9 +69,7 @@ def plot_rmse_maps(
             h, w = batch_data["error_sq"].shape
             total_error_sq_baseline[:h, :w] += batch_data["error_sq"]
             total_error_sq_mae_baseline[:h, :w] += batch_data["error_sq_mae"]
-        rmse_baseline = np.sqrt(
-            total_error_sq_baseline / np.maximum(total_count, 1)
-        )
+        rmse_baseline = np.sqrt(total_error_sq_baseline / np.maximum(total_count, 1))
         rmse_baseline[total_count == 0] = np.nan
         mae_baseline = total_error_sq_mae_baseline / np.maximum(total_count, 1)
         mae_baseline[total_count == 0] = np.nan
@@ -91,9 +89,7 @@ def plot_rmse_maps(
         f"RMSE model - min: {np.nanmin(rmse_model):.3f}, max: {np.nanmax(rmse_model):.3f}, mean: {np.nanmean(rmse_model):.3f}"
     )
     logger.info(f"Using color scale vmax: {vmax_combined:.3f}")
-    logger.info(
-        f"Valid pixels: {np.sum(~np.isnan(rmse_model))} / {rmse_model.size}"
-    )
+    logger.info(f"Valid pixels: {np.sum(~np.isnan(rmse_model))} / {rmse_model.size}")
 
     # Plot model RMSE
     plot_spatial_rmse_map(
@@ -111,7 +107,9 @@ def plot_rmse_maps(
 
     # Plot model MAE
     if mae_baseline is not None:
-        vmax_mae = max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98))
+        vmax_mae = max(
+            np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)
+        )
     else:
         vmax_mae = np.nanpercentile(mae_model, 98)
 
@@ -168,9 +166,7 @@ def plot_rmse_maps(
         from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap
 
         colors = ["#0000FF", "#FF0000"]
-        cmap_binary = LinearSegmentedColormap.from_list(
-            "improvement", colors, N=256
-        )
+        cmap_binary = LinearSegmentedColormap.from_list("improvement", colors, N=256)
         cmap_binary.set_bad("white")
 
         norm_binary = BoundaryNorm(
@@ -424,17 +420,13 @@ def plot_sea_bin_metrics(
         counts.append(metrics.get("count", 0))
 
         # Calculate percentage
-        pct = (
-            (metrics.get("count", 0) / total_count * 100) if total_count > 0 else 0
-        )
+        pct = (metrics.get("count", 0) / total_count * 100) if total_count > 0 else 0
         percentages.append(pct)
 
         # Get baseline metrics
         baseline_rmse = metrics.get("baseline_rmse", 0)
         baseline_mae = metrics.get("baseline_mae", 0)
-        baseline_rmse_values.append(
-            baseline_rmse if baseline_rmse is not None else 0
-        )
+        baseline_rmse_values.append(baseline_rmse if baseline_rmse is not None else 0)
         baseline_mae_values.append(baseline_mae if baseline_mae is not None else 0)
         improvement_mae_values.append(metrics.get("mae_improvement_pct", 0))
         improvement_rmse_values.append(metrics.get("rmse_improvement_pct", 0))
@@ -497,9 +489,7 @@ def plot_sea_bin_metrics(
         if v2 > 0:
             axes[0, 0].text(
                 i + width / 2,
-                v2 + max(baseline_rmse_values) * 0.01
-                if baseline_rmse_values
-                else 0,
+                v2 + max(baseline_rmse_values) * 0.01 if baseline_rmse_values else 0,
                 f"{v2:.3f}",
                 ha="center",
                 va="bottom",
@@ -609,14 +599,10 @@ def plot_sea_bin_metrics(
         )
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / "sea_bin_performance.png", dpi=300, bbox_inches="tight"
-    )
+    plt.savefig(output_dir / "sea_bin_performance.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(
-        f"Saved sea-bin performance plot to {output_dir / 'sea_bin_performance.png'}"
-    )
+    print(f"Saved sea-bin performance plot to {output_dir / 'sea_bin_performance.png'}")
 
 
 def plot_error_distribution_histograms(
@@ -665,12 +651,8 @@ def plot_error_distribution_histograms(
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
 
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         # Determine histogram range
         all_errors = (
@@ -819,9 +801,7 @@ def plot_error_boxplots(
         meanprops=dict(color="darkblue", linewidth=2, linestyle="--"),
         whiskerprops=dict(color="blue"),
         capprops=dict(color="blue"),
-        flierprops=dict(
-            marker="o", markerfacecolor="blue", markersize=3, alpha=0.3
-        ),
+        flierprops=dict(marker="o", markerfacecolor="blue", markersize=3, alpha=0.3),
     )
 
     ax1.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.5)
@@ -831,9 +811,7 @@ def plot_error_boxplots(
     ax1.grid(True, alpha=0.3, axis="y")
 
     # Add sample counts
-    for i, (_label, data) in enumerate(
-        zip(bin_labels, model_error_data, strict=False)
-    ):
+    for i, (_label, data) in enumerate(zip(bin_labels, model_error_data, strict=False)):
         ax1.text(
             i + 1,
             ax1.get_ylim()[0],
@@ -862,9 +840,7 @@ def plot_error_boxplots(
         meanprops=dict(color="darkblue", linewidth=1.5, linestyle="--"),
         whiskerprops=dict(color="blue"),
         capprops=dict(color="blue"),
-        flierprops=dict(
-            marker="o", markerfacecolor="blue", markersize=2, alpha=0.3
-        ),
+        flierprops=dict(marker="o", markerfacecolor="blue", markersize=2, alpha=0.3),
     )
 
     # Only plot baseline if data exists
@@ -881,9 +857,7 @@ def plot_error_boxplots(
             meanprops=dict(color="darkred", linewidth=1.5, linestyle="--"),
             whiskerprops=dict(color="red"),
             capprops=dict(color="red"),
-            flierprops=dict(
-                marker="o", markerfacecolor="red", markersize=2, alpha=0.3
-            ),
+            flierprops=dict(marker="o", markerfacecolor="red", markersize=2, alpha=0.3),
         )
 
     ax2.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.5)
@@ -899,9 +873,7 @@ def plot_error_boxplots(
     # Add legend
     from matplotlib.patches import Patch
 
-    legend_elements = [
-        Patch(facecolor="lightblue", edgecolor="blue", label="Model")
-    ]
+    legend_elements = [Patch(facecolor="lightblue", edgecolor="blue", label="Model")]
     if has_baseline:
         legend_elements.append(
             Patch(facecolor="lightcoral", edgecolor="red", label="Baseline")
@@ -974,12 +946,8 @@ def plot_error_violins(
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
 
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         # Prepare data for violin plot
         plot_data = []
@@ -1104,9 +1072,7 @@ def plot_error_cdfs(
     for idx, bin_config in enumerate(bins_with_data):
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
 
         if len(model_errors) > 0:
             # Sort errors for CDF
@@ -1162,12 +1128,8 @@ def plot_error_cdfs(
     for bin_config in representative_bins:
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         if len(model_errors) > 0:
             sorted_errors = np.sort(model_errors)
@@ -1240,9 +1202,7 @@ def plot_error_cdfs(
         bbox_inches="tight",
     )
     plt.close()
-    print(
-        f"Saved error CDF plots to {output_dir / 'error_distribution_cdfs.png'}"
-    )
+    print(f"Saved error CDF plots to {output_dir / 'error_distribution_cdfs.png'}")
 
 
 def plot_vhm0_distributions(
