@@ -37,9 +37,10 @@ class WaveBiasCorrector(pl.LightningModule):
           ]
         - Task names (auxiliary_tasks) are automatically inferred from tasks_config
     """
+
     def __init__(
         self,
-        tasks_config, # List of tasks: [{'name': 'vhm0', 'loss_type': 'mse', 'weight': 1.0}, ...]
+        tasks_config,  # List of tasks: [{'name': 'vhm0', 'loss_type': 'mse', 'weight': 1.0}, ...]
         in_channels=3,
         lr=1e-3,
         loss_type="weighted_mse",
@@ -63,20 +64,28 @@ class WaveBiasCorrector(pl.LightningModule):
         use_patch_sampling=False,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=['normalizer'])
+        self.save_hyperparameters(ignore=["normalizer"])
         self.loss_type = loss_type
         self.n_discriminator_updates = n_discriminator_updates
         self.discriminator_lr_multiplier = discriminator_lr_multiplier
         if self.loss_type == "pixel_switch_mse":
             self.pixel_switch_threshold_m = pixel_switch_threshold_m
 
-        if self.loss_type == "mse_perceptual" or self.loss_type == "mse_ssim_perceptual":
-            self.perceptual_loss = PerceptualLoss(WaveFeatureExtractor(), layer_weights=[1.0, 1.0, 1.0])
+        if (
+            self.loss_type == "mse_perceptual"
+            or self.loss_type == "mse_ssim_perceptual"
+        ):
+            self.perceptual_loss = PerceptualLoss(
+                WaveFeatureExtractor(), layer_weights=[1.0, 1.0, 1.0]
+            )
 
         if self.loss_type == "mse_ssim_perceptual" or self.loss_type == "mse_ssim":
             self.ssim_loss = SSIMLoss()
 
-        if self.loss_type == "smooth_l1" or self.loss_type == "multi_bin_weighted_smooth_l1":
+        if (
+            self.loss_type == "smooth_l1"
+            or self.loss_type == "multi_bin_weighted_smooth_l1"
+        ):
             self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="none")
 
         self.use_mdn = use_mdn
@@ -89,9 +98,9 @@ class WaveBiasCorrector(pl.LightningModule):
         self.tasks_config = tasks_config
         # Add loss_type to each task if not already present
         for task in self.tasks_config:
-            if 'loss_type' not in task:
-                task['loss_type'] = self.loss_type
-        self.auxiliary_tasks = [task['name'] for task in tasks_config]
+            if "loss_type" not in task:
+                task["loss_type"] = self.loss_type
+        self.auxiliary_tasks = [task["name"] for task in tasks_config]
 
         # Store whether we're in multi-task mode
         self.is_multi_task = len(self.auxiliary_tasks) > 1
@@ -126,35 +135,35 @@ class WaveBiasCorrector(pl.LightningModule):
         """
         Denormalize predictions if normalization was applied during training.
         Works for both bias predictions and direct wave height predictions.
-        
+
         Args:
             prediction: Normalized prediction tensor (any shape)
             task_name: Name of the task (e.g., 'vhm0', 'vtm02')
-        
+
         Returns:
             Denormalized prediction tensor (same shape as input)
         """
         if not self.normalize_target or self.normalizer is None:
             return prediction
-        
+
         # Get the target column name for this task
         # This assumes the normalizer has access to the task column mappings
         # For vhm0, the target is typically 'corrected_VHM0'
         target_column_map = {
-            'vhm0': 'corrected_VHM0',
-            'vtm02': 'corrected_VTM02',
+            "vhm0": "corrected_VHM0",
+            "vtm02": "corrected_VTM02",
         }
-        target_col = target_column_map.get(task_name, f'corrected_{task_name.upper()}')
-        
+        target_col = target_column_map.get(task_name, f"corrected_{task_name.upper()}")
+
         # Set up the normalizer to use the correct target stats
         if target_col in self.normalizer.feature_order_:
             target_idx = self.normalizer.feature_order_.index(target_col)
             if target_idx in self.normalizer.stats_:
                 self.normalizer.target_stats_ = self.normalizer.stats_[target_idx]
-        
+
         # Denormalize
         original_shape = prediction.shape
-        
+
         # inverse_transform_torch expects (H, W) or (1, H, W) or (H, W, 1)
         # prediction is typically (B, C, H, W) for batches
         if len(original_shape) == 4:  # (B, C, H, W)
@@ -164,7 +173,9 @@ class WaveBiasCorrector(pl.LightningModule):
             for b in range(B):
                 for c in range(C):
                     slice_2d = prediction[b, c]  # (H, W)
-                    denormalized[b, c] = self.normalizer.inverse_transform_torch(slice_2d)
+                    denormalized[b, c] = self.normalizer.inverse_transform_torch(
+                        slice_2d
+                    )
             return denormalized
         elif len(original_shape) == 3:  # (C, H, W) or (B, H, W)
             # Assume (C, H, W) for single sample
@@ -183,7 +194,16 @@ class WaveBiasCorrector(pl.LightningModule):
         else:
             return prediction
 
-    def compute_loss(self, y_pred, y_true, mask, vhm0_for_reconstruction, pi=None, mu=None, sigma=None):
+    def compute_loss(
+        self,
+        y_pred,
+        y_true,
+        mask,
+        vhm0_for_reconstruction,
+        pi=None,
+        mu=None,
+        sigma=None,
+    ):
         """Compute loss using the unified loss wrapper from losses.py"""
         return compute_loss(
             loss_type=self.loss_type,
@@ -194,13 +214,19 @@ class WaveBiasCorrector(pl.LightningModule):
             pi=pi,
             mu=mu,
             sigma=sigma,
-            criterion=self.criterion if hasattr(self, 'criterion') else None,
-            pixel_switch_threshold_m=self.pixel_switch_threshold_m if hasattr(self, 'pixel_switch_threshold_m') else None,
-            perceptual_loss=self.perceptual_loss if hasattr(self, 'perceptual_loss') else None,
-            ssim_loss=self.ssim_loss if hasattr(self, 'ssim_loss') else None,
+            criterion=self.criterion if hasattr(self, "criterion") else None,
+            pixel_switch_threshold_m=self.pixel_switch_threshold_m
+            if hasattr(self, "pixel_switch_threshold_m")
+            else None,
+            perceptual_loss=self.perceptual_loss
+            if hasattr(self, "perceptual_loss")
+            else None,
+            ssim_loss=self.ssim_loss if hasattr(self, "ssim_loss") else None,
         )
 
-    def compute_multi_task_loss(self, predictions, targets, mask, vhm0_for_reconstruction):
+    def compute_multi_task_loss(
+        self, predictions, targets, mask, vhm0_for_reconstruction
+    ):
         """
         Compute weighted sum of task-specific losses for multi-task learning.
 
@@ -216,7 +242,9 @@ class WaveBiasCorrector(pl.LightningModule):
         """
         # Backward compatibility: single task
         if not isinstance(predictions, dict):
-            loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction)
+            loss = self.compute_loss(
+                predictions, targets, mask, vhm0_for_reconstruction
+            )
             # Use actual task name instead of hardcoding 'vhm0'
             task_name = self.auxiliary_tasks[0]
             return loss, {task_name: loss}
@@ -226,9 +254,9 @@ class WaveBiasCorrector(pl.LightningModule):
         task_losses = {}
 
         for task_config in self.tasks_config:
-            task_name = task_config['name']
-            weight = task_config['weight']
-            loss_type = task_config['loss_type']
+            task_name = task_config["name"]
+            weight = task_config["weight"]
+            loss_type = task_config["loss_type"]
 
             y_pred = predictions[task_name]
             y_true = targets[task_name]
@@ -240,10 +268,14 @@ class WaveBiasCorrector(pl.LightningModule):
                 y_true=y_true,
                 mask=mask,
                 vhm0_for_reconstruction=vhm0_for_reconstruction,
-                criterion=self.criterion if hasattr(self, 'criterion') else None,
-                pixel_switch_threshold_m=self.pixel_switch_threshold_m if hasattr(self, 'pixel_switch_threshold_m') else None,
-                perceptual_loss=self.perceptual_loss if hasattr(self, 'perceptual_loss') else None,
-                ssim_loss=self.ssim_loss if hasattr(self, 'ssim_loss') else None,
+                criterion=self.criterion if hasattr(self, "criterion") else None,
+                pixel_switch_threshold_m=self.pixel_switch_threshold_m
+                if hasattr(self, "pixel_switch_threshold_m")
+                else None,
+                perceptual_loss=self.perceptual_loss
+                if hasattr(self, "perceptual_loss")
+                else None,
+                ssim_loss=self.ssim_loss if hasattr(self, "ssim_loss") else None,
             )
 
             total_loss += weight * task_loss
@@ -292,16 +324,56 @@ class WaveBiasCorrector(pl.LightningModule):
             self.log(f"{prefix}_mae{task_suffix}", mae, on_step=True, on_epoch=True)
             self.log(f"{prefix}_mse{task_suffix}", mse, on_step=True, on_epoch=True)
             self.log(f"{prefix}_rmse{task_suffix}", rmse, on_step=True, on_epoch=True)
-            self.log(f"{prefix}_error_min{task_suffix}", (y_pred - y_true)[mask_crop].min(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_error_max{task_suffix}", (y_pred - y_true)[mask_crop].max(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_error_mean{task_suffix}", (y_pred - y_true)[mask_crop].mean(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_error_p95{task_suffix}", torch.quantile(torch.abs(y_pred - y_true)[mask_crop], 0.95), on_step=True, on_epoch=True)
+            self.log(
+                f"{prefix}_error_min{task_suffix}",
+                (y_pred - y_true)[mask_crop].min(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_error_max{task_suffix}",
+                (y_pred - y_true)[mask_crop].max(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_error_mean{task_suffix}",
+                (y_pred - y_true)[mask_crop].mean(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_error_p95{task_suffix}",
+                torch.quantile(torch.abs(y_pred - y_true)[mask_crop], 0.95),
+                on_step=True,
+                on_epoch=True,
+            )
 
             # Log data statistics
-            self.log(f"{prefix}_y_mean{task_suffix}", y_true[mask_crop].mean(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_y_std{task_suffix}", y_true[mask_crop].std(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_pred_mean{task_suffix}", y_pred[mask_crop].mean(), on_step=True, on_epoch=True)
-            self.log(f"{prefix}_pred_std{task_suffix}", y_pred[mask_crop].std(), on_step=True, on_epoch=True)
+            self.log(
+                f"{prefix}_y_mean{task_suffix}",
+                y_true[mask_crop].mean(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_y_std{task_suffix}",
+                y_true[mask_crop].std(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_pred_mean{task_suffix}",
+                y_pred[mask_crop].mean(),
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                f"{prefix}_pred_std{task_suffix}",
+                y_pred[mask_crop].std(),
+                on_step=True,
+                on_epoch=True,
+            )
 
     def _training_step_no_gan(self, X, targets, mask, vhm0_for_reconstruction):
         """Training step for non-GAN models with multi-task support."""
@@ -315,7 +387,9 @@ class WaveBiasCorrector(pl.LightningModule):
             if not isinstance(model_output, dict):
                 pi, mu, sigma = model_output
                 predictions = mdn_expected_value(pi, mu)
-                loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction, pi, mu, sigma)
+                loss = self.compute_loss(
+                    predictions, targets, mask, vhm0_for_reconstruction, pi, mu, sigma
+                )
                 # Use actual task name instead of hardcoding 'vhm0'
                 task_name = self.auxiliary_tasks[0]
                 task_losses = {task_name: loss}
@@ -325,11 +399,15 @@ class WaveBiasCorrector(pl.LightningModule):
                 predictions = {}
                 for task_name, (pi, mu, _) in model_output.items():
                     predictions[task_name] = mdn_expected_value(pi, mu)
-                loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+                loss, task_losses = self.compute_multi_task_loss(
+                    predictions, targets, mask, vhm0_for_reconstruction
+                )
         else:
             # Non-MDN: standard loss computation
             predictions = model_output
-            loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+            loss, task_losses = self.compute_multi_task_loss(
+                predictions, targets, mask, vhm0_for_reconstruction
+            )
 
         # Log total loss
         self.log("train_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
@@ -337,21 +415,33 @@ class WaveBiasCorrector(pl.LightningModule):
         # Log individual task losses
         for task_name, task_loss in task_losses.items():
             if self.is_multi_task:
-                self.log(f"train_loss_{task_name}", task_loss, on_step=True, on_epoch=True)
+                self.log(
+                    f"train_loss_{task_name}", task_loss, on_step=True, on_epoch=True
+                )
 
         # Compute and log per-task metrics
         with torch.no_grad():
-            self._compute_and_log_task_metrics(predictions, targets, mask, prefix="train")
-            self.log("train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True)
+            self._compute_and_log_task_metrics(
+                predictions, targets, mask, prefix="train"
+            )
+            self.log(
+                "train_valid_pixels", mask.sum().float(), on_step=True, on_epoch=True
+            )
 
             # Log sea-bin metrics for training
             # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
-            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
-            
+            tasks_to_log = (
+                self.auxiliary_tasks
+                if isinstance(predictions, dict)
+                else [self.auxiliary_tasks[0]]
+            )
+
             for task_name in tasks_to_log:
                 if isinstance(predictions, dict):
                     y_pred_task = predictions[task_name]
-                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                    y_true_task = (
+                        targets[task_name] if isinstance(targets, dict) else targets
+                    )
                 else:
                     y_pred_task = predictions
                     y_true_task = targets
@@ -364,26 +454,60 @@ class WaveBiasCorrector(pl.LightningModule):
                 mask_crop = mask[:, :, :min_h, :min_w]
 
                 # Denormalize predictions for sea-bin metrics (if targets were normalized)
-                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
-                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
-                
+                y_pred_task_denorm = self._denormalize_bias_prediction(
+                    y_pred_task, task_name
+                )
+                y_true_task_denorm = self._denormalize_bias_prediction(
+                    y_true_task, task_name
+                )
+
                 # Create task-specific prefix for multi-task logging
-                prefix = f"train_{task_name}" if isinstance(predictions, dict) else "train"
-                baseline_prefix = f"train_baseline_{task_name}" if isinstance(predictions, dict) else "train_baseline"
-                
+                prefix = (
+                    f"train_{task_name}" if isinstance(predictions, dict) else "train"
+                )
+                baseline_prefix = (
+                    f"train_baseline_{task_name}"
+                    if isinstance(predictions, dict)
+                    else "train_baseline"
+                )
+
                 if self.predict_bias and vhm0_for_reconstruction is not None:
                     # Reconstruct full wave heights from bias
-                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
-                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
-                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
-                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
-                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[
+                        :, :, :min_h, :min_w
+                    ][mask_crop]
+                    y_true_wave_heights = (
+                        vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    )
+                    y_pred_wave_heights = (
+                        vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    )
+                    self._log_sea_bin_metrics(
+                        y_true_wave_heights, y_pred_wave_heights, prefix
+                    )
+                    self._log_sea_bin_metrics(
+                        y_true_wave_heights,
+                        vhm0_for_reconstruction_masked,
+                        baseline_prefix,
+                    )
                 else:
                     # Direct wave height prediction - use denormalized values
-                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
-                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    self._log_sea_bin_metrics(
+                        y_true_task_denorm[mask_crop],
+                        y_pred_task_denorm[mask_crop],
+                        prefix,
+                    )
+                    vhm0_crop = (
+                        vhm0_for_reconstruction[:, :, :min_h, :min_w]
+                        if vhm0_for_reconstruction is not None
+                        else None
+                    )
                     if vhm0_crop is not None:
-                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
+                        self._log_sea_bin_metrics(
+                            y_true_task_denorm[mask_crop],
+                            vhm0_crop[mask_crop],
+                            baseline_prefix,
+                        )
 
         return loss
 
@@ -404,7 +528,9 @@ class WaveBiasCorrector(pl.LightningModule):
         if isinstance(targets, dict):
             # Multi-task not supported for GAN yet - use first task
             y = targets[self.auxiliary_tasks[0]]
-            print(f"WARNING: GAN training with multi-task not fully implemented. Using task '{self.auxiliary_tasks[0]}' only.")
+            print(
+                f"WARNING: GAN training with multi-task not fully implemented. Using task '{self.auxiliary_tasks[0]}' only."
+            )
         else:
             y = targets
 
@@ -418,13 +544,15 @@ class WaveBiasCorrector(pl.LightningModule):
         if self.use_mdn:
             pi, mu, sigma = self(X)
             y_pred = mdn_expected_value(pi, mu)
-            base_loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma)
+            base_loss = self.compute_loss(
+                y_pred, y, mask, vhm0_for_reconstruction, pi, mu, sigma
+            )
         else:
             y_pred = self(X)
             base_loss = self.compute_loss(y_pred, y, mask, vhm0_for_reconstruction)
 
         # Adversarial loss for generator
-        y_pred_masked = (torch.nan_to_num(y_pred, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+        y_pred_masked = torch.nan_to_num(y_pred, nan=0.0, posinf=0.0, neginf=0.0) * mask
         D_fake = self.model.D(y_pred_masked)
         loss_adv = adversarial_loss_G(D_fake)
 
@@ -446,10 +574,30 @@ class WaveBiasCorrector(pl.LightningModule):
             mse = ((y_pred_crop - y_crop) ** 2)[mask_crop].mean()
             rmse = torch.sqrt(mse)
 
-            self.log("train/G_base_loss", base_loss, prog_bar=False, on_step=True, on_epoch=True)
-            self.log("train/G_adv_loss", loss_adv, prog_bar=False, on_step=True, on_epoch=True)
-            self.log("train/G_total_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True)
-            self.log("train_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True)
+            self.log(
+                "train/G_base_loss",
+                base_loss,
+                prog_bar=False,
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                "train/G_adv_loss",
+                loss_adv,
+                prog_bar=False,
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                "train/G_total_loss",
+                total_loss_g,
+                prog_bar=True,
+                on_step=True,
+                on_epoch=True,
+            )
+            self.log(
+                "train_loss", total_loss_g, prog_bar=True, on_step=True, on_epoch=True
+            )
             self.log("train_mae", mae, on_step=True, on_epoch=True)
             self.log("train_rmse", rmse, on_step=True, on_epoch=True)
 
@@ -467,8 +615,11 @@ class WaveBiasCorrector(pl.LightningModule):
                 else:
                     y_pred_detached = self(X)
 
-            y_real_masked = (torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0) * mask)
-            y_pred_masked = (torch.nan_to_num(y_pred_detached, nan=0.0, posinf=0.0, neginf=0.0) * mask)
+            y_real_masked = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0) * mask
+            y_pred_masked = (
+                torch.nan_to_num(y_pred_detached, nan=0.0, posinf=0.0, neginf=0.0)
+                * mask
+            )
 
             D_real = self.model.D(y_real_masked)
             D_fake = self.model.D(y_pred_masked)
@@ -503,16 +654,22 @@ class WaveBiasCorrector(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """Validation step with multi-task support."""
         if batch_idx == 0:
-            print(f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}")
+            print(
+                f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}"
+            )
 
         try:
             # Unpack batch: targets can be dict (multi-task) or tensor (single-task)
             X, targets, mask, vhm0_for_reconstruction = batch
             if batch_idx == 0:
                 if isinstance(targets, dict):
-                    print(f"Batch unpacked: X={X.shape}, targets={list(targets.keys())}, mask={mask.shape}")
+                    print(
+                        f"Batch unpacked: X={X.shape}, targets={list(targets.keys())}, mask={mask.shape}"
+                    )
                 else:
-                    print(f"Batch unpacked: X={X.shape}, targets={targets.shape}, mask={mask.shape}")
+                    print(
+                        f"Batch unpacked: X={X.shape}, targets={targets.shape}, mask={mask.shape}"
+                    )
 
             # Forward pass (returns dict for multi-task or tensor for single-task)
             # For MDN: returns (pi, mu, sigma) tuples per task
@@ -524,7 +681,15 @@ class WaveBiasCorrector(pl.LightningModule):
                 if not isinstance(model_output, dict):
                     pi, mu, sigma = model_output
                     predictions = mdn_expected_value(pi, mu)
-                    loss = self.compute_loss(predictions, targets, mask, vhm0_for_reconstruction, pi, mu, sigma)
+                    loss = self.compute_loss(
+                        predictions,
+                        targets,
+                        mask,
+                        vhm0_for_reconstruction,
+                        pi,
+                        mu,
+                        sigma,
+                    )
                     # Use actual task name instead of hardcoding 'vhm0'
                     task_name = self.auxiliary_tasks[0]
                     task_losses = {task_name: loss}
@@ -534,11 +699,15 @@ class WaveBiasCorrector(pl.LightningModule):
                     predictions = {}
                     for task_name, (pi, mu, _) in model_output.items():
                         predictions[task_name] = mdn_expected_value(pi, mu)
-                    loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+                    loss, task_losses = self.compute_multi_task_loss(
+                        predictions, targets, mask, vhm0_for_reconstruction
+                    )
             else:
                 # Non-MDN: standard loss computation
                 predictions = model_output
-                loss, task_losses = self.compute_multi_task_loss(predictions, targets, mask, vhm0_for_reconstruction)
+                loss, task_losses = self.compute_multi_task_loss(
+                    predictions, targets, mask, vhm0_for_reconstruction
+                )
 
             # GAN-specific validation: log discriminator metrics
             if self.model_type == "transunet_gan":
@@ -546,7 +715,11 @@ class WaveBiasCorrector(pl.LightningModule):
                     # Extract single task prediction for GAN discriminator
                     if isinstance(predictions, dict):
                         y_pred = predictions[self.auxiliary_tasks[0]]
-                        y = targets[self.auxiliary_tasks[0]] if isinstance(targets, dict) else targets
+                        y = (
+                            targets[self.auxiliary_tasks[0]]
+                            if isinstance(targets, dict)
+                            else targets
+                        )
                     else:
                         y_pred = predictions
                         y = targets
@@ -559,13 +732,23 @@ class WaveBiasCorrector(pl.LightningModule):
                     D_fake = self.model.D(y_pred_masked)
 
                     # Log discriminator metrics
-                    self.log("val_D_real_mean", D_real.mean(), on_step=False, on_epoch=True)
-                    self.log("val_D_fake_mean", D_fake.mean(), on_step=False, on_epoch=True)
-                    self.log("val_D_diff", (D_real - D_fake).mean(), on_step=False, on_epoch=True)
+                    self.log(
+                        "val_D_real_mean", D_real.mean(), on_step=False, on_epoch=True
+                    )
+                    self.log(
+                        "val_D_fake_mean", D_fake.mean(), on_step=False, on_epoch=True
+                    )
+                    self.log(
+                        "val_D_diff",
+                        (D_real - D_fake).mean(),
+                        on_step=False,
+                        on_epoch=True,
+                    )
 
         except Exception as e:
             print(f"\n!!! ERROR IN VALIDATION_STEP: {e}")
             import traceback
+
             traceback.print_exc()
             raise
 
@@ -575,7 +758,9 @@ class WaveBiasCorrector(pl.LightningModule):
         # Log individual task losses
         for task_name, task_loss in task_losses.items():
             if self.is_multi_task:
-                self.log(f"val_loss_{task_name}", task_loss, on_step=False, on_epoch=True)
+                self.log(
+                    f"val_loss_{task_name}", task_loss, on_step=False, on_epoch=True
+                )
 
         # Compute and log per-task metrics
         with torch.no_grad():
@@ -584,12 +769,18 @@ class WaveBiasCorrector(pl.LightningModule):
 
             # Log sea-bin metrics for validation
             # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
-            tasks_to_log = self.auxiliary_tasks if isinstance(predictions, dict) else [self.auxiliary_tasks[0]]
-            
+            tasks_to_log = (
+                self.auxiliary_tasks
+                if isinstance(predictions, dict)
+                else [self.auxiliary_tasks[0]]
+            )
+
             for task_name in tasks_to_log:
                 if isinstance(predictions, dict):
                     y_pred_task = predictions[task_name]
-                    y_true_task = targets[task_name] if isinstance(targets, dict) else targets
+                    y_true_task = (
+                        targets[task_name] if isinstance(targets, dict) else targets
+                    )
                 else:
                     y_pred_task = predictions
                     y_true_task = targets
@@ -602,48 +793,80 @@ class WaveBiasCorrector(pl.LightningModule):
                 mask_crop = mask[:, :, :min_h, :min_w]
 
                 # Denormalize predictions for sea-bin metrics (if targets were normalized)
-                y_pred_task_denorm = self._denormalize_bias_prediction(y_pred_task, task_name)
-                y_true_task_denorm = self._denormalize_bias_prediction(y_true_task, task_name)
-                
+                y_pred_task_denorm = self._denormalize_bias_prediction(
+                    y_pred_task, task_name
+                )
+                y_true_task_denorm = self._denormalize_bias_prediction(
+                    y_true_task, task_name
+                )
+
                 # Create task-specific prefix for multi-task logging
                 prefix = f"val_{task_name}" if isinstance(predictions, dict) else "val"
-                baseline_prefix = f"val_baseline_{task_name}" if isinstance(predictions, dict) else "val_baseline"
-                
+                baseline_prefix = (
+                    f"val_baseline_{task_name}"
+                    if isinstance(predictions, dict)
+                    else "val_baseline"
+                )
+
                 if self.predict_bias and vhm0_for_reconstruction is not None:
                     # Reconstruct full wave heights from bias
-                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[:, :, :min_h, :min_w][mask_crop]
-                    y_true_wave_heights = vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
-                    y_pred_wave_heights = vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
-                    self._log_sea_bin_metrics(y_true_wave_heights, y_pred_wave_heights, prefix)
-                    self._log_sea_bin_metrics(y_true_wave_heights, vhm0_for_reconstruction_masked, baseline_prefix)
+                    vhm0_for_reconstruction_masked = vhm0_for_reconstruction[
+                        :, :, :min_h, :min_w
+                    ][mask_crop]
+                    y_true_wave_heights = (
+                        vhm0_for_reconstruction_masked + y_true_task_denorm[mask_crop]
+                    )
+                    y_pred_wave_heights = (
+                        vhm0_for_reconstruction_masked + y_pred_task_denorm[mask_crop]
+                    )
+                    self._log_sea_bin_metrics(
+                        y_true_wave_heights, y_pred_wave_heights, prefix
+                    )
+                    self._log_sea_bin_metrics(
+                        y_true_wave_heights,
+                        vhm0_for_reconstruction_masked,
+                        baseline_prefix,
+                    )
                 else:
                     # Direct wave height prediction - use denormalized values
-                    self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], y_pred_task_denorm[mask_crop], prefix)
-                    vhm0_crop = vhm0_for_reconstruction[:, :, :min_h, :min_w] if vhm0_for_reconstruction is not None else None
+                    self._log_sea_bin_metrics(
+                        y_true_task_denorm[mask_crop],
+                        y_pred_task_denorm[mask_crop],
+                        prefix,
+                    )
+                    vhm0_crop = (
+                        vhm0_for_reconstruction[:, :, :min_h, :min_w]
+                        if vhm0_for_reconstruction is not None
+                        else None
+                    )
                     if vhm0_crop is not None:
-                        self._log_sea_bin_metrics(y_true_task_denorm[mask_crop], vhm0_crop[mask_crop], baseline_prefix)
+                        self._log_sea_bin_metrics(
+                            y_true_task_denorm[mask_crop],
+                            vhm0_crop[mask_crop],
+                            baseline_prefix,
+                        )
 
         return {"loss": loss, "pred": predictions}
 
     def on_train_start(self) -> None:
         """Log scheduler info and other hyperparameters when training starts."""
         # Log optimizer info
-        if hasattr(self, 'optimizer_info'):
+        if hasattr(self, "optimizer_info"):
             for key, value in self.optimizer_info.items():
                 self.log(key, value)
 
         # Log scheduler info
-        if hasattr(self, 'scheduler_info'):
+        if hasattr(self, "scheduler_info"):
             for key, value in self.scheduler_info.items():
                 self.log(key, value)
 
     def on_train_epoch_end(self) -> None:
         if self.model_type == "transunet_gan":
             # Manual optimization - get first optimizer (generator)
-            lr = self.trainer.optimizers[0].param_groups[0]['lr']
+            lr = self.trainer.optimizers[0].param_groups[0]["lr"]
         else:
             # Automatic optimization
-            lr = self.trainer.optimizers[0].param_groups[0]['lr']
+            lr = self.trainer.optimizers[0].param_groups[0]["lr"]
 
         self.log("learning_rate", lr, on_epoch=True, prog_bar=True)
 
@@ -651,9 +874,17 @@ class WaveBiasCorrector(pl.LightningModule):
         # Only clip gradients in automatic optimization mode
         if self.automatic_optimization:
             total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-            self.log("grad_norm_clipped", total_norm, on_step=True, on_epoch=True, prog_bar=True)
+            self.log(
+                "grad_norm_clipped",
+                total_norm,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+            )
 
-    def _log_sea_bin_metrics(self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str):
+    def _log_sea_bin_metrics(
+        self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str
+    ):
         """Log sea-bin metrics for different wave height ranges."""
         # Convert to numpy for sea-bin calculation
         y_true_np = y_true.cpu().numpy()
@@ -676,7 +907,7 @@ class WaveBiasCorrector(pl.LightningModule):
             {"name": "extreme_11_12", "min": 11.0, "max": 12.0},
             {"name": "extreme_12_13", "min": 12.0, "max": 13.0},
             {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
-            {"name": "extreme_14plus", "min": 14.0, "max": float("inf")}
+            {"name": "extreme_14plus", "min": 14.0, "max": float("inf")},
         ]
 
         for bin_config in sea_bins:
@@ -713,8 +944,10 @@ class WaveBiasCorrector(pl.LightningModule):
         scheduler_cfg, scheduler_metadata = create_scheduler(
             optimizer=optimizer,
             scheduler_config=self.lr_scheduler_config,
-            total_steps=self.trainer.estimated_stepping_batches if hasattr(self, 'trainer') else None,
-            max_epochs=self.trainer.max_epochs if hasattr(self, 'trainer') else None,
+            total_steps=self.trainer.estimated_stepping_batches
+            if hasattr(self, "trainer")
+            else None,
+            max_epochs=self.trainer.max_epochs if hasattr(self, "trainer") else None,
         )
 
         # Store metadata for logging if provided
@@ -725,43 +958,64 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def configure_optimizers(self):
         if self.optimizer_type == "Adam":
-            opt_g = optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_g = optim.Adam(
+                self.parameters(),
+                lr=self.hparams.lr,
+                weight_decay=self.hparams.weight_decay,
+            )
         elif self.optimizer_type == "AdamW":
-            opt_g = optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_g = optim.AdamW(
+                self.parameters(),
+                lr=self.hparams.lr,
+                weight_decay=self.hparams.weight_decay,
+            )
         elif self.optimizer_type == "SGD":
-            opt_g = optim.SGD(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+            opt_g = optim.SGD(
+                self.parameters(),
+                lr=self.hparams.lr,
+                weight_decay=self.hparams.weight_decay,
+            )
         else:
             raise ValueError(f"Invalid optimizer type: {self.optimizer_type}")
 
         if self.model_type != "transunet_gan":
-            return {
-                "optimizer": opt_g,
-                "lr_scheduler": self._build_scheduler(opt_g)
-            }
+            return {"optimizer": opt_g, "lr_scheduler": self._build_scheduler(opt_g)}
 
         # Discriminator uses separate (potentially higher) learning rate
         d_lr = self.hparams.lr * self.discriminator_lr_multiplier
 
         if self.optimizer_type == "Adam":
-            opt_d = optim.Adam(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.Adam(
+                self.model.D.parameters(),
+                lr=d_lr,
+                weight_decay=self.hparams.weight_decay,
+            )
         elif self.optimizer_type == "AdamW":
-            opt_d = optim.AdamW(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.AdamW(
+                self.model.D.parameters(),
+                lr=d_lr,
+                weight_decay=self.hparams.weight_decay,
+            )
         else:
-            opt_d = optim.SGD(self.model.D.parameters(), lr=d_lr, weight_decay=self.hparams.weight_decay)
+            opt_d = optim.SGD(
+                self.model.D.parameters(),
+                lr=d_lr,
+                weight_decay=self.hparams.weight_decay,
+            )
 
         self.optimizer_info = {
             "optimizer_weight_decay": self.hparams.weight_decay,
             "optimizer_lr_G": self.hparams.lr,
-            "optimizer_lr_D": d_lr
+            "optimizer_lr_D": d_lr,
         }
 
         return [
             {  # Generator optimizer + scheduler
                 "optimizer": opt_g,
-                "lr_scheduler": self._build_scheduler(opt_g)
+                "lr_scheduler": self._build_scheduler(opt_g),
             },
             {  # Discriminator optimizer + scheduler (keeps G/D ratio constant)
                 "optimizer": opt_d,
-                "lr_scheduler": self._build_scheduler(opt_d)
-            }
+                "lr_scheduler": self._build_scheduler(opt_d),
+            },
         ]

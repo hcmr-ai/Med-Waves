@@ -37,7 +37,13 @@ class GeoConv(nn.Module):
 
 class BU_Net_Geo(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
+        self,
+        in_channels=6,
+        out_channels=1,
+        filters=None,
+        dropout=0.2,
+        add_vhm0_residual=False,
+        vhm0_channel_index=0,
     ):
         """
         BU-Net with geophysical padding.
@@ -87,7 +93,9 @@ class BU_Net_Geo(nn.Module):
         # Store input dimensions for output matching
         # input_h, input_w = x.shape[2], x.shape[3]
         if self.add_vhm0_residual:
-            vhm0_input = x[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+            vhm0_input = x[
+                :, self.vhm0_channel_index : self.vhm0_channel_index + 1, :, :
+            ]
 
         enc_feats = []
         for enc, pool in zip(self.encoders, self.pools, strict=False):
@@ -126,9 +134,16 @@ class BU_Net_Geo(nn.Module):
 
         return x
 
+
 class BU_Net_Geo_Nick_Shallow(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
+        self,
+        in_channels=6,
+        out_channels=1,
+        filters=None,
+        dropout=0.2,
+        add_vhm0_residual=False,
+        vhm0_channel_index=0,
     ):
         """
         BU-Net matching notebook architecture exactly.
@@ -160,13 +175,19 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
 
         # Decoder
         # Block 1: Upsample + concat with enc2 + 64 filters
-        self.dec1_upsample = nn.UpsamplingNearest2d(scale_factor=2)  # Matches UpSampling2D
-        self.dec1_conv = nn.Conv2d(192, 64, kernel_size=3, padding=1)  # 64 (skip) + 64 (upsampled) = 128 in
+        self.dec1_upsample = nn.UpsamplingNearest2d(
+            scale_factor=2
+        )  # Matches UpSampling2D
+        self.dec1_conv = nn.Conv2d(
+            192, 64, kernel_size=3, padding=1
+        )  # 64 (skip) + 64 (upsampled) = 128 in
         self.dec1_bn = nn.BatchNorm2d(64)
 
         # Block 2: Upsample + concat with enc1 + 32 filters
         self.dec2_upsample = nn.UpsamplingNearest2d(scale_factor=2)
-        self.dec2_conv = nn.Conv2d(96, 32, kernel_size=3, padding=1)  # 32 (skip) + 64 (upsampled) = 96 in
+        self.dec2_conv = nn.Conv2d(
+            96, 32, kernel_size=3, padding=1
+        )  # 32 (skip) + 64 (upsampled) = 96 in
         self.dec2_bn = nn.BatchNorm2d(32)
 
         # Output correction: 1 channel, 3x3 conv, linear activation
@@ -181,7 +202,9 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
 
         # Store VHM0 for residual (from padded input)
         if self.add_vhm0_residual:
-            vhm0_raw = x_padded[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+            vhm0_raw = x_padded[
+                :, self.vhm0_channel_index : self.vhm0_channel_index + 1, :, :
+            ]
 
         # Encoder
         c1 = F.relu(self.enc1_bn(self.enc1_conv(x_padded)))
@@ -198,7 +221,9 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
         u2 = self.dec1_upsample(c3)
         # Handle dimension mismatch if needed
         if u2.size()[2:] != c2.size()[2:]:
-            u2 = F.interpolate(u2, size=c2.shape[2:], mode='bilinear', align_corners=False)
+            u2 = F.interpolate(
+                u2, size=c2.shape[2:], mode="bilinear", align_corners=False
+            )
         u2_concat = torch.cat([u2, c2], dim=1)  # 64 + 64 = 128 channels
         c4 = F.relu(self.dec1_bn(self.dec1_conv(u2_concat)))
 
@@ -206,7 +231,9 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
         u1 = self.dec2_upsample(c4)
         # Handle dimension mismatch if needed
         if u1.size()[2:] != c1.size()[2:]:
-            u1 = F.interpolate(u1, size=c1.shape[2:], mode='bilinear', align_corners=False)
+            u1 = F.interpolate(
+                u1, size=c1.shape[2:], mode="bilinear", align_corners=False
+            )
         u1_concat = torch.cat([u1, c1], dim=1)  # 64 + 32 = 96 channels
         c5 = F.relu(self.dec2_bn(self.dec2_conv(u1_concat)))
 
@@ -217,7 +244,12 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
         if self.add_vhm0_residual:
             # Ensure vhm0 matches correction dimensions
             if vhm0_raw.shape[2:] != correction.shape[2:]:
-                vhm0_raw = F.interpolate(vhm0_raw, size=correction.shape[2:], mode='bilinear', align_corners=False)
+                vhm0_raw = F.interpolate(
+                    vhm0_raw,
+                    size=correction.shape[2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
             output_padded = correction + vhm0_raw
         else:
             output_padded = correction
@@ -226,13 +258,20 @@ class BU_Net_Geo_Nick_Shallow(nn.Module):
         # If padded input was (B, C, H+4, W+2), output should be (B, C, H, W)
         # Crop top=2, bottom=2, left=1, right=1
         _, _, h, w = output_padded.shape
-        output = output_padded[:, :, 2:h-2, 1:w-1]
+        output = output_padded[:, :, 2 : h - 2, 1 : w - 1]
 
         return output
 
+
 class BU_Net_Geo_Nick(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0
+        self,
+        in_channels=6,
+        out_channels=1,
+        filters=None,
+        dropout=0.2,
+        add_vhm0_residual=False,
+        vhm0_channel_index=0,
     ):
         """
         BU-Net matching notebook architecture exactly.
@@ -281,7 +320,12 @@ class BU_Net_Geo_Nick(nn.Module):
             self.up_samples.append(nn.UpsamplingNearest2d(scale_factor=2))
             self.decoders.append(
                 nn.Sequential(
-                    nn.Conv2d(current_channels + skip_channels, skip_channels, kernel_size=3, padding=1),
+                    nn.Conv2d(
+                        current_channels + skip_channels,
+                        skip_channels,
+                        kernel_size=3,
+                        padding=1,
+                    ),
                     nn.BatchNorm2d(skip_channels),
                     # nn.GroupNorm(1, skip_channels),
                     nn.ReLU(inplace=True),
@@ -290,7 +334,9 @@ class BU_Net_Geo_Nick(nn.Module):
             current_channels = skip_channels
 
         # Output correction: 1 channel, 3x3 conv, linear activation
-        self.correction_conv = nn.Conv2d(filters[0], out_channels, kernel_size=3, padding=1)
+        self.correction_conv = nn.Conv2d(
+            filters[0], out_channels, kernel_size=3, padding=1
+        )
 
         # Crop padding: removes (2, 2) from height, (1, 1) from width) handled in forward
 
@@ -300,7 +346,9 @@ class BU_Net_Geo_Nick(nn.Module):
 
         # Store VHM0 for residual (from padded input)
         if self.add_vhm0_residual:
-            vhm0_raw = x_padded[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+            vhm0_raw = x_padded[
+                :, self.vhm0_channel_index : self.vhm0_channel_index + 1, :, :
+            ]
 
         # Encoder
         enc_feats = []
@@ -314,10 +362,14 @@ class BU_Net_Geo_Nick(nn.Module):
         out = self.bottleneck(out)
 
         # Decoder (skip the last encoder output as it feeds into bottleneck)
-        for up, dec, skip in zip(self.up_samples, self.decoders, reversed(enc_feats[:-1]), strict=False):
+        for up, dec, skip in zip(
+            self.up_samples, self.decoders, reversed(enc_feats[:-1]), strict=False
+        ):
             out = up(out)
             if out.size()[2:] != skip.size()[2:]:
-                out = F.interpolate(out, size=skip.shape[2:], mode='bilinear', align_corners=False)
+                out = F.interpolate(
+                    out, size=skip.shape[2:], mode="bilinear", align_corners=False
+                )
             out = torch.cat([out, skip], dim=1)
             out = dec(out)
 
@@ -327,21 +379,34 @@ class BU_Net_Geo_Nick(nn.Module):
         # Residual connection
         if self.add_vhm0_residual:
             if vhm0_raw.shape[2:] != correction.shape[2:]:
-                vhm0_raw = F.interpolate(vhm0_raw, size=correction.shape[2:], mode='bilinear', align_corners=False)
+                vhm0_raw = F.interpolate(
+                    vhm0_raw,
+                    size=correction.shape[2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
             output_padded = correction + vhm0_raw
         else:
             output_padded = correction
 
         # Crop padding: remove (2, 2) from height, (1, 1) from width
         _, _, h, w = output_padded.shape
-        output = output_padded[:, :, 2:h-2, 1:w-1]
+        output = output_padded[:, :, 2 : h - 2, 1 : w - 1]
 
         return output
 
 
 class BU_Net_Geo_Nick_Enhanced(nn.Module):
     def __init__(
-        self, in_channels=6, out_channels=1, filters=None, dropout=0.2, add_vhm0_residual=False, vhm0_channel_index=0, upsample_mode="nearest", use_mdn=False
+        self,
+        in_channels=6,
+        out_channels=1,
+        filters=None,
+        dropout=0.2,
+        add_vhm0_residual=False,
+        vhm0_channel_index=0,
+        upsample_mode="nearest",
+        use_mdn=False,
     ):
         """
         Enhanced BU-Net with geophysical padding and deeper architecture.
@@ -370,12 +435,7 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
         self.encoder_dropouts = nn.ModuleList()
         prev_c = in_channels
         for f in filters:
-            self.encoders.append(
-                nn.Sequential(
-                    GeoConv(prev_c, f),
-                    GeoConv(f, f)
-                )
-            )
+            self.encoders.append(nn.Sequential(GeoConv(prev_c, f), GeoConv(f, f)))
             self.pools.append(nn.MaxPool2d(2))
             self.encoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
@@ -400,15 +460,14 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
                 # With nearest upsampling: channels don't change, so after concat: prev_c + f
                 decoder_in_channels = prev_c + f
             else:
-                self.upconvs.append(nn.ConvTranspose2d(prev_c, f, kernel_size=2, stride=2))
+                self.upconvs.append(
+                    nn.ConvTranspose2d(prev_c, f, kernel_size=2, stride=2)
+                )
                 # With ConvTranspose2d: channels reduced to f, so after concat: f + f = 2*f
                 decoder_in_channels = f * 2
 
             self.decoders.append(
-                nn.Sequential(
-                    GeoConv(decoder_in_channels, f),
-                    GeoConv(f, f)
-                )
+                nn.Sequential(GeoConv(decoder_in_channels, f), GeoConv(f, f))
             )
             self.decoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
@@ -421,11 +480,15 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
     def forward(self, x):
         # Store VHM0 for residual connection
         if self.add_vhm0_residual:
-            vhm0_input = x[:, self.vhm0_channel_index:self.vhm0_channel_index+1, :, :]
+            vhm0_input = x[
+                :, self.vhm0_channel_index : self.vhm0_channel_index + 1, :, :
+            ]
 
         # Encoder with dropout
         enc_feats = []
-        for enc, pool, dropout in zip(self.encoders, self.pools, self.encoder_dropouts, strict=False):
+        for enc, pool, dropout in zip(
+            self.encoders, self.pools, self.encoder_dropouts, strict=False
+        ):
             x = enc(x)
             x = dropout(x)
             enc_feats.append(x)
@@ -436,7 +499,11 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
 
         # Decoder with skip connections and dropout
         for up, dec, dropout, skip in zip(
-            self.upconvs, self.decoders, self.decoder_dropouts, reversed(enc_feats), strict=False
+            self.upconvs,
+            self.decoders,
+            self.decoder_dropouts,
+            reversed(enc_feats),
+            strict=False,
         ):
             x = up(x)
             # Align dimensions if needed

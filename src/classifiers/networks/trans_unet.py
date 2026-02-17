@@ -8,6 +8,7 @@ from src.classifiers.networks.mdn import MDNHead
 # Basic Conv Blocks
 # -------------------------
 
+
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -26,6 +27,7 @@ class ConvBlock(nn.Module):
 
 class DownBlock(nn.Module):
     """ConvBlock + Strided conv (downsample)."""
+
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = ConvBlock(in_ch, out_ch)
@@ -40,6 +42,7 @@ class DownBlock(nn.Module):
 
 class DualUp(nn.Module):
     """Dual upsampling: bilinear + pixelshuffle."""
+
     def __init__(self, in_ch, out_ch):
         super().__init__()
         mid = out_ch
@@ -84,7 +87,9 @@ class UpBlock(nn.Module):
 
         # Align shapes (crop if necessary)
         if x.shape[-2:] != skip.shape[-2:]:
-            x = F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False)
+            x = F.interpolate(
+                x, size=skip.shape[-2:], mode="bilinear", align_corners=False
+            )
             # H, W = x.shape[-2:]
             # skip = skip[..., :H, :W]
 
@@ -96,6 +101,7 @@ class UpBlock(nn.Module):
 # Size-agnostic Transformer Branch
 # -------------------------
 
+
 class TransformerBranch(nn.Module):
     """
     Patch embedding on arbitrary H×W:
@@ -106,13 +112,16 @@ class TransformerBranch(nn.Module):
         [B, N, emb_dim]
     Transformer works on variable N.
     """
-    def __init__(self,
-                 in_channels,
-                 emb_dim=1024,
-                 patch_size=16,
-                 num_layers=6,
-                 num_heads=8,
-                 mlp_ratio=4.0):
+
+    def __init__(
+        self,
+        in_channels,
+        emb_dim=1024,
+        patch_size=16,
+        num_layers=6,
+        num_heads=8,
+        mlp_ratio=4.0,
+    ):
         super().__init__()
 
         self.patch = nn.Conv2d(
@@ -159,6 +168,7 @@ class TransformerBranch(nn.Module):
 # Full Size-Agnostic TransUNet
 # -------------------------
 
+
 class TransUNetGeo(nn.Module):
     """
     TransUNet as in:
@@ -187,19 +197,22 @@ class TransUNetGeo(nn.Module):
         Single task: Returns tensor of shape [B, 1, H, W]
         Multi-task: Returns dict {'task_name': tensor} where each tensor is [B, 1, H, W]
     """
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 auxiliary_tasks=None,  # List of task names: ['vhm0', 'vtm02']
-                 base_channels=64,
-                 bottleneck_dim=1024,
-                 patch_size=16,   # must match CNN bottleneck size!
-                 num_layers=8,
-                 use_mdn=False):
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        auxiliary_tasks=None,  # List of task names: ['vhm0', 'vtm02']
+        base_channels=64,
+        bottleneck_dim=1024,
+        patch_size=16,  # must match CNN bottleneck size!
+        num_layers=8,
+        use_mdn=False,
+    ):
         super().__init__()
 
         # Multi-task setup
-        self.auxiliary_tasks = auxiliary_tasks or ['vhm0']  # Default single task
+        self.auxiliary_tasks = auxiliary_tasks or ["vhm0"]  # Default single task
         self.use_mdn = use_mdn
 
         # Encoder channels
@@ -260,7 +273,9 @@ class TransUNetGeo(nn.Module):
 
         # Align shapes
         if b_trans.shape[-2:] != b_cnn.shape[-2:]:
-            b_trans = F.interpolate(b_trans, size=b_cnn.shape[-2:], mode='bilinear', align_corners=False)
+            b_trans = F.interpolate(
+                b_trans, size=b_cnn.shape[-2:], mode="bilinear", align_corners=False
+            )
 
         # Fuse
         b = torch.cat([b_cnn, b_trans], 1)
@@ -294,7 +309,7 @@ if __name__ == "__main__":
     model_single = TransUNetGeo(
         in_channels=8,
         out_channels=1,
-        auxiliary_tasks=['vhm0'],  # Single task
+        auxiliary_tasks=["vhm0"],  # Single task
         patch_size=8,
         base_channels=32,
     )
@@ -310,7 +325,7 @@ if __name__ == "__main__":
     model_multi = TransUNetGeo(
         in_channels=8,
         out_channels=1,
-        auxiliary_tasks=['vhm0', 'vtm02'],  # Multi-task
+        auxiliary_tasks=["vhm0", "vtm02"],  # Multi-task
         patch_size=8,
         base_channels=32,
     )
@@ -328,7 +343,7 @@ if __name__ == "__main__":
     model_mdn = TransUNetGeo(
         in_channels=8,
         out_channels=1,
-        auxiliary_tasks=['vhm0', 'vtm02'],
+        auxiliary_tasks=["vhm0", "vtm02"],
         patch_size=8,
         base_channels=32,
         use_mdn=True,

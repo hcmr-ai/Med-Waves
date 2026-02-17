@@ -36,4 +36,4 @@ jobs:
         run: poetry install --only dev --no-interaction
 
       - name: Run ruff check
-        run: make lint
+        run: poetry run ruff check . --output-format github

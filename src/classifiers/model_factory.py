@@ -63,7 +63,7 @@ def create_model(
             filters=filters,
             dropout=dropout,
             add_vhm0_residual=add_vhm0_residual,
-            vhm0_channel_index=vhm0_channel_index
+            vhm0_channel_index=vhm0_channel_index,
         )
 
     elif model_type == "enhanced":
@@ -81,7 +81,7 @@ def create_model(
         return TransUNetGeo(
             in_channels=in_channels,
             out_channels=1,
-            auxiliary_tasks=auxiliary_tasks or ['vhm0'],
+            auxiliary_tasks=auxiliary_tasks or ["vhm0"],
             base_channels=64,
             bottleneck_dim=1024,
             patch_size=16,
@@ -98,7 +98,7 @@ def create_model(
             depths=(2, 2, 2, 2),
             num_heads=(2, 4, 8, 8),
             window_size=4,
-            mlp_ratio=4.,
+            mlp_ratio=4.0,
         )
 
     elif model_type == "transunet_gan":
@@ -119,7 +119,7 @@ def create_model(
             filters=filters,
             dropout=dropout,
             add_vhm0_residual=add_vhm0_residual,
-            vhm0_channel_index=vhm0_channel_index
+            vhm0_channel_index=vhm0_channel_index,
         )
 
     else:
