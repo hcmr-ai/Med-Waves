@@ -341,7 +341,7 @@ def masked_mse_mdn_loss(
         Combined MSE + MDN NLL loss
     """
     # Import here to avoid circular dependency
-    from src.commons.losses import mdn_nll_loss
+    from src.commons.loss_functions.mdn_nll_loss import mdn_nll_loss
 
     # Compute expected value for MSE
     y_pred = mdn_expected_value(pi, mu)
