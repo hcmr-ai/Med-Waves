@@ -1214,13 +1214,35 @@ def plot_vhm0_distributions(
     model_label: str,
     uncorrected_label: str,
     output_dir: Path,
+    vhm0_range: tuple = None,
 ):
-    """Plot distributions of ground truth, predicted, and uncorrected VHM0."""
-    print("Creating VHM0 distribution comparison plot...")
+    """Plot distributions of ground truth, predicted, and uncorrected VHM0.
+
+    Args:
+        vhm0_range: Optional (lo, hi) tuple to filter samples by raw VHM0 range (metres).
+    """
+    range_label = ""
+    if vhm0_range is not None:
+        range_label = f" [{vhm0_range[0]}-{vhm0_range[1]}m]"
+    print(f"Creating VHM0 distribution comparison plot{range_label}...")
 
     y_true = np.array(plot_samples["y_true"])
     y_pred = np.array(plot_samples["y_pred"])
     y_uncorrected = np.array(plot_samples["y_uncorrected"])
+
+    if vhm0_range is not None:
+        vhm0_vals = np.array(plot_samples["vhm0"])
+        mask = (vhm0_vals >= vhm0_range[0]) & (vhm0_vals < vhm0_range[1])
+        y_true = y_true[mask]
+        y_pred = y_pred[mask]
+        y_uncorrected = y_uncorrected[mask]
+        if len(y_true) == 0:
+            print(f"  No samples in VHM0 range {vhm0_range}, skipping.")
+            return
+        print(f"  Filtered to {len(y_true)} samples in range {vhm0_range[0]}-{vhm0_range[1]}m")
+
+    file_suffix = f"_{vhm0_range[0]}-{vhm0_range[1]}m" if vhm0_range else ""
+    title_suffix = f" (VHM0 {vhm0_range[0]}-{vhm0_range[1]}m)" if vhm0_range else ""
 
     # Pre-compute KDE for each dataset once (reused across all 3 plots)
     print("Computing KDEs (cached for reuse)...")
@@ -1285,21 +1307,16 @@ def plot_vhm0_distributions(
 
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
-    ax.set_title(f"{var_name_full}", fontsize=14, fontweight="bold")
+    ax.set_title(f"{var_name_full}{title_suffix}", fontsize=14, fontweight="bold")
     ax.legend(fontsize=11, framealpha=0.9, loc="upper right")
     ax.grid(True, alpha=0.3)
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / f'{var_name}_distributions.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")
 
     # Plot 2: Model vs Reference (reusing cached KDEs)
     _, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -1325,7 +1342,7 @@ def plot_vhm0_distributions(
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
     ax.set_title(
-        f"{var_name_full} Distribution Comparison (Model vs Reference)",
+        f"{var_name_full} Distribution Comparison (Model vs Reference){title_suffix}",
         fontsize=14,
         fontweight="bold",
     )
@@ -1334,15 +1351,10 @@ def plot_vhm0_distributions(
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions_model_vs_reference.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions_model_vs_reference{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / '{var_name}_distributions_model_vs_reference.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")
 
     # Plot 3: Reference vs Uncorrected (reusing cached KDEs)
     _, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -1368,7 +1380,7 @@ def plot_vhm0_distributions(
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
     ax.set_title(
-        f"{var_name_full} Distribution Comparison (Reference vs Uncorrected)",
+        f"{var_name_full} Distribution Comparison (Reference vs Uncorrected){title_suffix}",
         fontsize=14,
         fontweight="bold",
     )
@@ -1377,12 +1389,7 @@ def plot_vhm0_distributions(
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions_reference_vs_uncorrected.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions_reference_vs_uncorrected{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / '{var_name}_distributions_reference_vs_uncorrected.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")

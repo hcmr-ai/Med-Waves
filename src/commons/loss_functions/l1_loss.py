@@ -2,6 +2,15 @@ import torch
 
 
 def masked_smooth_l1_loss(y_pred, y_true, mask, criterion):
+    """
+    SmoothL1 loss masked version - robust for outliers/extremes
+
+    Args:
+        y_pred:    (B, C, H, W) predictions
+        y_true:    (B, C, H, W) targets
+        mask:      (B, C, H, W) boolean mask of valid pixels
+        criterion: SmoothL1Loss instance (its beta/delta controls the L1/L2 transition)
+    """
     min_h = min(y_pred.shape[2], y_true.shape[2])
     min_w = min(y_pred.shape[3], y_true.shape[3])
     y_pred = y_pred[:, :, :min_h, :min_w]

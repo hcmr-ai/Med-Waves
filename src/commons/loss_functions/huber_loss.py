@@ -36,3 +36,76 @@ def masked_huber_loss(y_pred, y_true, mask, delta=1.0):
     )
 
     return huber_loss.mean()
+
+
+def _huber_per_pixel(error, delta):
+    """Element-wise Huber: quadratic for |e|<delta, linear beyond."""
+    return torch.where(
+        error < delta,
+        0.5 * (error**2) / delta,
+        error - 0.5 * delta,
+    )
+
+
+def masked_mse_huber_tail_loss(
+    y_pred,
+    y_true,
+    mask,
+    vhm0,
+    tail_threshold=8.0,
+    delta=0.5,
+    tail_weight=5.0,
+    epsilon=1e-6,
+):
+    """
+    Hybrid loss: MSE on calm/moderate seas, Huber on extreme tails.
+
+    MSE works well where the model already performs (0–tail_threshold m).
+    Huber's linear regime prevents gradient explosion on the rare extreme
+    events, giving the model a stable learning signal for the tails.
+
+    Args:
+        y_pred:         (B, C, H, W) model prediction
+        y_true:         (B, C, H, W) target
+        mask:           (B, C, H, W) bool mask of valid pixels
+        vhm0:           (B, 1, H, W) unnormalized VHM0 in metres
+        tail_threshold: VHM0 above which Huber replaces MSE (metres)
+        delta:          Huber transition point (error magnitude)
+        tail_weight:    Multiplier on the tail loss to compensate for rarity
+        epsilon:        Numerical stability constant
+    """
+    min_h = min(y_pred.shape[2], y_true.shape[2])
+    min_w = min(y_pred.shape[3], y_true.shape[3])
+    y_pred = y_pred[:, :, :min_h, :min_w]
+    y_true = y_true[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w]
+    vhm0 = vhm0[:, :, :min_h, :min_w]
+
+    if not mask.any():
+        return torch.tensor(0.0, device=y_true.device, requires_grad=True)
+
+    y_clean = torch.nan_to_num(y_true, nan=0.0)
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
+    vhm0_clean = torch.nan_to_num(vhm0, nan=0.0)
+
+    error = torch.abs(y_pred_clean - y_clean)
+
+    # Split pixels into bulk vs tail based on raw wave height
+    is_tail = (vhm0_clean >= tail_threshold) & mask
+    is_bulk = (~is_tail) & mask
+
+    # Bulk: standard MSE
+    loss_bulk = torch.tensor(0.0, device=y_pred.device)
+    n_bulk = is_bulk.sum()
+    if n_bulk > 0:
+        loss_bulk = (error[is_bulk] ** 2).sum() / (n_bulk.float() + epsilon)
+
+    # Tail: Huber (linear penalty for large errors, quadratic for small)
+    loss_tail = torch.tensor(0.0, device=y_pred.device)
+    n_tail = is_tail.sum()
+    if n_tail > 0:
+        loss_tail = _huber_per_pixel(error[is_tail], delta).sum() / (
+            n_tail.float() + epsilon
+        )
+
+    return loss_bulk + tail_weight * loss_tail

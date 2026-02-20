@@ -1,4 +1,7 @@
-from src.commons.loss_functions.huber_loss import masked_huber_loss
+from src.commons.loss_functions.huber_loss import (
+    masked_huber_loss,
+    masked_mse_huber_tail_loss,
+)
 from src.commons.loss_functions.l1_loss import (
     masked_multi_bin_weighted_smooth_l1,
     masked_smooth_l1_loss,
@@ -125,6 +128,13 @@ def compute_loss(
 
     elif loss_type == "huber":
         return masked_huber_loss(y_pred, y_true, mask)
+
+    elif loss_type == "mse_huber_tail":
+        if vhm0_for_reconstruction is None:
+            raise ValueError("mse_huber_tail requires vhm0_for_reconstruction")
+        return masked_mse_huber_tail_loss(
+            y_pred, y_true, mask, vhm0_for_reconstruction
+        )
 
     elif loss_type == "multi_bin_weighted_mse":
         # Default fallback

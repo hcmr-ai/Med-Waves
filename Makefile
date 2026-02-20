@@ -75,6 +75,9 @@ eval-bunet-geographic:
 	
 eval-bunet-bitwise:
 	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-binwise-correction
+
+eval-bunet-delta-corrector:
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-delta-corrector-flag
 # Scripts
 run-manual-exp: ## Create manual experiment
 	poetry run python scripts/create_manual_experiment.py
@@ -87,6 +90,9 @@ run-diff-corrector: ## Run diff corrector evaluation
 
 run-diff-corrector-plotter: ## Run diff corrector plotter
 	poetry run python scripts/run_diff_corrector_plotter.py
+
+delta-corrector-stats: ## Load DeltaCorrector (bins 9-12) and print stats
+	poetry run python scripts/load_delta_corrector_stats.py correctors/delta_corrector_bins_9_12.joblib
 
 # Streamlit dashboard
 dashboard: ## Start Streamlit dashboard
