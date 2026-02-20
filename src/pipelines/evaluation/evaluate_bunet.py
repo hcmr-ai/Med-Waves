@@ -93,6 +93,7 @@ class ModelEvaluator:
         use_mdn: bool = False,
         target_columns: dict = None,
         apply_bilateral_filter: bool = False,
+        apply_delta_corrector_flag: bool = False,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -178,9 +179,10 @@ class ModelEvaluator:
         self.high_wave_model = None
         try:
             high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
+            high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
             high_wave_ckpt = ""
-            logger.info(
-                f"Loading specialized model for >=9m waves from {high_wave_ckpt}"
+            print(
+                f"[HIGH-WAVE] Loading specialized model for 8-9m waves from {high_wave_ckpt}"
             )
 
             # Load checkpoint manually
@@ -194,7 +196,7 @@ class ModelEvaluator:
                 ckpt = torch.load(high_wave_ckpt, map_location="cpu")
 
             hparams = ckpt.get("hyper_parameters", {})
-            logger.info(f"High-wave checkpoint hyperparameters: {list(hparams.keys())}")
+            print(f"[HIGH-WAVE] Checkpoint hyperparameters: {list(hparams.keys())}")
 
             from src.classifiers.lightning_trainer import WaveBiasCorrector
 
@@ -219,8 +221,8 @@ class ModelEvaluator:
                 "model.final.weight" in state_dict
                 and "model.task_heads.vhm0.weight" not in state_dict
             ):
-                logger.info(
-                    "Remapping single-task checkpoint to multi-task format (high-wave)"
+                print(
+                    "[HIGH-WAVE] Remapping single-task checkpoint to multi-task format"
                 )
                 new_state_dict = {}
                 for key, value in state_dict.items():
@@ -234,10 +236,10 @@ class ModelEvaluator:
             self.high_wave_model.load_state_dict(state_dict, strict=False)
             self.high_wave_model.to(device)
             self.high_wave_model.eval()
-            logger.info("✓ Successfully loaded >=9m specialized model from state_dict")
+            print("✓ [HIGH-WAVE] Successfully loaded 8-9m specialized model from state_dict")
         except Exception as e:
-            logger.warning(
-                f"Failed to load specialized >=9m model: {e}. Using default model for high waves."
+            print(
+                f"✗ [HIGH-WAVE] Failed to load specialized 8-9m model: {e}. Using default model for high waves."
             )
             self.high_wave_model = None
             import traceback
@@ -254,6 +256,7 @@ class ModelEvaluator:
         self.normalizer = normalizer
         self.normalize_target = normalize_target
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
+        self.apply_delta_corrector_flag = apply_delta_corrector_flag
         self.geo_bounds = geo_bounds  # {'lat_min': float, 'lat_max': float, 'lon_min': float, 'lon_max': float}
         self.use_mdn = use_mdn
         self.target_columns = target_columns
@@ -267,6 +270,8 @@ class ModelEvaluator:
         self.apply_bilateral_filter = apply_bilateral_filter
         if self.apply_bilateral_filter:
             logger.info("Applying bilateral filter to predictions")
+        if self.apply_delta_corrector_flag:
+            logger.info("Applying DeltaCorrector to predictions for bins >= 11m")
         self._configure_sea_bins()
         self._configure_labels()
 
@@ -290,6 +295,7 @@ class ModelEvaluator:
             "y_true": [],
             "y_pred": [],
             "y_uncorrected": [],
+            "vhm0": [],
         }
 
         # Timestamp cache for seasonal analysis
@@ -573,6 +579,13 @@ class ModelEvaluator:
                 lon_grid <= self.geo_bounds["lon_max"]
             )
             geo_mask = lat_mask & lon_mask
+
+            if self.region_filter == "mediterranean":
+                med_mask = lon_grid >= -5.5  # East of Gibraltar
+                geo_mask = geo_mask & med_mask
+            elif self.region_filter == "atlantic":
+                atl_mask = lon_grid < -5.5  # West of Gibraltar
+                geo_mask = geo_mask & atl_mask
 
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
@@ -879,6 +892,9 @@ class ModelEvaluator:
             self.plot_samples["y_pred"].extend(y_pred_np)
             if y_uncorrected is not None:
                 self.plot_samples["y_uncorrected"].extend(y_uncorrected_np)
+                self.plot_samples["vhm0"].extend(y_uncorrected_np)
+            else:
+                self.plot_samples["vhm0"].extend(y_true_np)
 
     def _update_category_stats(
         self, bin_name, category, features, y_true, y_pred, timestamps, confidence
@@ -1109,7 +1125,7 @@ class ModelEvaluator:
                     ) and vhm0 is not None:
                         # Create masks for different wave height ranges
                         low_wave_mask = (vhm0 >= 0.0) & (vhm0 <= 1.0)
-                        high_wave_mask = (vhm0 >= 12.0) & (vhm0 < 14.0)
+                        high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
                         mid_wave_mask = ~(low_wave_mask | high_wave_mask)
 
                         # Get predictions from all models
@@ -1121,6 +1137,7 @@ class ModelEvaluator:
 
                         # Start with default predictions
                         y_pred = y_pred_default.clone()
+                        # y_pred = y_pred.clamp(-0.0325, 0.0325)
 
                         # Helper function to align spatial dimensions
                         def align_predictions(pred_source, pred_target, is_mask=False):
@@ -1171,6 +1188,46 @@ class ModelEvaluator:
                             y_pred = torch.where(
                                 low_wave_mask_aligned, y_pred_low, y_pred
                             )
+                        # Apply DeltaCorrector bias for 11-12m and 12-13m bins (use default model - bias)
+                        # if self.apply_delta_corrector_flag is not None:
+                        #     delta_bins_mask = (
+                        #         (vhm0 >= 11.5) & (vhm0 < 13.0)
+                        #     )
+                        #     if delta_bins_mask.any():
+                        #         y_pred = y_pred.clone()
+                        #         delta = 0.0325
+                        #         if self.predict_bias:
+                        #             # bias = y_true - vhm0
+                        #             y_pred[delta_bins_mask] = delta
+                        #         else:
+                        #             # y_pred is corrected Hs
+                        #             y_pred[delta_bins_mask] = vhm0[delta_bins_mask] + delta
+
+                        if self.apply_delta_corrector_flag:
+                            # vhm0: uncorrected wave height (raw model)
+                            # start, end = 11.5, 13.0  # tune as you like
+                            start, end = 11.2, 12.0
+
+                            # only in the tail region
+                            tail_mask = vhm0 >= start
+                            if tail_mask.any():
+                                y_pred = y_pred.clone()
+
+                                # scale in [0, 1]: 1 -> trust DNN, 0 -> ignore DNN (bias=0 => fallback to raw)
+                                # scale = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
+                                scale_lin = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
+                                p = 3.0
+                                scale = scale_lin ** p
+
+                                # apply scaling only on tail pixels
+                                y_pred[tail_mask] = y_pred[tail_mask] * scale[tail_mask]
+
+                                # OPTIONAL: add a tiny fixed delta bias (since your bias = y_true - vhm0)
+                                delta = 0.035
+                                y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
+
+                                max_bias_tail = 0.3
+                                y_pred[tail_mask] = y_pred[tail_mask].clamp(-max_bias_tail, max_bias_tail)
 
                         # Apply high-wave specialized model if available
                         if self.high_wave_model is not None and high_wave_mask.any():
@@ -1178,10 +1235,12 @@ class ModelEvaluator:
                             if isinstance(y_pred_high, dict):
                                 y_pred_high = y_pred_high[self.task_name]
 
-                            # Debug: Check if shapes match
                             if batch_idx == 0:
-                                logger.info(
-                                    f"Shape check - Default: {y_pred.shape}, High-wave: {y_pred_high.shape}, VHM0: {vhm0.shape}"
+                                print(
+                                    f"[HIGH-WAVE] Shape check - Default: {y_pred.shape}, High-wave: {y_pred_high.shape}, VHM0: {vhm0.shape}"
+                                )
+                                print(
+                                    f"[HIGH-WAVE] Routing {high_wave_mask.sum().item()} pixels to specialized model"
                                 )
 
                             # Only align if shapes differ
@@ -1207,26 +1266,30 @@ class ModelEvaluator:
                             mid_pixels = mid_wave_mask.sum().item()
                             high_pixels = high_wave_mask.sum().item()
                             total_pixels = low_wave_mask.numel()
-                            logger.info("Bin-specific routing:")
-                            logger.info(
-                                f"  0-2m: {low_pixels}/{total_pixels} pixels ({100 * low_pixels / total_pixels:.1f}%)"
+                            print("Bin-specific routing:")
+                            print(
+                                f"  0-1m: {low_pixels}/{total_pixels} pixels ({100 * low_pixels / total_pixels:.1f}%)"
                                 + (
                                     " → specialized model"
                                     if self.low_wave_model is not None
                                     else " → default model"
                                 )
                             )
-                            logger.info(
-                                f"  2-9m: {mid_pixels}/{total_pixels} pixels ({100 * mid_pixels / total_pixels:.1f}%) → default model"
+                            print(
+                                f"  1-8m: {mid_pixels}/{total_pixels} pixels ({100 * mid_pixels / total_pixels:.1f}%) → default model"
                             )
-                            logger.info(
-                                f"  ≥9m: {high_pixels}/{total_pixels} pixels ({100 * high_pixels / total_pixels:.1f}%)"
+                            print(
+                                f"  8-9m: {high_pixels}/{total_pixels} pixels ({100 * high_pixels / total_pixels:.1f}%)"
                                 + (
                                     " → specialized model"
                                     if self.high_wave_model is not None
                                     else " → default model"
                                 )
                             )
+                            if self.apply_delta_corrector_flag:
+                                print(
+                                    f"  DeltaCorrector: applying correction {0.0325} for bins >= 11m"
+                                )
                     else:
                         y_pred = self.model(X)
 
@@ -1925,8 +1988,12 @@ class ModelEvaluator:
         )
         return  # Method extracted to evaluation_plots.py
 
-    def plot_vhm0_distributions(self):
-        """Plot distributions of ground truth, predicted, and uncorrected VHM0."""
+    def plot_vhm0_distributions(self, vhm0_range=None):
+        """Plot distributions of ground truth, predicted, and uncorrected VHM0.
+
+        Args:
+            vhm0_range: Optional (lo, hi) tuple to filter by raw VHM0 range (metres).
+        """
         plot_vhm0_distributions_fn(
             plot_samples=self.plot_samples,
             var_name=self.var_name,
@@ -1936,8 +2003,8 @@ class ModelEvaluator:
             model_label=self.model_label,
             uncorrected_label=self.uncorrected_label,
             output_dir=self.output_dir,
+            vhm0_range=vhm0_range,
         )
-        return  # Method extracted to evaluation_plots.py
 
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
@@ -2043,6 +2110,8 @@ class ModelEvaluator:
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
         # self.plot_vhm0_distributions()
+        self.plot_vhm0_distributions(vhm0_range=(11, 12))
+        self.plot_vhm0_distributions(vhm0_range=(12, 13))
         self.plot_error_distribution_histograms()
         # self.plot_error_boxplots()
         # self.plot_error_violins()
@@ -2089,6 +2158,12 @@ def main():
         "--apply-geographic-filtering",
         action="store_true",
         help="Apply geographic filtering to the test set",
+    )
+    parser.add_argument(
+        "--apply-delta-corrector-flag",
+        action="store_true",
+        default=False,
+        help="Apply delta corrector to predictions for bins >= 11m",
     )
     args = parser.parse_args()
 
@@ -2374,6 +2449,7 @@ def main():
             use_mdn=model.use_mdn,
             target_columns=target_columns,
             apply_bilateral_filter=False,
+            apply_delta_corrector_flag=args.apply_delta_corrector_flag,
         )
 
         evaluator.evaluate()

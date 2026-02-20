@@ -184,56 +184,74 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     #         logger.info("Using uniform random sampling (shuffle=True, no sampler)")
 
     if data_config.get("use_patch_sampling", False):
-        n_bins = len(train_dataset.patch_cfg.bin_edges_m) + 1
-        n_hours = len(train_files) * 24  # or compute from len(file_paths)*24
-        steps_per_epoch = int(n_hours / training_config["batch_size"])
+        sampling_mode = data_config.get("sampling_mode", "random")
 
-        # Get bin sampling distribution from config or use default
-        bin_sampling_weights = data_config.get("bin_sampling_weights", None)
-
-        if bin_sampling_weights is not None:
-            # User-specified weights: [weight_bin0, weight_bin1, weight_bin2, ...]
-            total_weight = sum(bin_sampling_weights)
-            bins_per_batch = []
-            for bin_id, weight in enumerate(bin_sampling_weights):
-                count = int(
-                    round(weight / total_weight * training_config["batch_size"])
-                )
-                bins_per_batch.extend([bin_id] * count)
-            # Adjust if rounding caused mismatch
-            while len(bins_per_batch) < training_config["batch_size"]:
-                bins_per_batch.append(0)  # Add to first bin
-            bins_per_batch = bins_per_batch[
-                : training_config["batch_size"]
-            ]  # Trim if over
-            logger.info(f"Using custom bin sampling weights: {bin_sampling_weights}")
-            logger.info(
-                f"Resulting bins_per_batch distribution: {[bins_per_batch.count(i) for i in range(n_bins)]}"
+        if sampling_mode == "exhaustive":
+            # Exhaustive: iterate over all patches once per epoch, no bin balancing
+            logger.info("Using exhaustive patch sampling (shuffle=True, no sampler)")
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=training_config["batch_size"],
+                shuffle=True,
+                num_workers=training_config["num_workers"],
+                pin_memory=training_config["pin_memory"],
+                persistent_workers=training_config.get(
+                    "persistent_workers", training_config["num_workers"] > 0
+                ),
+                prefetch_factor=training_config["prefetch_factor"],
             )
         else:
-            # Default: None (equal distribution handled by BalancedBinBatchSampler)
-            bins_per_batch = None
-            logger.info(f"Using equal bin sampling distribution across {n_bins} bins")
+            # Random/stratified: use BalancedBinBatchSampler for bin-balanced batches
+            n_bins = len(train_dataset.patch_cfg.bin_edges_m) + 1
+            n_hours = len(train_files) * 24  # or compute from len(file_paths)*24
+            steps_per_epoch = int(n_hours / training_config["batch_size"])
 
-        batch_sampler = BalancedBinBatchSampler(
-            dataset_len=len(train_dataset),
-            n_bins=n_bins,
-            batch_size=training_config["batch_size"],
-            bins_per_batch=bins_per_batch,
-            steps_per_epoch=steps_per_epoch,
-            seed=123,
-        )
+            # Get bin sampling distribution from config or use default
+            bin_sampling_weights = data_config.get("bin_sampling_weights", None)
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_sampler=batch_sampler,  # ✅ only batch_sampler
-            num_workers=training_config["num_workers"],
-            pin_memory=training_config["pin_memory"],
-            persistent_workers=training_config.get(
-                "persistent_workers", training_config["num_workers"] > 0
-            ),
-            prefetch_factor=training_config["prefetch_factor"],
-        )
+            if bin_sampling_weights is not None:
+                # User-specified weights: [weight_bin0, weight_bin1, weight_bin2, ...]
+                total_weight = sum(bin_sampling_weights)
+                bins_per_batch = []
+                for bin_id, weight in enumerate(bin_sampling_weights):
+                    count = int(
+                        round(weight / total_weight * training_config["batch_size"])
+                    )
+                    bins_per_batch.extend([bin_id] * count)
+                # Adjust if rounding caused mismatch
+                while len(bins_per_batch) < training_config["batch_size"]:
+                    bins_per_batch.append(0)  # Add to first bin
+                bins_per_batch = bins_per_batch[
+                    : training_config["batch_size"]
+                ]  # Trim if over
+                logger.info(f"Using custom bin sampling weights: {bin_sampling_weights}")
+                logger.info(
+                    f"Resulting bins_per_batch distribution: {[bins_per_batch.count(i) for i in range(n_bins)]}"
+                )
+            else:
+                # Default: None (equal distribution handled by BalancedBinBatchSampler)
+                bins_per_batch = None
+                logger.info(f"Using equal bin sampling distribution across {n_bins} bins")
+
+            batch_sampler = BalancedBinBatchSampler(
+                dataset_len=len(train_dataset),
+                n_bins=n_bins,
+                batch_size=training_config["batch_size"],
+                bins_per_batch=bins_per_batch,
+                steps_per_epoch=steps_per_epoch,
+                seed=123,
+            )
+
+            train_loader = DataLoader(
+                train_dataset,
+                batch_sampler=batch_sampler,  # ✅ only batch_sampler
+                num_workers=training_config["num_workers"],
+                pin_memory=training_config["pin_memory"],
+                persistent_workers=training_config.get(
+                    "persistent_workers", training_config["num_workers"] > 0
+                ),
+                prefetch_factor=training_config["prefetch_factor"],
+            )
     else:
         train_loader = DataLoader(
             train_dataset,
