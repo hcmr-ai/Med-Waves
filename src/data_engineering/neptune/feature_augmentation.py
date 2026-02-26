@@ -41,18 +41,9 @@ def add_features(df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
-    # Temporal differences (assumes rows are time-ordered)
-    df = df.with_columns(
-        [
-            pl.col("VHM0").diff(1).fill_null(0).alias("dVHM0"),
-            pl.col("WSPD").diff(1).fill_null(0).alias("dWSPD"),
-        ]
-    )
-
-    # Spatial gradient proxy: rolling std over a 3-step window
-    df = df.with_columns(
-        pl.col("VHM0").rolling_std(window_size=3, min_periods=1).alias("grad_mag"),
-    )
+    # NOTE: dVHM0, dWSPD, grad_mag are computed at tensor level in
+    # fit_scalers_from_tensors.py and the .pt preprocessing pipeline,
+    # where the full (T, H, W) grid is available for proper spatial/temporal ops.
 
     # Storm regime features (VHM0 is the degraded/raw model output)
     df = df.with_columns(
@@ -120,18 +111,9 @@ def add_features_lazy(df: pl.LazyFrame) -> pl.LazyFrame:
         ]
     )
 
-    # Temporal differences (assumes rows are time-ordered)
-    df = df.with_columns(
-        [
-            pl.col("VHM0").diff(1).fill_null(0).alias("dVHM0"),
-            pl.col("WSPD").diff(1).fill_null(0).alias("dWSPD"),
-        ]
-    )
-
-    # Spatial gradient proxy: rolling std over a 3-step window
-    df = df.with_columns(
-        pl.col("VHM0").rolling_std(window_size=3, min_periods=1).alias("grad_mag"),
-    )
+    # NOTE: dVHM0, dWSPD, grad_mag are computed at tensor level in
+    # fit_scalers_from_tensors.py and the .pt preprocessing pipeline,
+    # where the full (T, H, W) grid is available for proper spatial/temporal ops.
 
     # Storm regime features (VHM0 is the degraded/raw model output)
     df = df.with_columns(
@@ -209,26 +191,65 @@ def _upload_df_to_s3(df: pl.DataFrame, s3_client, bucket: str, key: str) -> None
     s3_client.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
 
 
-def _read_netcdf_as_polars(path: str) -> pl.DataFrame:
-    """Read a NetCDF file (local or S3) into a Polars DataFrame."""
-    is_s3 = path.startswith("s3://")
-    engines = ("h5netcdf", "netcdf4", "scipy")
-    last_err: Exception | None = None
-    for engine in engines:
+_NC_ENGINE: str | None = None
+
+
+def _detect_nc_engine(sample_path: str) -> str:
+    """Try engines once on a sample file and cache the winner."""
+    global _NC_ENGINE
+    if _NC_ENGINE is not None:
+        return _NC_ENGINE
+    is_s3 = sample_path.startswith("s3://")
+    for engine in ("h5netcdf", "netcdf4", "scipy"):
         try:
             if is_s3:
-                with fsspec.open(path, "rb") as fobj:
-                    with xr.open_dataset(fobj, engine=engine) as ds:
-                        return pl.DataFrame(ds.to_dataframe().reset_index())
+                with fsspec.open(sample_path, "rb") as fobj:
+                    xr.open_dataset(fobj, engine=engine).close()
             else:
-                with xr.open_dataset(path, engine=engine) as ds:
-                    return pl.DataFrame(ds.to_dataframe().reset_index())
-        except Exception as e:
-            last_err = e
-    raise RuntimeError(
-        f"Failed to open NetCDF {path}. "
-        f"Tried engines {engines}. Last error: {last_err}"
-    )
+                xr.open_dataset(sample_path, engine=engine).close()
+            _NC_ENGINE = engine
+            print(f"[NC] Using engine: {engine}")
+            return engine
+        except Exception:
+            continue
+    raise RuntimeError(f"No xarray engine could open {sample_path}")
+
+
+def _read_netcdf_as_polars(path: str, engine: str | None = None) -> pl.DataFrame:
+    """Read a NetCDF file into a Polars DataFrame, bypassing pandas.
+
+    Flattens the xarray Dataset directly into numpy arrays and builds
+    the polars DataFrame from a dict, avoiding the slow
+    ds.to_dataframe().reset_index() pandas path.
+    """
+    engine = engine or _detect_nc_engine(path)
+    is_s3 = path.startswith("s3://")
+
+    def _extract(ds: xr.Dataset) -> pl.DataFrame:
+        dim_names = list(ds.dims)
+        dim_sizes = [ds.sizes[d] for d in dim_names]
+        total_rows = int(np.prod(dim_sizes))
+
+        columns: dict[str, np.ndarray] = {}
+
+        for i, dim in enumerate(dim_names):
+            vals = ds.coords[dim].values
+            repeat_inner = int(np.prod(dim_sizes[i + 1:])) if i < len(dim_names) - 1 else 1
+            repeat_outer = int(np.prod(dim_sizes[:i])) if i > 0 else 1
+            columns[dim] = np.tile(np.repeat(vals, repeat_inner), repeat_outer)
+
+        for var in ds.data_vars:
+            columns[str(var)] = ds[var].values.ravel(order="C")[:total_rows]
+
+        return pl.DataFrame(columns)
+
+    if is_s3:
+        with fsspec.open(path, "rb") as fobj:
+            with xr.open_dataset(fobj, engine=engine) as ds:
+                return _extract(ds)
+    else:
+        with xr.open_dataset(path, engine=engine) as ds:
+            return _extract(ds)
 
 
 def process_all(
@@ -344,10 +365,48 @@ def process_all_lazy(
         f"{len(cor_by_stem)} {cor_mode} corrected files."
     )
 
+    # Pre-list existing output files once (avoids per-file S3 HEAD requests)
+    if is_s3_output:
+        try:
+            existing_outputs: set[str] = {
+                f.split("/")[-1]
+                for f in fs.ls(output_dir.rstrip("/"), detail=False)  # type: ignore[union-attr]
+            }
+        except FileNotFoundError:
+            existing_outputs = set()
+    else:
+        out_path = Path(output_dir)
+        existing_outputs = {f.name for f in out_path.glob("*.parquet")} if out_path.exists() else set()
+    print(f"Found {len(existing_outputs)} existing output files (will skip).")
+
+    # Detect NetCDF engine once from a sample file (if needed)
+    nc_engine: str | None = None
+    if deg_mode == "netcdf" or cor_mode == "netcdf":
+        sample = deg_files[0] if deg_mode == "netcdf" else list(cor_by_stem.values())[0]
+        sample_dir = degraded_dir if deg_mode == "netcdf" else corrected_dir
+        is_s3_sample = sample_dir.startswith("s3://")
+        sample_path = (
+            sample_dir.rstrip("/") + f"/{sample}"
+            if is_s3_sample
+            else str(Path(sample_dir) / sample)
+        )
+        nc_engine = _detect_nc_engine(sample_path)
+
+    # Prepare S3 client for direct uploads (faster than fsspec)
+    s3_client = None
+    s3_out_bucket, s3_out_prefix = None, None
+    if is_s3_output:
+        s3_out_bucket, s3_out_prefix = _parse_s3_uri(output_dir)
+        s3_client = _make_s3_client()
+
     def _process_one(file_name: str) -> tuple[str, bool, str, float]:
         start = time.time()
         try:
             stem = file_name.rsplit(".", 1)[0]
+            out_name = stem + ".parquet"
+
+            if out_name in existing_outputs:
+                return file_name, False, "exists", time.time() - start
 
             deg_path = (
                 degraded_dir.rstrip("/") + f"/{file_name}"
@@ -365,28 +424,18 @@ def process_all_lazy(
                 else str(Path(corrected_dir) / cor_name)
             )
 
-            out_name = stem + ".parquet"
-
-            if is_s3_output:
-                target = output_dir.rstrip("/") + f"/{out_name}"
-                if fs.exists(target):  # type: ignore[union-attr]
-                    return file_name, False, "exists", time.time() - start
-            else:
-                if (Path(output_dir) / out_name).exists():
-                    return file_name, False, "exists", time.time() - start
-
             if dry_run:
                 return file_name, True, "dry-run", time.time() - start
 
             if deg_mode == "parquet":
                 df_deg = pl.scan_parquet(deg_path)
             else:
-                df_deg = _read_netcdf_as_polars(deg_path).lazy()
+                df_deg = _read_netcdf_as_polars(deg_path, engine=nc_engine).lazy()
 
             if cor_mode == "parquet":
                 df_cor = pl.scan_parquet(cor_path)
             else:
-                df_cor = _read_netcdf_as_polars(cor_path).lazy()
+                df_cor = _read_netcdf_as_polars(cor_path, engine=nc_engine).lazy()
 
             df_cor_labels = df_cor.select(
                 [
@@ -397,10 +446,9 @@ def process_all_lazy(
             df_combined = pl.concat([df_deg, df_cor_labels], how="horizontal")
             df_out = add_features_lazy(df_combined).collect()
 
-            if is_s3_output:
-                target = output_dir.rstrip("/") + f"/{out_name}"
-                with fsspec.open(target, "wb") as f:
-                    df_out.write_parquet(f)
+            if s3_client is not None:
+                key = f"{s3_out_prefix}/{out_name}"
+                _upload_df_to_s3(df_out, s3_client, s3_out_bucket, key)
             else:
                 df_out.write_parquet(Path(output_dir) / out_name)
 
@@ -410,7 +458,7 @@ def process_all_lazy(
 
     def _report(fname: str, ok: bool, msg: str, dur: float) -> None:
         if ok and msg == "ok":
-            tqdm.write(f"✅ Finished {fname} in {dur:.2f}s")
+            tqdm.write(f"Finished {fname} in {dur:.2f}s")
         elif ok and msg == "dry-run":
             out = fname.rsplit(".", 1)[0] + ".parquet" if fname.endswith(".nc") else fname
             target = (
@@ -418,17 +466,16 @@ def process_all_lazy(
                 if is_s3_output
                 else str(Path(output_dir) / out)
             )
-            tqdm.write(f"ℹ️  Dry-run: would write {target}")
+            tqdm.write(f"Dry-run: would write {target}")
         elif msg == "corrected file not found":
-            tqdm.write(f"⚠️  Skipping {fname} – corrected file not found.")
+            tqdm.write(f"Skipping {fname} - corrected file not found.")
         elif msg == "exists":
-            tqdm.write(f"⏭️  Skipping {fname} – output already exists.")
+            pass  # silent skip for existing files
         else:
-            tqdm.write(f"❌ Error processing {fname}: {msg}")
+            tqdm.write(f"Error processing {fname}: {msg}")
 
     if concurrency <= 1:
         for name in tqdm(deg_files, desc="Processing files", unit="file"):
-            tqdm.write(f"🔄 Processing {name}...")
             _report(*_process_one(name))
     else:
         with tqdm(total=len(deg_files), desc="Processing files", unit="file") as pbar:
@@ -438,7 +485,7 @@ def process_all_lazy(
                     _report(*fut.result())
                     pbar.update(1)
 
-    print("🏁 All files processed." if not dry_run else "✅ Dry-run complete.")
+    print("All files processed." if not dry_run else "Dry-run complete.")
 
 
 def main():
@@ -446,30 +493,42 @@ def main():
         description="Feature augmentation with S3 I/O support"
     )
     parser.add_argument(
-        "--degraded-dir",
-        default="s3://medwav-dev-data/raw/without_reduced/year=2017",
-        # /data/tsolis/AI_project/parquet/without_reduced/hourly/
+        "--degraded-base",
+        default="s3://medwav-dev-data/raw/without_reduced",
     )
     parser.add_argument(
-        "--corrected-dir",
-        default="s3://medwav-dev-data/raw/with_reduced/year=2017",
-        # /data/tsolis/AI_project/parquet/with_reduced/hourly/
+        "--corrected-base",
+        default="s3://medwav-dev-data/raw/with_reduced",
     )
     parser.add_argument(
-        "--output-dir",
-        default="s3://medwav-dev-data/parquet/hourly_extra_features/year=2017",
+        "--output-base",
+        default="s3://medwav-dev-data/parquet/hourly_extra_features",
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        default=[2017],
+        help="Years to process, e.g. --years 2017 2018 2019 2020 2021",
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--concurrency", type=int, default=8)
     args = parser.parse_args()
 
-    process_all_lazy(
-        degraded_dir=args.degraded_dir,
-        corrected_dir=args.corrected_dir,
-        output_dir=args.output_dir,
-        dry_run=args.dry_run,
-        concurrency=max(1, args.concurrency),
-    )
+    for year in args.years:
+        degraded_dir = f"{args.degraded_base.rstrip('/')}/year={year}"
+        corrected_dir = f"{args.corrected_base.rstrip('/')}/year={year}"
+        output_dir = f"{args.output_base.rstrip('/')}/year={year}"
+        print(f"\n{'='*60}")
+        print(f"Processing year {year}")
+        print(f"{'='*60}")
+        process_all_lazy(
+            degraded_dir=degraded_dir,
+            corrected_dir=corrected_dir,
+            output_dir=output_dir,
+            dry_run=args.dry_run,
+            concurrency=max(1, args.concurrency),
+        )
 
 
 if __name__ == "__main__":

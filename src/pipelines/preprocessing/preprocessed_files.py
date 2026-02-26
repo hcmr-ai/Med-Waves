@@ -9,9 +9,9 @@ import torch
 
 # 📂 Configuration
 INPUT_DIR = (
-    "s3://medwav-dev-data/parquet/hourly/year=2022/"  # folder with WAVEAN*.parquet
+    "s3://medwav-dev-data/parquet/hourly_extra_features/year=2020/"  # folder with WAVEAN*.parquet
 )
-OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_hourly/"  # output directory
+OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_extended/"  # output directory
 
 # 🔧 SAVE_HOURLY option:
 #   True:  Save each hour as separate file (e.g., WAVEAN20200101_h00.pt ... _h23.pt)
@@ -19,7 +19,7 @@ OUTPUT_DIR = "s3://medwav-dev-data/preprocessed_hourly/"  # output directory
 #          Benefits: Better for multi-worker DataLoader, less disk I/O contention
 #   False: Save entire day as one file (e.g., WAVEAN20200101.pt)
 #          File size: ~1.1 GB per file, 730 total files
-SAVE_HOURLY = True
+SAVE_HOURLY = False
 
 # Create directory only for local output paths
 if not OUTPUT_DIR.startswith("s3://"):
@@ -90,7 +90,10 @@ def process_file(path):
     is_s3_input = path.startswith("s3://")
     is_s3_output = OUTPUT_DIR.startswith("s3://")
     tensor, feature_cols = load_parquet_as_tensor(
-        path, excluded_columns=None, subsample_step=1, is_s3_input=is_s3_input
+        path,
+        excluded_columns=["dVHM0", "dWSPD", "grad_mag"],
+        subsample_step=1,
+        is_s3_input=is_s3_input,
     )
     T = tensor.shape[0]
 
