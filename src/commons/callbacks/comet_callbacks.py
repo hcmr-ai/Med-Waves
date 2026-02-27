@@ -16,11 +16,11 @@ class CometVisualizationCallback(Callback):
     """Custom callback for enhanced Comet ML visualizations"""
 
     SEA_BINS = [
-        "calm",
-        "light",
-        "moderate",
-        "rough",
-        "very_rough",
+        "calm_0_1",
+        "light_1_2",
+        "moderate_2_3",
+        "rough_3_4",
+        "very_rough_4_5",
         "extreme_5_6",
         "extreme_6_7",
         "extreme_7_8",
@@ -209,7 +209,6 @@ class CometVisualizationCallback(Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """Log visualizations at the end of validation epochs"""
-        # Collect metrics for plotting
         if trainer.sanity_checking:
             logger.info("Sanity checking, skipping validation epoch end")
             return
@@ -219,14 +218,8 @@ class CometVisualizationCallback(Callback):
         if hasattr(pl_module, "last_val_batch"):
             pl_module.last_val_batch = None
 
-        # if trainer.current_epoch % self.log_every_n_epochs == 0:
-        # self._log_spatial_error_map(trainer, pl_module)
-        # self._log_loss_curves(trainer, pl_module)
-        # self._log_accuracy_curves(trainer, pl_module)
-
-        # Clear stored validation batch to free memory
-        # if hasattr(pl_module, 'last_val_batch'):
-        #     pl_module.last_val_batch = None
+        if trainer.current_epoch % self.log_every_n_epochs == 0:
+            self._log_sea_bin_rmse_over_epochs(trainer, pl_module)
 
     def on_train_end(self, trainer, pl_module):
         """Log final training summary"""
@@ -267,6 +260,7 @@ class CometVisualizationCallback(Callback):
         # Create final sea-bin analysis plots
         self._log_loss_curves(trainer)
         self._log_accuracy_curves(trainer, pl_module)
+        self._log_sea_bin_rmse_over_epochs(trainer, pl_module)
         self._log_sea_bin_curves(trainer, pl_module)
 
         # Log training summary
@@ -651,6 +645,115 @@ Training Summary:
         )
         plt.close()
 
+    def _log_sea_bin_rmse_over_epochs(self, trainer, pl_module):
+        """Create line plots of per-bin RMSE over epochs for checkpoint selection."""
+        if len(self.val_epochs) < 2:
+            return
+
+        comet_logger = self._get_comet_logger(trainer)
+        if not comet_logger:
+            return
+
+        if not self.val_sea_bin_metrics:
+            return
+
+        from matplotlib.cm import ScalarMappable
+        from matplotlib.colors import Normalize
+
+        bin_groups = [
+            ("Calm & Light (0-2m)", ["calm_0_1", "light_1_2"]),
+            ("Moderate & Rough (2-5m)", ["moderate_2_3", "rough_3_4", "very_rough_4_5"]),
+            (
+                "Extreme (5m+)",
+                [b for b in self.SEA_BINS if b.startswith("extreme")],
+            ),
+        ]
+
+        wave_ranges = {
+            "calm_0_1": "0-1m", "light_1_2": "1-2m", "moderate_2_3": "2-3m",
+            "rough_3_4": "3-4m", "very_rough_4_5": "4-5m",
+            "extreme_5_6": "5-6m", "extreme_6_7": "6-7m", "extreme_7_8": "7-8m",
+            "extreme_8_9": "8-9m", "extreme_9_10": "9-10m", "extreme_10_11": "10-11m",
+            "extreme_11_12": "11-12m", "extreme_12_13": "12-13m",
+            "extreme_13_14": "13-14m", "extreme_14plus": "14m+",
+        }
+
+        for task_name in self.detected_tasks:
+            if task_name not in self.val_sea_bin_metrics:
+                continue
+
+            val_history = self.val_sea_bin_metrics[task_name]
+            baseline_history = self.val_baseline_sea_bin_metrics.get(task_name, [])
+
+            fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+            task_title = f" [{task_name}]" if len(self.detected_tasks) > 1 else ""
+            fig.suptitle(
+                f"Val Sea-Bin RMSE Over Epochs{task_title}", fontsize=16, y=1.02
+            )
+
+            cmap = plt.get_cmap("coolwarm")
+            norm = Normalize(vmin=0, vmax=len(self.SEA_BINS) - 1)
+
+            for ax, (group_title, group_bins) in zip(axes, bin_groups):
+                for bin_name in group_bins:
+                    bin_idx = self.SEA_BINS.index(bin_name) if bin_name in self.SEA_BINS else 0
+                    color = cmap(norm(bin_idx))
+                    label = f"{wave_ranges.get(bin_name, bin_name)}"
+
+                    epochs_with_data = []
+                    rmse_values = []
+                    baseline_rmse_values = []
+                    baseline_epochs = []
+
+                    for i, epoch_metrics in enumerate(val_history):
+                        if bin_name in epoch_metrics and epoch_metrics[bin_name].get("rmse") is not None:
+                            epoch_num = self.val_epochs[i] if i < len(self.val_epochs) else i
+                            epochs_with_data.append(epoch_num)
+                            rmse_values.append(epoch_metrics[bin_name]["rmse"])
+
+                    for i, epoch_metrics in enumerate(baseline_history):
+                        if bin_name in epoch_metrics and epoch_metrics[bin_name].get("rmse") is not None:
+                            epoch_num = self.val_epochs[i] if i < len(self.val_epochs) else i
+                            baseline_epochs.append(epoch_num)
+                            baseline_rmse_values.append(epoch_metrics[bin_name]["rmse"])
+
+                    if epochs_with_data:
+                        ax.plot(
+                            epochs_with_data, rmse_values,
+                            "-o", color=color, label=label,
+                            linewidth=2, markersize=4, alpha=0.9,
+                        )
+                        best_idx = np.argmin(rmse_values)
+                        ax.scatter(
+                            [epochs_with_data[best_idx]], [rmse_values[best_idx]],
+                            color=color, s=120, zorder=5, edgecolors="black",
+                            linewidths=1.5,
+                        )
+
+                    if baseline_rmse_values:
+                        ax.plot(
+                            baseline_epochs, baseline_rmse_values,
+                            "--", color=color, alpha=0.4, linewidth=1,
+                        )
+
+                ax.set_xlabel("Epoch", fontsize=12)
+                ax.set_ylabel("RMSE (m)", fontsize=12)
+                ax.set_title(group_title, fontsize=13)
+                ax.legend(fontsize=9, loc="upper right")
+                ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+
+            figure_name = (
+                f"sea_bin_rmse_over_epochs_{task_name}"
+                if len(self.detected_tasks) > 1
+                else "sea_bin_rmse_over_epochs"
+            )
+            comet_logger.experiment.log_figure(
+                figure_name=figure_name, figure=fig, step=trainer.current_epoch
+            )
+            plt.close(fig)
+
     def _log_sea_bin_curves(self, trainer, pl_module):
         """Create sea-bin performance bar charts for all tasks"""
         if len(self.epochs) < 2:
@@ -666,13 +769,12 @@ Training Summary:
             print("No sea-bin metrics available for plotting")
             return
 
-        # Define wave height ranges for each bin
         wave_bins = {
-            "calm": (0.0, 1.0),
-            "light": (1.0, 2.0),
-            "moderate": (2.0, 3.0),
-            "rough": (3.0, 4.0),
-            "very_rough": (4.0, 5.0),
+            "calm_0_1": (0.0, 1.0),
+            "light_1_2": (1.0, 2.0),
+            "moderate_2_3": (2.0, 3.0),
+            "rough_3_4": (3.0, 4.0),
+            "very_rough_4_5": (4.0, 5.0),
             "extreme_5_6": (5.0, 6.0),
             "extreme_6_7": (6.0, 7.0),
             "extreme_7_8": (7.0, 8.0),
