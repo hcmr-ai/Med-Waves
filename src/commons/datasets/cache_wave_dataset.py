@@ -6,6 +6,8 @@ import s3fs
 import torch
 from torch.utils.data import Dataset
 
+from src.commons.constants import FEATURES_ORDER as DEFAULT_FEATURES_ORDER
+
 
 class CachedWaveDataset(Dataset):
     """
@@ -35,25 +37,7 @@ class CachedWaveDataset(Dataset):
         Multi-task: X, targets_dict, mask, vhm0
     """
 
-    FEATURES_ORDER = [
-        "VHM0",
-        "WSPD",
-        "VTM02",
-        "U10",
-        "V10",
-        "sin_hour",
-        "cos_hour",
-        "sin_doy",
-        "cos_doy",
-        "sin_month",
-        "cos_month",
-        "lat_norm",
-        "lon_norm",
-        "wave_dir_sin",
-        "wave_dir_cos",
-        "corrected_VHM0",
-        "corrected_VTM02",
-    ]
+    FEATURES_ORDER = DEFAULT_FEATURES_ORDER
 
     def __init__(
         self,
