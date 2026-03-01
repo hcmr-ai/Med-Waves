@@ -50,6 +50,7 @@ def create_scheduler(
         >>> # Use with PyTorch Lightning:
         >>> # return {"optimizer": optimizer, "lr_scheduler": scheduler_cfg}
     """
+
     def get_float(key, default):
         """Helper to safely extract float values from config"""
         val = scheduler_config.get(key, default)
@@ -107,8 +108,7 @@ def create_scheduler(
     # ========== ExponentialLR ==========
     elif scheduler_type == "ExponentialLR":
         scheduler = optim.lr_scheduler.ExponentialLR(
-            optimizer,
-            gamma=get_float("gamma", 0.1)
+            optimizer, gamma=get_float("gamma", 0.1)
         )
         return {
             "scheduler": scheduler,
@@ -132,7 +132,7 @@ def create_scheduler(
             "total_steps": total_steps,
             "max_epochs": max_epochs,
             "warmup_ratio": warmup_ratio,
-            "warmup_steps_calculated": warmup_steps
+            "warmup_steps_calculated": warmup_steps,
         }
 
         scheduler = get_cosine_schedule_with_warmup(
@@ -177,5 +177,7 @@ def create_scheduler(
 
     else:
         # Unknown scheduler type, return empty (no scheduler)
-        print(f"Warning: Unknown scheduler type '{scheduler_type}', proceeding without scheduler")
+        print(
+            f"Warning: Unknown scheduler type '{scheduler_type}', proceeding without scheduler"
+        )
         return {}, {}

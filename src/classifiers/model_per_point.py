@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import polars as pl
 import xgboost as xgb
-from dask.distributed import Client, as_completed
+from dask.distributed import Client
 from tqdm import tqdm
 
 from src.classifiers.delta_corrector import DeltaCorrector
@@ -44,7 +44,7 @@ def train_single_cluster_dask(
     model_config: dict,
     predict_bias: bool,
     predict_bias_log_space: bool,
-    output_path: str
+    output_path: str,
 ):
     """
     Train a single cluster using scattered Dask data.
@@ -90,22 +90,35 @@ def train_single_cluster_dask(
     # vhm0_x_test_cluster = vhm0_x_test[mask_test] if vhm0_x_test is not None else None
 
     idx_train = scattered_data["indices_train"].get(cluster_id, [])
-    idx_val   = scattered_data["indices_val"].get(cluster_id, [])
-    idx_test  = scattered_data["indices_test"].get(cluster_id, [])
+    idx_val = scattered_data["indices_val"].get(cluster_id, [])
+    idx_test = scattered_data["indices_test"].get(cluster_id, [])
 
     X_train_cluster = scattered_data["X_train"][idx_train]
     y_train_cluster = scattered_data["y_train"][idx_train].ravel()
-    X_val_cluster   = scattered_data["X_val"][idx_val] if len(idx_val) > 0 else None
-    y_val_cluster   = scattered_data["y_val"][idx_val].ravel() if len(idx_val) > 0 else None
-    X_test_cluster  = scattered_data["X_test"][idx_test]
-    y_test_cluster  = scattered_data["y_test"][idx_test].ravel()
+    X_val_cluster = scattered_data["X_val"][idx_val] if len(idx_val) > 0 else None
+    y_val_cluster = (
+        scattered_data["y_val"][idx_val].ravel() if len(idx_val) > 0 else None
+    )
+    X_test_cluster = scattered_data["X_test"][idx_test]
+    y_test_cluster = scattered_data["y_test"][idx_test].ravel()
 
     regions_train_cluster = scattered_data["regions_train"][idx_train]
-    regions_test_cluster  = scattered_data["regions_test"][idx_test]
-    vhm0_x_train_cluster  = scattered_data["vhm0_x_train"][idx_train] if scattered_data["vhm0_x_train"] is not None else None
-    vhm0_x_test_cluster   = scattered_data["vhm0_x_test"][idx_test] if scattered_data["vhm0_x_test"] is not None else None
-    sample_weights_cluster = scattered_data["sample_weights"][idx_train] if scattered_data["sample_weights"] is not None else None
-
+    regions_test_cluster = scattered_data["regions_test"][idx_test]
+    vhm0_x_train_cluster = (
+        scattered_data["vhm0_x_train"][idx_train]
+        if scattered_data["vhm0_x_train"] is not None
+        else None
+    )
+    vhm0_x_test_cluster = (
+        scattered_data["vhm0_x_test"][idx_test]
+        if scattered_data["vhm0_x_test"] is not None
+        else None
+    )
+    sample_weights_cluster = (
+        scattered_data["sample_weights"][idx_train]
+        if scattered_data["sample_weights"] is not None
+        else None
+    )
 
     # Initialize and train model
     model = xgb.XGBRegressor(
@@ -125,36 +138,47 @@ def train_single_cluster_dask(
         min_child_weight=model_config.get("min_child_weight", 1),
         n_jobs=model_config.get("n_jobs", 1),  # Each worker uses 1 core
         random_state=42,
-        early_stopping_rounds=model_config.get("early_stopping_rounds", 50)
+        early_stopping_rounds=model_config.get("early_stopping_rounds", 50),
     )
 
     if X_val_cluster is not None and len(X_val_cluster) > 0:
         model.fit(
-            X_train_cluster, y_train_cluster,
+            X_train_cluster,
+            y_train_cluster,
             sample_weight=sample_weights_cluster,
-            eval_set=[(X_train_cluster, y_train_cluster), (X_val_cluster, y_val_cluster)],
-            verbose=False
+            eval_set=[
+                (X_train_cluster, y_train_cluster),
+                (X_val_cluster, y_val_cluster),
+            ],
+            verbose=False,
         )
     else:
         model.fit(
-            X_train_cluster, y_train_cluster,
+            X_train_cluster,
+            y_train_cluster,
             sample_weight=sample_weights_cluster,
             eval_set=[(X_train_cluster, y_train_cluster)],
-            verbose=False
+            verbose=False,
         )
 
     # Predict train
     train_pred = model.predict(X_train_cluster)
     vhm0_y_train, vhm0_pred_train = reconstruct_vhm0_values(
-        predict_bias, predict_bias_log_space,
-        vhm0_x_train_cluster, y_train_cluster, train_pred
+        predict_bias,
+        predict_bias_log_space,
+        vhm0_x_train_cluster,
+        y_train_cluster,
+        train_pred,
     )
 
     # Predict test
     test_pred = model.predict(X_test_cluster)
     vhm0_y_test, vhm0_pred_test = reconstruct_vhm0_values(
-        predict_bias, predict_bias_log_space,
-        vhm0_x_test_cluster, y_test_cluster, test_pred
+        predict_bias,
+        predict_bias_log_space,
+        vhm0_x_test_cluster,
+        y_test_cluster,
+        test_pred,
     )
 
     return {
@@ -291,16 +315,16 @@ class ModelPerPointTrainer:
 
         # Remove all unpicklable objects
         unpicklable_attrs = [
-            'experiment_logger',
-            'memory_monitor',
-            'diagnostic_plotter',
-            's3_results_saver',
-            'data_loader',
-            'feature_engineer',
-            'metrics_calculator',
-            'data_splitter',
-            'sample_weighting',
-            'sampling_manager',
+            "experiment_logger",
+            "memory_monitor",
+            "diagnostic_plotter",
+            "s3_results_saver",
+            "data_loader",
+            "feature_engineer",
+            "metrics_calculator",
+            "data_splitter",
+            "sample_weighting",
+            "sampling_manager",
         ]
 
         for attr in unpicklable_attrs:
@@ -759,8 +783,7 @@ class ModelPerPointTrainer:
         gc.collect()
 
         self.save_model(
-            f"{self.config['output']['model_save_path']}/cluster_{cluster_id}",
-            False
+            f"{self.config['output']['model_save_path']}/cluster_{cluster_id}", False
         )
 
         return (
@@ -827,7 +850,7 @@ class ModelPerPointTrainer:
             n_workers=n_jobs,
             threads_per_worker=1,
             # memory_limit="8GB",
-            silence_logs=logging.WARNING
+            silence_logs=logging.WARNING,
         )
         logger.info(f"Dask dashboard available at: {client.dashboard_link}")
 
@@ -836,8 +859,16 @@ class ModelPerPointTrainer:
             logger.info("Scattering data to Dask workers...")
 
             # Convert to numpy if needed
-            X_train_np = self.X_train if isinstance(self.X_train, np.ndarray) else self.X_train.to_numpy()
-            X_test_np = self.X_test if isinstance(self.X_test, np.ndarray) else self.X_test.to_numpy()
+            X_train_np = (
+                self.X_train
+                if isinstance(self.X_train, np.ndarray)
+                else self.X_train.to_numpy()
+            )
+            X_test_np = (
+                self.X_test
+                if isinstance(self.X_test, np.ndarray)
+                else self.X_test.to_numpy()
+            )
 
             # scattered_data = client.scatter({
             #     'X_train': X_train_np,
@@ -856,32 +887,46 @@ class ModelPerPointTrainer:
             #     'sample_weights': self.sample_weights,
             # }, broadcast=True)  # ✅ broadcast=True means all workers get a copy
             from collections import defaultdict
+
             def build_cluster_indices(cluster_ids, desc):
                 cluster_indices = defaultdict(list)
                 for i, cid in enumerate(tqdm(cluster_ids, desc=desc)):
                     cluster_indices[cid].append(i)
                 return {cid: np.array(idx) for cid, idx in cluster_indices.items()}
 
-            cluster_indices_train = build_cluster_indices(self.cluster_ids_train, "Indexing train clusters")
-            cluster_indices_val = build_cluster_indices(self.cluster_ids_val, "Indexing val clusters")
-            cluster_indices_test = build_cluster_indices(self.cluster_ids_test, "Indexing test clusters")
+            cluster_indices_train = build_cluster_indices(
+                self.cluster_ids_train, "Indexing train clusters"
+            )
+            cluster_indices_val = build_cluster_indices(
+                self.cluster_ids_val, "Indexing val clusters"
+            )
+            cluster_indices_test = build_cluster_indices(
+                self.cluster_ids_test, "Indexing test clusters"
+            )
 
-            scattered_data = client.scatter({
-                "X_train": X_train_np,
-                "X_val": self.X_val,
-                "X_test": X_test_np,
-                "y_train": self.y_train.to_numpy(),
-                "y_val": self.y_val.to_numpy(),
-                "y_test": self.y_test.to_numpy(),
-                "regions_train": self.regions_train,
-                "regions_test": self.regions_test,
-                "vhm0_x_train": self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, "to_numpy") else self.vhm0_x_train,
-                "vhm0_x_test": self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, "to_numpy") else self.vhm0_x_test,
-                "sample_weights": self.sample_weights,
-                "indices_train": cluster_indices_train,
-                "indices_val": cluster_indices_val,
-                "indices_test": cluster_indices_test,
-            }, broadcast=False)
+            scattered_data = client.scatter(
+                {
+                    "X_train": X_train_np,
+                    "X_val": self.X_val,
+                    "X_test": X_test_np,
+                    "y_train": self.y_train.to_numpy(),
+                    "y_val": self.y_val.to_numpy(),
+                    "y_test": self.y_test.to_numpy(),
+                    "regions_train": self.regions_train,
+                    "regions_test": self.regions_test,
+                    "vhm0_x_train": self.vhm0_x_train.to_numpy()
+                    if hasattr(self.vhm0_x_train, "to_numpy")
+                    else self.vhm0_x_train,
+                    "vhm0_x_test": self.vhm0_x_test.to_numpy()
+                    if hasattr(self.vhm0_x_test, "to_numpy")
+                    else self.vhm0_x_test,
+                    "sample_weights": self.sample_weights,
+                    "indices_train": cluster_indices_train,
+                    "indices_val": cluster_indices_val,
+                    "indices_test": cluster_indices_test,
+                },
+                broadcast=False,
+            )
 
             # cluster_data = {
             #     cid: {
@@ -930,8 +975,12 @@ class ModelPerPointTrainer:
                 "y_test": self.y_test.to_numpy(),
                 "regions_train": self.regions_train,
                 "regions_test": self.regions_test,
-                "vhm0_x_train": self.vhm0_x_train.to_numpy() if hasattr(self.vhm0_x_train, "to_numpy") else self.vhm0_x_train,
-                "vhm0_x_test": self.vhm0_x_test.to_numpy() if hasattr(self.vhm0_x_test, "to_numpy") else self.vhm0_x_test,
+                "vhm0_x_train": self.vhm0_x_train.to_numpy()
+                if hasattr(self.vhm0_x_train, "to_numpy")
+                else self.vhm0_x_train,
+                "vhm0_x_test": self.vhm0_x_test.to_numpy()
+                if hasattr(self.vhm0_x_test, "to_numpy")
+                else self.vhm0_x_test,
                 "sample_weights": self.sample_weights,
                 "indices_train": cluster_indices_train,
                 "indices_val": cluster_indices_val,
@@ -945,7 +994,7 @@ class ModelPerPointTrainer:
                     self.model_config,
                     self.predict_bias,
                     self.predict_bias_log_space,
-                    self.config["output"]["model_save_path"]
+                    self.config["output"]["model_save_path"],
                 )
                 results.append(future)
 

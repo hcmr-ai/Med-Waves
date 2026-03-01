@@ -19,11 +19,34 @@ LOCAL_TMP = "data/scalers/"
 USE_S3 = True
 
 if USE_S3:
-    DATA_PATHS = ["s3://medwav-dev-data/parquet/hourly/year=2020", "s3://medwav-dev-data/parquet/hourly/year=2021"]
+    DATA_PATHS = [
+        "s3://medwav-dev-data/parquet/hourly/year=2020",
+        "s3://medwav-dev-data/parquet/hourly/year=2021",
+    ]
 else:
     DATA_PATHS = ["/Users/deeplab/Documents/projects/hcmr/data/hourly/"]
 
-FEATURES = ['VHM0', 'WSPD', 'VTM02', 'U10', 'V10', 'sin_hour', 'cos_hour', 'sin_doy', 'cos_doy', 'sin_month', 'cos_month', 'lat_norm', 'lon_norm', 'wave_dir_sin', 'wave_dir_cos', 'corrected_VHM0', 'corrected_VTM02']
+FEATURES = [
+    "VHM0",
+    "WSPD",
+    "VTM02",
+    "U10",
+    "V10",
+    "sin_hour",
+    "cos_hour",
+    "sin_doy",
+    "cos_doy",
+    "sin_month",
+    "cos_month",
+    "lat_norm",
+    "lon_norm",
+    "wave_dir_sin",
+    "wave_dir_cos",
+    "corrected_VHM0",
+    "corrected_VTM02",
+]
+
+
 def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
     """Load and stack all parquet files into numpy"""
     if USE_S3:
@@ -62,19 +85,20 @@ def load_all_data(parquet_dir: str, features: list[str] = None) -> np.ndarray:
 
     return full_df.to_numpy().astype(np.float32)
 
+
 def save_to_s3(local_path, bucket, key):
     s3 = boto3.client("s3")
     s3.upload_file(local_path, bucket, key)
     print(f"✓ Uploaded to s3://{bucket}/{key}")
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     X_parts = [load_all_data(p, features=FEATURES) for p in DATA_PATHS]
     X = np.concatenate(X_parts, axis=0)
     print("Loaded data:", X.shape)  # e.g. (N, C)
 
     # Reshape for normalizer: (N, H, W, C)
-    if X.ndim == 2:   # (N, C)
+    if X.ndim == 2:  # (N, C)
         X = X.reshape(-1, 1, 1, X.shape[-1])
 
     # Define configs
@@ -89,9 +113,9 @@ if __name__ == "__main__":
         normalizer = WaveNormalizer(**cfg)
 
         # Validation: Check feature order matches data shape
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Fitting normalizer: {name}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
         print(f"Data shape: {X.shape}")
         print(f"Number of features: {len(FEATURES)}")
         print(f"Number of channels in data: {X.shape[-1]}")
@@ -106,16 +130,24 @@ if __name__ == "__main__":
 
         # Validation: Verify target feature name was stored correctly
         print("\nNormalizer metadata:")
-        print(f"  Feature order length: {len(normalizer.feature_order_) if normalizer.feature_order_ else 'None'}")
+        print(
+            f"  Feature order length: {len(normalizer.feature_order_) if normalizer.feature_order_ else 'None'}"
+        )
         print(f"  Target feature name: {normalizer.target_feature_name_}")
         print(f"  Number of stats channels: {len(normalizer.stats_)}")
 
         # Validate target feature lookup
         if normalizer.feature_order_ and normalizer.target_feature_name_:
             try:
-                target_idx = normalizer.feature_order_.index(normalizer.target_feature_name_)
-                print(f"  Target '{normalizer.target_feature_name_}' found at index: {target_idx}")
-                print(f"  Stats available at index {target_idx}: {target_idx in normalizer.stats_}")
+                target_idx = normalizer.feature_order_.index(
+                    normalizer.target_feature_name_
+                )
+                print(
+                    f"  Target '{normalizer.target_feature_name_}' found at index: {target_idx}"
+                )
+                print(
+                    f"  Stats available at index {target_idx}: {target_idx in normalizer.stats_}"
+                )
                 if target_idx in normalizer.stats_:
                     target_stats = normalizer.stats_[target_idx]
                     if isinstance(target_stats, tuple):
@@ -124,14 +156,16 @@ if __name__ == "__main__":
                     else:
                         print(f"  Target stats type: {type(target_stats)}")
             except ValueError:
-                print(f"  WARNING: Target '{normalizer.target_feature_name_}' not found in feature_order!")
+                print(
+                    f"  WARNING: Target '{normalizer.target_feature_name_}' not found in feature_order!"
+                )
 
         # Print first and last few features for verification
         if normalizer.feature_order_:
             print(f"\n  First 3 features: {normalizer.feature_order_[:3]}")
             print(f"  Last 3 features: {normalizer.feature_order_[-3:]}")
 
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
 
         # Save locally
         local_path = os.path.join(LOCAL_TMP, f"{name}_with_corrected.pkl")

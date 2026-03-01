@@ -6,20 +6,17 @@ import torch.nn.functional as F
 # Utility functions
 # -------------------------
 
+
 def window_partition(x, window_size):
     """
     x: [B, H, W, C]
     return: [num_windows*B, window_size, window_size, C]
     """
     B, H, W, C = x.shape
-    x = x.view(B,
-               H // window_size, window_size,
-               W // window_size, window_size,
-               C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1,
-                                                             window_size,
-                                                             window_size,
-                                                             C)
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = (
+        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    )
     return windows
 
 
@@ -29,22 +26,22 @@ def window_reverse(windows, window_size, H, W):
     return: [B, H, W, C]
     """
     B = int(windows.shape[0] // (H * W / window_size / window_size))
-    x = windows.view(B,
-                     H // window_size, W // window_size,
-                     window_size, window_size,
-                     -1)
+    x = windows.view(
+        B, H // window_size, W // window_size, window_size, window_size, -1
+    )
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
+
 
 def pad_to_swin_size(x, patch_size=4, window_size=4, num_downsample_stages=3):
     """
     Pads input tensor to make H and W divisible appropriately for Swin-UNet.
-    
+
     Requirements:
     1. After patch embedding (stride=patch_size), resolution = H//patch_size × W//patch_size
     2. After N downsampling stages (each /2), resolution = H//(patch_size*2^N) × W//(patch_size*2^N)
     3. At each stage, resolution must be divisible by window_size
-    
+
     Therefore: H and W must be divisible by patch_size * window_size * (2^num_downsample_stages)
 
     Args:
@@ -62,7 +59,7 @@ def pad_to_swin_size(x, patch_size=4, window_size=4, num_downsample_stages=3):
     # After patch_size downsampling and num_downsample_stages of /2, we need:
     # (H // patch_size) // (2^num_downsample_stages) to be divisible by window_size
     # So H must be divisible by: patch_size * (2^num_downsample_stages) * window_size
-    req = patch_size * (2 ** num_downsample_stages) * window_size
+    req = patch_size * (2**num_downsample_stages) * window_size
 
     H_pad = (req - H % req) % req
     W_pad = (req - W % req) % req
@@ -83,26 +80,28 @@ def unpad(x, pad):
     """
     pad_left, pad_right, pad_top, pad_bottom = pad
     H, W = x.shape[-2:]
-    return x[..., pad_top:H - pad_bottom, pad_left:W - pad_right]
-
+    return x[..., pad_top : H - pad_bottom, pad_left : W - pad_right]
 
 
 # -------------------------
 # Swin blocks
 # -------------------------
 
+
 class WindowAttention(nn.Module):
     """
     Window based multi-head self attention (no shift).
     """
 
-    def __init__(self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
+    def __init__(
+        self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0.0, proj_drop=0.0
+    ):
         super().__init__()
         self.dim = dim
         self.window_size = window_size  # Wh, Ww
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         # relative position bias
         self.relative_position_bias_table = nn.Parameter(
@@ -112,10 +111,16 @@ class WindowAttention(nn.Module):
         # get pair-wise relative position index for each token inside a window
         coords_h = torch.arange(window_size)
         coords_w = torch.arange(window_size)
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # [2, Wh, Ww]
+        coords = torch.stack(
+            torch.meshgrid([coords_h, coords_w], indexing="ij")
+        )  # [2, Wh, Ww]
         coords_flatten = torch.flatten(coords, 1)  # [2, Wh*Ww]
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # [2, Wh*Ww, Wh*Ww]
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [Wh*Ww, Wh*Ww, 2]
+        relative_coords = (
+            coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        )  # [2, Wh*Ww, Wh*Ww]
+        relative_coords = relative_coords.permute(
+            1, 2, 0
+        ).contiguous()  # [Wh*Ww, Wh*Ww, 2]
         relative_coords[:, :, 0] += window_size - 1
         relative_coords[:, :, 1] += window_size - 1
         relative_coords[:, :, 0] *= 2 * window_size - 1
@@ -127,15 +132,18 @@ class WindowAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        nn.init.trunc_normal_(self.relative_position_bias_table, std=.02)
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
 
     def forward(self, x):
         """
         x: [num_windows*B, N, C]  where N = window_size*window_size
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads,
-                                  C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = (
+            self.qkv(x)
+            .reshape(B_, N, 3, self.num_heads, C // self.num_heads)
+            .permute(2, 0, 3, 1, 4)
+        )
         q, k, v = qkv[0], qkv[1], qkv[2]  # each: [B_, num_heads, N, head_dim]
 
         q = q * self.scale
@@ -143,10 +151,12 @@ class WindowAttention(nn.Module):
 
         relative_position_bias = self.relative_position_bias_table[
             self.relative_position_index.view(-1)
-        ].view(self.window_size * self.window_size,
-               self.window_size * self.window_size,
-               -1)  # [N, N, nH]
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # [nH, N, N]
+        ].view(
+            self.window_size * self.window_size, self.window_size * self.window_size, -1
+        )  # [N, N, nH]
+        relative_position_bias = relative_position_bias.permute(
+            2, 0, 1
+        ).contiguous()  # [nH, N, N]
 
         attn = attn + relative_position_bias.unsqueeze(0)
 
@@ -164,8 +174,18 @@ class SwinBlock(nn.Module):
     Single Swin Transformer block (no shifted windows to keep it simpler).
     """
 
-    def __init__(self, dim, input_resolution, num_heads, window_size=7,
-                 mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., drop_path=0.):
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        num_heads,
+        window_size=7,
+        mlp_ratio=4.0,
+        qkv_bias=True,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+    ):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution  # (H, W)
@@ -173,17 +193,23 @@ class SwinBlock(nn.Module):
         self.window_size = window_size
 
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = WindowAttention(dim, window_size, num_heads,
-                                    qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.attn = WindowAttention(
+            dim,
+            window_size,
+            num_heads,
+            qkv_bias=qkv_bias,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+        )
 
-        self.drop_path = nn.Identity() if drop_path == 0. else DropPath(drop_path)
+        self.drop_path = nn.Identity() if drop_path == 0.0 else DropPath(drop_path)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden),
             nn.GELU(),
             nn.Linear(mlp_hidden, dim),
-            nn.Dropout(drop)
+            nn.Dropout(drop),
         )
 
     def forward(self, x):
@@ -192,14 +218,15 @@ class SwinBlock(nn.Module):
         """
         B, L, C = x.shape
         H_ref, W_ref = self.input_resolution
-        
+
         # Dynamically compute H and W from actual sequence length
         if L != H_ref * W_ref:
             import math
+
             # Maintain aspect ratio from reference resolution
             aspect_ratio = W_ref / H_ref
             H = int(math.sqrt(L / aspect_ratio))
-            
+
             # Find H that is divisible by window_size and gives valid W
             while H > 0:
                 if L % H == 0:
@@ -208,7 +235,7 @@ class SwinBlock(nn.Module):
                     if H % self.window_size == 0 and W % self.window_size == 0:
                         break
                 H -= 1
-            
+
             # If no valid H found, use reference
             if H == 0 or H * W != L:
                 H, W = H_ref, W_ref
@@ -226,10 +253,7 @@ class SwinBlock(nn.Module):
         attn_windows = self.attn(self.norm1(x_windows))
 
         # merge windows
-        attn_windows = attn_windows.view(-1,
-                                         self.window_size,
-                                         self.window_size,
-                                         C)
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
         x = window_reverse(attn_windows, self.window_size, H, W)  # [B, H, W, C]
 
         x = x.view(B, H * W, C)
@@ -258,14 +282,15 @@ class PatchMerging(nn.Module):
         """
         B, L, C = x.shape
         H_ref, W_ref = self.input_resolution
-        
+
         # Dynamically compute H and W from actual sequence length
         if L != H_ref * W_ref:
             import math
+
             # Maintain aspect ratio from reference resolution
             aspect_ratio = W_ref / H_ref
             H = int(math.sqrt(L / aspect_ratio))
-            
+
             # Find H that gives valid W (need both divisible by 2 for merging)
             while H > 0:
                 if L % H == 0:
@@ -275,7 +300,7 @@ class PatchMerging(nn.Module):
                     if H > 0 and W > 0:
                         break
                 H -= 1
-            
+
             # If no valid H found, use reference
             if H == 0 or H * W != L:
                 H, W = H_ref, W_ref
@@ -297,9 +322,9 @@ class PatchMerging(nn.Module):
         x3 = x[:, 1::2, 1::2, :]
 
         x = torch.cat([x0, x1, x2, x3], -1)  # [B, H/2, W/2, 4C]
-        x = x.view(B, -1, 4 * C)            # [B, H/2*W/2, 4C]
+        x = x.view(B, -1, 4 * C)  # [B, H/2*W/2, 4C]
         x = self.norm(x)
-        x = self.reduction(x)               # [B, H/2*W/2, 2C]
+        x = self.reduction(x)  # [B, H/2*W/2, 2C]
         return x
 
 
@@ -321,10 +346,11 @@ class PatchExpand(nn.Module):
     def forward(self, x):
         B, L, C = x.shape
         H_ref, W_ref = self.input_resolution
-        
+
         # Dynamically compute H and W from actual sequence length
         if L != H_ref * W_ref:
             import math
+
             # Maintain aspect ratio from reference resolution
             aspect_ratio = W_ref / H_ref
             H = int(math.sqrt(L / aspect_ratio))
@@ -342,7 +368,7 @@ class PatchExpand(nn.Module):
         x = self.expand(x)  # [B, L, 4*C']
         x = x.view(B, H, W, 2, 2, -1)  # [B,H,W,2,2,C']
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous()  # [B,H,2,W,2,C']
-        x = x.view(B, H * 2, W * 2, -1)               # [B,2H,2W,C']
+        x = x.view(B, H * 2, W * 2, -1)  # [B,2H,2W,C']
 
         H, W = H * 2, W * 2
         x = x.view(B, H * W, -1)
@@ -361,9 +387,9 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
 
-        self.proj = nn.Conv2d(in_chans, embed_dim,
-                              kernel_size=patch_size,
-                              stride=patch_size)
+        self.proj = nn.Conv2d(
+            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
@@ -377,12 +403,13 @@ class PatchEmbed(nn.Module):
 
 class DropPath(nn.Module):
     """Stochastic depth."""
+
     def __init__(self, drop_prob=None):
         super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x):
-        if self.drop_prob == 0. or not self.training:
+        if self.drop_prob == 0.0 or not self.training:
             return x
         keep_prob = 1 - self.drop_prob
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
@@ -395,6 +422,7 @@ class DropPath(nn.Module):
 # Swin-UNet
 # -------------------------
 
+
 class SwinUNet(nn.Module):
     """
     Swin-UNet for 2D fields.
@@ -405,15 +433,17 @@ class SwinUNet(nn.Module):
         num_classes: output channels (e.g. 1 for SWH/bias)
     """
 
-    def __init__(self,
-                 img_size=64,
-                 in_chans=2,
-                 num_classes=1,
-                 embed_dim=64,
-                 depths=(2, 2, 2, 2),
-                 num_heads=(2, 4, 8, 8),
-                 window_size=4,
-                 mlp_ratio=4.):
+    def __init__(
+        self,
+        img_size=64,
+        in_chans=2,
+        num_classes=1,
+        embed_dim=64,
+        depths=(2, 2, 2, 2),
+        num_heads=(2, 4, 8, 8),
+        window_size=4,
+        mlp_ratio=4.0,
+    ):
         super().__init__()
 
         img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
@@ -424,54 +454,49 @@ class SwinUNet(nn.Module):
         self.depths = depths
 
         # 1) Patch embedding
-        self.patch_embed = PatchEmbed(img_size, patch_size=4,
-                                      in_chans=in_chans,
-                                      embed_dim=embed_dim)
+        self.patch_embed = PatchEmbed(
+            img_size, patch_size=4, in_chans=in_chans, embed_dim=embed_dim
+        )
         patches_resolution = (img_size[0] // 4, img_size[1] // 4)
         self.patches_resolution = patches_resolution
 
         # Encoder layers (Swin stages + patch merging)
-        self.layer1 = self._make_layer(embed_dim,
-                                       patches_resolution,
-                                       depth=depths[0],
-                                       num_heads=num_heads[0])
+        self.layer1 = self._make_layer(
+            embed_dim, patches_resolution, depth=depths[0], num_heads=num_heads[0]
+        )
         self.down1 = PatchMerging(patches_resolution, embed_dim)
 
         res2 = (patches_resolution[0] // 2, patches_resolution[1] // 2)
         dim2 = embed_dim * 2
-        self.layer2 = self._make_layer(dim2, res2,
-                                       depth=depths[1],
-                                       num_heads=num_heads[1])
+        self.layer2 = self._make_layer(
+            dim2, res2, depth=depths[1], num_heads=num_heads[1]
+        )
         self.down2 = PatchMerging(res2, dim2)
 
         res3 = (res2[0] // 2, res2[1] // 2)
         dim3 = embed_dim * 4
-        self.layer3 = self._make_layer(dim3, res3,
-                                       depth=depths[2],
-                                       num_heads=num_heads[2])
+        self.layer3 = self._make_layer(
+            dim3, res3, depth=depths[2], num_heads=num_heads[2]
+        )
         self.down3 = PatchMerging(res3, dim3)
 
         res4 = (res3[0] // 2, res3[1] // 2)
         dim4 = embed_dim * 8
-        self.layer4 = self._make_layer(dim4, res4,
-                                       depth=depths[3],
-                                       num_heads=num_heads[3])
+        self.layer4 = self._make_layer(
+            dim4, res4, depth=depths[3], num_heads=num_heads[3]
+        )
 
         # Decoder: patch expand + Swin layers
         self.up3 = PatchExpand(res4, dim4, expand_dim=True)  # -> dim3
-        self.dec_layer3 = self._make_layer(dim3, res3,
-                                           depth=1,
-                                           num_heads=num_heads[2])
+        self.dec_layer3 = self._make_layer(dim3, res3, depth=1, num_heads=num_heads[2])
 
         self.up2 = PatchExpand(res3, dim3, expand_dim=True)  # -> dim2
-        self.dec_layer2 = self._make_layer(dim2, res2,
-                                           depth=1,
-                                           num_heads=num_heads[1])
+        self.dec_layer2 = self._make_layer(dim2, res2, depth=1, num_heads=num_heads[1])
 
         self.up1 = PatchExpand(res2, dim2, expand_dim=True)  # -> dim1
-        self.dec_layer1 = self._make_layer(embed_dim, patches_resolution,
-                                           depth=1,
-                                           num_heads=num_heads[0])
+        self.dec_layer1 = self._make_layer(
+            embed_dim, patches_resolution, depth=1, num_heads=num_heads[0]
+        )
 
         # Final upsample to full resolution if needed (4x from patch embed)
         self.final_conv = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
@@ -485,7 +510,7 @@ class SwinUNet(nn.Module):
                     input_resolution=input_resolution,
                     num_heads=num_heads,
                     window_size=self.window_size,
-                    mlp_ratio=4.,
+                    mlp_ratio=4.0,
                 )
             )
         return nn.Sequential(*layers)
@@ -500,16 +525,16 @@ class SwinUNet(nn.Module):
         # Patch embed
         x, (H_p, W_p) = self.patch_embed(x)  # [B, H_p*W_p, embed_dim]
         # Encoder
-        x1 = self.layer1(x)       # [B, H_p*W_p, dim1]
-        x2 = self.down1(x1)       # [B, (H_p/2)*(W_p/2), dim2]
+        x1 = self.layer1(x)  # [B, H_p*W_p, dim1]
+        x2 = self.down1(x1)  # [B, (H_p/2)*(W_p/2), dim2]
 
         x2 = self.layer2(x2)
-        x3 = self.down2(x2)       # dim3
+        x3 = self.down2(x2)  # dim3
 
         x3 = self.layer3(x3)
-        x4 = self.down3(x3)       # dim4
+        x4 = self.down3(x3)  # dim4
 
-        x4 = self.layer4(x4)      # bottleneck (no further downsample)
+        x4 = self.layer4(x4)  # bottleneck (no further downsample)
 
         # Decoder
         # up from bottleneck to res3
@@ -529,7 +554,9 @@ class SwinUNet(nn.Module):
 
         # reshape to feature map at patch resolution
         H1, W1 = res1
-        x_up1 = x_up1.view(B, H1, W1, -1).permute(0, 3, 1, 2).contiguous()  # [B,dim1,H1,W1]
+        x_up1 = (
+            x_up1.view(B, H1, W1, -1).permute(0, 3, 1, 2).contiguous()
+        )  # [B,dim1,H1,W1]
 
         # upsample back to original resolution (factor 4)
         x_up = F.interpolate(x_up1, size=(H, W), mode="bilinear", align_corners=False)
@@ -537,15 +564,16 @@ class SwinUNet(nn.Module):
         out = self.final_conv(x_up)  # [B,num_classes,H,W]
         return out
 
+
 class SwinUNetAgnostic(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         self.model = SwinUNet(**kwargs)
 
         # Store patch and window sizes for padding logic
-        self.patch_size = 4                     # PatchEmbed uses stride=4
+        self.patch_size = 4  # PatchEmbed uses stride=4
         self.window_size = kwargs.get("window_size", 4)
-        
+
         # Number of downsampling stages = number of depth stages - 1
         # (last stage is bottleneck, no further downsampling)
         depths = kwargs.get("depths", (2, 2, 2, 2))
@@ -557,7 +585,7 @@ class SwinUNetAgnostic(nn.Module):
             x,
             patch_size=self.patch_size,
             window_size=self.window_size,
-            num_downsample_stages=self.num_downsample_stages
+            num_downsample_stages=self.num_downsample_stages,
         )
 
         # 2) Run SwinUNet on padded input
@@ -567,6 +595,7 @@ class SwinUNetAgnostic(nn.Module):
         out = unpad(out_pad, pad)
         return out
 
+
 # -------------------------
 # Quick sanity check
 # -------------------------
@@ -575,12 +604,12 @@ if __name__ == "__main__":
     in_chans = n_input_features = 6
     # Create model for 64×64 or arbitrary sizes
     model = SwinUNetAgnostic(
-        img_size=(64, 64),      # dummy, we ignore this
+        img_size=(64, 64),  # dummy, we ignore this
         in_chans=in_chans,
         num_classes=1,
         embed_dim=64,
-        depths=(2,2,2,2),
-        num_heads=(2,4,8,8),
+        depths=(2, 2, 2, 2),
+        num_heads=(2, 4, 8, 8),
         window_size=4,
     )
 
@@ -591,5 +620,4 @@ if __name__ == "__main__":
     y = model(x)
 
     print("Input:", x.shape)
-    print("Output:", y.shape)   # guaranteed → [2,1,76,261]
-
+    print("Output:", y.shape)  # guaranteed → [2,1,76,261]

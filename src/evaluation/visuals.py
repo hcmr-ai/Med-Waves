@@ -23,12 +23,16 @@ def plot_residual_distribution(y_true, y_pred, save_path=None):
     return fig
 
 
-def plot_spatial_error_map(df: pl.DataFrame, lat_col="lat", lon_col="lon", error_col="residual", save_path=None):
+def plot_spatial_error_map(
+    df: pl.DataFrame, lat_col="lat", lon_col="lon", error_col="residual", save_path=None
+):
     """
     Plot spatial heatmap of residuals (requires 'lat', 'lon', and 'residual' columns).
     """
     df_pandas = df.select([lat_col, lon_col, error_col]).to_pandas()
-    pivot_table = df_pandas.pivot_table(index=lat_col, columns=lon_col, values=error_col, aggfunc=np.mean)
+    pivot_table = df_pandas.pivot_table(
+        index=lat_col, columns=lon_col, values=error_col, aggfunc=np.mean
+    )
 
     plt.figure(figsize=(10, 6))
     sns.heatmap(pivot_table, cmap="coolwarm", center=0)
@@ -41,21 +45,27 @@ def plot_spatial_error_map(df: pl.DataFrame, lat_col="lat", lon_col="lon", error
         plt.show()
 
 
-def compute_spatial_metrics(df: pl.DataFrame, lat_col="lat", lon_col="lon", y_col="true", y_hat_col="pred"):
+def compute_spatial_metrics(
+    df: pl.DataFrame, lat_col="lat", lon_col="lon", y_col="true", y_hat_col="pred"
+):
     """
     Returns a Polars DataFrame of spatial MAE, Bias, and Pearson R per (lat, lon).
     """
-    df = df.with_columns([
-        (pl.col(y_hat_col) - pl.col(y_col)).alias("residual"),
-        pl.col(y_hat_col).alias("pred"),
-        pl.col(y_col).alias("true")
-    ])
+    df = df.with_columns(
+        [
+            (pl.col(y_hat_col) - pl.col(y_col)).alias("residual"),
+            pl.col(y_hat_col).alias("pred"),
+            pl.col(y_col).alias("true"),
+        ]
+    )
 
-    grouped = df.group_by([lat_col, lon_col]).agg([
-        (pl.col("residual").mean()).alias("bias"),
-        (pl.col("residual").abs().mean()).alias("mae"),
-        (pl.pearson_corr("true", "pred")).alias("pearson")
-    ])
+    grouped = df.group_by([lat_col, lon_col]).agg(
+        [
+            (pl.col("residual").mean()).alias("bias"),
+            (pl.col("residual").abs().mean()).alias("mae"),
+            (pl.pearson_corr("true", "pred")).alias("pearson"),
+        ]
+    )
     return grouped
 
 
@@ -64,16 +74,24 @@ def compute_spatial_metrics(df: pl.DataFrame, lat_col="lat", lon_col="lon", y_co
 # ============================================================================
 
 
-def load_coordinates_from_parquet(file_path, subsample_step=None):
-    """Load latitude and longitude coordinates from a parquet file.
+def load_coordinates_from_parquet(
+    file_path, subsample_step=None, return_timestamps=False
+):
+    """Load latitude, longitude coordinates, and optionally timestamps from a parquet file.
 
     Args:
         file_path: Path to parquet file (can be S3 path with or without s3:// prefix)
         subsample_step: Subsampling step size
+        return_timestamps: If True, also return timestamps array
 
     Returns:
-        lat_grid: 2D array of latitudes (H, W)
-        lon_grid: 2D array of longitudes (H, W)
+        If return_timestamps is False:
+            lat_grid: 2D array of latitudes (H, W)
+            lon_grid: 2D array of longitudes (H, W)
+        If return_timestamps is True:
+            lat_grid: 2D array of latitudes (H, W)
+            lon_grid: 2D array of longitudes (H, W)
+            timestamps: 1D array of timestamps or 2D array (H, W) if available per pixel
     """
     import pyarrow.parquet as pq
     import s3fs
@@ -98,6 +116,29 @@ def load_coordinates_from_parquet(file_path, subsample_step=None):
     lat_data = table.column("latitude").to_numpy()
     lon_data = table.column("longitude").to_numpy()
 
+    # Extract timestamps if requested
+    timestamps = None
+    if return_timestamps:
+        # Try to find timestamp column (check common column names)
+        timestamp_columns = ["time", "timestamp", "datetime", "date"]
+        for col_name in timestamp_columns:
+            if col_name in table.column_names:
+                timestamps = table.column(col_name).to_numpy()
+                # Convert to datetime64 if not already
+                if not np.issubdtype(timestamps.dtype, np.datetime64):
+                    try:
+                        timestamps = timestamps.astype("datetime64[ns]")
+                    except (ValueError, TypeError):
+                        pass
+                break
+
+        if timestamps is None:
+            import logging
+
+            logging.warning(
+                f"No timestamp column found in {file_path}. Tried: {timestamp_columns}"
+            )
+
     # Get unique sorted coordinates
     unique_lats = np.unique(lat_data)
     unique_lons = np.unique(lon_data)
@@ -108,7 +149,10 @@ def load_coordinates_from_parquet(file_path, subsample_step=None):
     # Create meshgrid for plotting
     lon_grid, lat_grid = np.meshgrid(unique_lons, unique_lats)
 
-    return lat_grid, lon_grid
+    if return_timestamps:
+        return lat_grid, lon_grid, timestamps
+    else:
+        return lat_grid, lon_grid
 
 
 def plot_spatial_rmse_map(

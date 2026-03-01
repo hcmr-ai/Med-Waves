@@ -7,6 +7,7 @@ from sklearn.preprocessing import QuantileTransformer, StandardScaler
 
 logger = logging.getLogger(__name__)
 
+
 class WaveNormalizer:
     def __init__(self, mode="zscore", n_quantiles=1000, random_state=42):
         """
@@ -18,8 +19,12 @@ class WaveNormalizer:
         self.random_state = random_state
         self.stats_ = {}  # per-channel mean/std or quantile model
         self.target_stats_ = None  # Optional target-specific scaler stats
-        self.feature_order_ = None  # Optional: list of feature names in the order they were fitted
-        self.target_feature_name_ = None  # Optional: name of target feature (e.g., "corrected_VHM0")
+        self.feature_order_ = (
+            None  # Optional: list of feature names in the order they were fitted
+        )
+        self.target_feature_name_ = (
+            None  # Optional: name of target feature (e.g., "corrected_VHM0")
+        )
 
     def fit(self, X, feature_order=None, target_feature_name=None):
         """
@@ -97,7 +102,9 @@ class WaveNormalizer:
                 X_out[..., c] = trans.reshape(data_c.shape)
         return X_out
 
-    def transform_torch(self, X, normalize_target=False, target=None, target_channel_index=0):
+    def transform_torch(
+        self, X, normalize_target=False, target=None, target_channel_index=0
+    ):
         """
         PyTorch-optimized transform that avoids numpy conversions.
         X shape: (H, W, C) or (C, H, W) - torch tensor
@@ -144,17 +151,21 @@ class WaveNormalizer:
                     flat = data_np.reshape(-1, 1)
                     scaler = self.stats_[c]
                     trans = scaler.transform(flat)
-                    X_out[..., c] = torch.from_numpy(
-                        trans.reshape(data_np.shape)
-                    ).to(X.device).type_as(X)
+                    X_out[..., c] = (
+                        torch.from_numpy(trans.reshape(data_np.shape))
+                        .to(X.device)
+                        .type_as(X)
+                    )
             else:  # quantile - must use numpy
                 data_np = data_c.detach().cpu().numpy()
                 flat = data_np.reshape(-1, 1)
                 qt = self.stats_[c]
                 trans = qt.transform(flat)
-                X_out[..., c] = torch.from_numpy(
-                    trans.reshape(data_np.shape)
-                ).to(X.device).type_as(X)
+                X_out[..., c] = (
+                    torch.from_numpy(trans.reshape(data_np.shape))
+                    .to(X.device)
+                    .type_as(X)
+                )
 
         # Remove batch dimension if it was added
         if batch_size == 1:
@@ -178,7 +189,10 @@ class WaveNormalizer:
                 target_stats = self.target_stats_
 
             # Priority 2: Look up by feature name if feature_order_ is available
-            elif self.feature_order_ is not None and self.target_feature_name_ is not None:
+            elif (
+                self.feature_order_ is not None
+                and self.target_feature_name_ is not None
+            ):
                 try:
                     target_idx = self.feature_order_.index(self.target_feature_name_)
                     if target_idx in self.stats_:
@@ -238,7 +252,9 @@ class WaveNormalizer:
                 target_normalized = trans.reshape(target_2d_np.shape)
 
             # Convert back to torch and restore original shape
-            target_out = torch.from_numpy(target_normalized).to(target.device).type_as(target)
+            target_out = (
+                torch.from_numpy(target_normalized).to(target.device).type_as(target)
+            )
             if needs_target_unsqueeze:
                 if target_shape[0] == 1:  # Was (1, H, W)
                     target_out = target_out.unsqueeze(0)  # (1, H, W)
@@ -302,15 +318,19 @@ class WaveNormalizer:
                 # Squeeze batch dimension temporarily, process, then restore
                 batch_results = []
                 for b in range(batch_size):
-                    single_target = target[b:b+1]  # (1, 1, H, W)
-                    denorm = self.inverse_transform_torch(single_target.squeeze(0), target_channel_index)  # (1, H, W)
+                    single_target = target[b : b + 1]  # (1, 1, H, W)
+                    denorm = self.inverse_transform_torch(
+                        single_target.squeeze(0), target_channel_index
+                    )  # (1, H, W)
                     batch_results.append(denorm.unsqueeze(0))  # (1, 1, H, W)
                 return torch.cat(batch_results, dim=0)  # (batch, 1, H, W)
             elif target.shape[-1] == 1:  # (batch, H, W, 1)
                 batch_results = []
                 for b in range(batch_size):
                     single_target = target[b]  # (H, W, 1)
-                    denorm = self.inverse_transform_torch(single_target, target_channel_index)  # (H, W, 1)
+                    denorm = self.inverse_transform_torch(
+                        single_target, target_channel_index
+                    )  # (H, W, 1)
                     batch_results.append(denorm.unsqueeze(0))  # (1, H, W, 1)
                 return torch.cat(batch_results, dim=0)  # (batch, H, W, 1)
             else:
@@ -349,7 +369,9 @@ class WaveNormalizer:
             target_denormalized = inv.reshape(target_2d_np.shape)
 
         # Convert back to torch and restore original shape
-        target_out = torch.from_numpy(target_denormalized).to(target.device).type_as(target)
+        target_out = (
+            torch.from_numpy(target_denormalized).to(target.device).type_as(target)
+        )
         if needs_target_unsqueeze:
             if target_shape[0] == 1:  # Was (1, H, W)
                 target_out = target_out.unsqueeze(0)  # (1, H, W)

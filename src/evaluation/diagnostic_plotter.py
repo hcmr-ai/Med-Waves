@@ -769,7 +769,9 @@ class DiagnosticPlotter:
         axes[0, 0].grid(True, alpha=0.3)
 
         # Add value labels on bars
-        for i, (v1, v2) in enumerate(zip(rmse_values, baseline_rmse_values, strict=False)):
+        for i, (v1, v2) in enumerate(
+            zip(rmse_values, baseline_rmse_values, strict=False)
+        ):
             axes[0, 0].text(
                 i - width / 2,
                 v1 + 0.001,
@@ -812,7 +814,9 @@ class DiagnosticPlotter:
         axes[0, 1].grid(True, alpha=0.3)
 
         # Add value labels on bars
-        for i, (v1, v2) in enumerate(zip(mae_values, baseline_mae_values, strict=False)):
+        for i, (v1, v2) in enumerate(
+            zip(mae_values, baseline_mae_values, strict=False)
+        ):
             axes[0, 1].text(
                 i - width / 2,
                 v1 + 0.001,
@@ -856,7 +860,9 @@ class DiagnosticPlotter:
         axes[1, 0].set_ylim(0, 1)
 
         # Add value labels on bars
-        for i, (v1, v2) in enumerate(zip(pearson_values, baseline_pearson_values, strict=False)):
+        for i, (v1, v2) in enumerate(
+            zip(pearson_values, baseline_pearson_values, strict=False)
+        ):
             axes[1, 0].text(
                 i - width / 2,
                 v1 + 0.01,
@@ -1177,7 +1183,9 @@ class DiagnosticPlotter:
 
         # Plot 1: Error distribution by region
         bp1 = axes[0, 0].boxplot(error_data, labels=region_labels, patch_artist=True)
-        for patch, color in zip(bp1["boxes"], colors[: len(unique_regions)], strict=False):
+        for patch, color in zip(
+            bp1["boxes"], colors[: len(unique_regions)], strict=False
+        ):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         axes[0, 0].set_title("Error Distribution by Region", fontweight="bold")
@@ -1189,7 +1197,9 @@ class DiagnosticPlotter:
         bp2 = axes[0, 1].boxplot(
             abs_error_data, labels=region_labels, patch_artist=True
         )
-        for patch, color in zip(bp2["boxes"], colors[: len(unique_regions)], strict=False):
+        for patch, color in zip(
+            bp2["boxes"], colors[: len(unique_regions)], strict=False
+        ):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
         axes[0, 1].set_title("Absolute Error Distribution by Region", fontweight="bold")
@@ -1896,7 +1906,9 @@ class DiagnosticPlotter:
                     count for count in val_bin_counts if count > 0
                 ]
                 val_bin_names_non_zero = [
-                    name for count, name in zip(val_bin_counts, bin_names, strict=False) if count > 0
+                    name
+                    for count, name in zip(val_bin_counts, bin_names, strict=False)
+                    if count > 0
                 ]
                 colors_val = colors[: len(val_bin_counts_non_zero)]
 
@@ -1936,7 +1948,9 @@ class DiagnosticPlotter:
                     count for count in test_bin_counts if count > 0
                 ]
                 test_bin_names_non_zero = [
-                    name for count, name in zip(test_bin_counts, bin_names, strict=False) if count > 0
+                    name
+                    for count, name in zip(test_bin_counts, bin_names, strict=False)
+                    if count > 0
                 ]
                 colors_test = colors[: len(test_bin_counts_non_zero)]
 

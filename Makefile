@@ -28,7 +28,7 @@ clean: ## Clean Poetry cache and virtual environment
 
 # Code quality
 lint: ## Run linting with ruff
-	poetry run ruff check .
+	poetry run ruff check src/
 
 format: ## Format code with ruff
 	poetry run ruff format .
@@ -68,10 +68,16 @@ evaluation: ## Run evaluation
 	poetry run python src/pipelines/evaluation/evaluate_model_refactored.py --config src/configs/config_evaluation.yaml
 
 eval-bunet:
-	poetry run python scripts/evaluate_bunet.py
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py
 
+eval-bunet-geographic:
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-geographic-filtering
+	
 eval-bunet-bitwise:
-	poetry run python scripts/evaluate_bunet.py --apply-binwise-correction
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-binwise-correction
+
+eval-bunet-delta-corrector:
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-delta-corrector-flag
 # Scripts
 run-manual-exp: ## Create manual experiment
 	poetry run python scripts/create_manual_experiment.py
@@ -84,6 +90,9 @@ run-diff-corrector: ## Run diff corrector evaluation
 
 run-diff-corrector-plotter: ## Run diff corrector plotter
 	poetry run python scripts/run_diff_corrector_plotter.py
+
+delta-corrector-stats: ## Load DeltaCorrector (bins 9-12) and print stats
+	poetry run python scripts/load_delta_corrector_stats.py correctors/delta_corrector_bins_9_12.joblib
 
 # Streamlit dashboard
 dashboard: ## Start Streamlit dashboard
@@ -114,3 +123,6 @@ setup: install-dev pre-commit-install ## Complete setup for new developers
 setup-full: install-poetry setup-path install-dev pre-commit-install ## Complete setup including Poetry installation
 	@echo "Full setup complete! Poetry installed and dependencies ready."
 	@echo "Run 'make help' to see available commands."
+
+test-unit: ## Run unit tests
+	poetry run python -m pytest tests/unit/ --cov=src --cov-report=term-missing --cov-report=xml -v

@@ -69,9 +69,7 @@ def plot_rmse_maps(
             h, w = batch_data["error_sq"].shape
             total_error_sq_baseline[:h, :w] += batch_data["error_sq"]
             total_error_sq_mae_baseline[:h, :w] += batch_data["error_sq_mae"]
-        rmse_baseline = np.sqrt(
-            total_error_sq_baseline / np.maximum(total_count, 1)
-        )
+        rmse_baseline = np.sqrt(total_error_sq_baseline / np.maximum(total_count, 1))
         rmse_baseline[total_count == 0] = np.nan
         mae_baseline = total_error_sq_mae_baseline / np.maximum(total_count, 1)
         mae_baseline[total_count == 0] = np.nan
@@ -91,9 +89,7 @@ def plot_rmse_maps(
         f"RMSE model - min: {np.nanmin(rmse_model):.3f}, max: {np.nanmax(rmse_model):.3f}, mean: {np.nanmean(rmse_model):.3f}"
     )
     logger.info(f"Using color scale vmax: {vmax_combined:.3f}")
-    logger.info(
-        f"Valid pixels: {np.sum(~np.isnan(rmse_model))} / {rmse_model.size}"
-    )
+    logger.info(f"Valid pixels: {np.sum(~np.isnan(rmse_model))} / {rmse_model.size}")
 
     # Plot model RMSE
     plot_spatial_rmse_map(
@@ -111,7 +107,9 @@ def plot_rmse_maps(
 
     # Plot model MAE
     if mae_baseline is not None:
-        vmax_mae = max(np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98))
+        vmax_mae = max(
+            np.nanpercentile(mae_model, 98), np.nanpercentile(mae_baseline, 98)
+        )
     else:
         vmax_mae = np.nanpercentile(mae_model, 98)
 
@@ -168,9 +166,7 @@ def plot_rmse_maps(
         from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap
 
         colors = ["#0000FF", "#FF0000"]
-        cmap_binary = LinearSegmentedColormap.from_list(
-            "improvement", colors, N=256
-        )
+        cmap_binary = LinearSegmentedColormap.from_list("improvement", colors, N=256)
         cmap_binary.set_bad("white")
 
         norm_binary = BoundaryNorm(
@@ -188,7 +184,8 @@ def plot_rmse_maps(
             improvement,
             save_path=output_dir / "rmse_improvement_symmetric.png",
             title="RMSE Improvement (Reference - Model)",
-            vmin=np.nanpercentile(improvement, 2),
+            # vmin=np.nanpercentile(improvement, 2),
+            vmin=-imp_abs_max,
             vmax=imp_abs_max,
             cmap=cmap,
             geo_bounds=geo_bounds,
@@ -423,17 +420,13 @@ def plot_sea_bin_metrics(
         counts.append(metrics.get("count", 0))
 
         # Calculate percentage
-        pct = (
-            (metrics.get("count", 0) / total_count * 100) if total_count > 0 else 0
-        )
+        pct = (metrics.get("count", 0) / total_count * 100) if total_count > 0 else 0
         percentages.append(pct)
 
         # Get baseline metrics
         baseline_rmse = metrics.get("baseline_rmse", 0)
         baseline_mae = metrics.get("baseline_mae", 0)
-        baseline_rmse_values.append(
-            baseline_rmse if baseline_rmse is not None else 0
-        )
+        baseline_rmse_values.append(baseline_rmse if baseline_rmse is not None else 0)
         baseline_mae_values.append(baseline_mae if baseline_mae is not None else 0)
         improvement_mae_values.append(metrics.get("mae_improvement_pct", 0))
         improvement_rmse_values.append(metrics.get("rmse_improvement_pct", 0))
@@ -496,9 +489,7 @@ def plot_sea_bin_metrics(
         if v2 > 0:
             axes[0, 0].text(
                 i + width / 2,
-                v2 + max(baseline_rmse_values) * 0.01
-                if baseline_rmse_values
-                else 0,
+                v2 + max(baseline_rmse_values) * 0.01 if baseline_rmse_values else 0,
                 f"{v2:.3f}",
                 ha="center",
                 va="bottom",
@@ -608,14 +599,10 @@ def plot_sea_bin_metrics(
         )
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / "sea_bin_performance.png", dpi=300, bbox_inches="tight"
-    )
+    plt.savefig(output_dir / "sea_bin_performance.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(
-        f"Saved sea-bin performance plot to {output_dir / 'sea_bin_performance.png'}"
-    )
+    print(f"Saved sea-bin performance plot to {output_dir / 'sea_bin_performance.png'}")
 
 
 def plot_error_distribution_histograms(
@@ -664,12 +651,8 @@ def plot_error_distribution_histograms(
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
 
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         # Determine histogram range
         all_errors = (
@@ -818,9 +801,7 @@ def plot_error_boxplots(
         meanprops=dict(color="darkblue", linewidth=2, linestyle="--"),
         whiskerprops=dict(color="blue"),
         capprops=dict(color="blue"),
-        flierprops=dict(
-            marker="o", markerfacecolor="blue", markersize=3, alpha=0.3
-        ),
+        flierprops=dict(marker="o", markerfacecolor="blue", markersize=3, alpha=0.3),
     )
 
     ax1.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.5)
@@ -830,9 +811,7 @@ def plot_error_boxplots(
     ax1.grid(True, alpha=0.3, axis="y")
 
     # Add sample counts
-    for i, (_label, data) in enumerate(
-        zip(bin_labels, model_error_data, strict=False)
-    ):
+    for i, (_label, data) in enumerate(zip(bin_labels, model_error_data, strict=False)):
         ax1.text(
             i + 1,
             ax1.get_ylim()[0],
@@ -861,9 +840,7 @@ def plot_error_boxplots(
         meanprops=dict(color="darkblue", linewidth=1.5, linestyle="--"),
         whiskerprops=dict(color="blue"),
         capprops=dict(color="blue"),
-        flierprops=dict(
-            marker="o", markerfacecolor="blue", markersize=2, alpha=0.3
-        ),
+        flierprops=dict(marker="o", markerfacecolor="blue", markersize=2, alpha=0.3),
     )
 
     # Only plot baseline if data exists
@@ -880,9 +857,7 @@ def plot_error_boxplots(
             meanprops=dict(color="darkred", linewidth=1.5, linestyle="--"),
             whiskerprops=dict(color="red"),
             capprops=dict(color="red"),
-            flierprops=dict(
-                marker="o", markerfacecolor="red", markersize=2, alpha=0.3
-            ),
+            flierprops=dict(marker="o", markerfacecolor="red", markersize=2, alpha=0.3),
         )
 
     ax2.axhline(0, color="black", linestyle="-", linewidth=1, alpha=0.5)
@@ -898,9 +873,7 @@ def plot_error_boxplots(
     # Add legend
     from matplotlib.patches import Patch
 
-    legend_elements = [
-        Patch(facecolor="lightblue", edgecolor="blue", label="Model")
-    ]
+    legend_elements = [Patch(facecolor="lightblue", edgecolor="blue", label="Model")]
     if has_baseline:
         legend_elements.append(
             Patch(facecolor="lightcoral", edgecolor="red", label="Baseline")
@@ -973,12 +946,8 @@ def plot_error_violins(
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
 
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         # Prepare data for violin plot
         plot_data = []
@@ -1103,9 +1072,7 @@ def plot_error_cdfs(
     for idx, bin_config in enumerate(bins_with_data):
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
 
         if len(model_errors) > 0:
             # Sort errors for CDF
@@ -1161,12 +1128,8 @@ def plot_error_cdfs(
     for bin_config in representative_bins:
         bin_name = bin_config["name"]
         bin_label = bin_config["label"]
-        model_errors = np.array(
-            sea_bin_error_samples[bin_name]["model_errors"]
-        )
-        baseline_errors = np.array(
-            sea_bin_error_samples[bin_name]["baseline_errors"]
-        )
+        model_errors = np.array(sea_bin_error_samples[bin_name]["model_errors"])
+        baseline_errors = np.array(sea_bin_error_samples[bin_name]["baseline_errors"])
 
         if len(model_errors) > 0:
             sorted_errors = np.sort(model_errors)
@@ -1239,9 +1202,7 @@ def plot_error_cdfs(
         bbox_inches="tight",
     )
     plt.close()
-    print(
-        f"Saved error CDF plots to {output_dir / 'error_distribution_cdfs.png'}"
-    )
+    print(f"Saved error CDF plots to {output_dir / 'error_distribution_cdfs.png'}")
 
 
 def plot_vhm0_distributions(
@@ -1253,13 +1214,35 @@ def plot_vhm0_distributions(
     model_label: str,
     uncorrected_label: str,
     output_dir: Path,
+    vhm0_range: tuple = None,
 ):
-    """Plot distributions of ground truth, predicted, and uncorrected VHM0."""
-    print("Creating VHM0 distribution comparison plot...")
+    """Plot distributions of ground truth, predicted, and uncorrected VHM0.
+
+    Args:
+        vhm0_range: Optional (lo, hi) tuple to filter samples by raw VHM0 range (metres).
+    """
+    range_label = ""
+    if vhm0_range is not None:
+        range_label = f" [{vhm0_range[0]}-{vhm0_range[1]}m]"
+    print(f"Creating VHM0 distribution comparison plot{range_label}...")
 
     y_true = np.array(plot_samples["y_true"])
     y_pred = np.array(plot_samples["y_pred"])
     y_uncorrected = np.array(plot_samples["y_uncorrected"])
+
+    if vhm0_range is not None:
+        vhm0_vals = np.array(plot_samples["vhm0"])
+        mask = (vhm0_vals >= vhm0_range[0]) & (vhm0_vals < vhm0_range[1])
+        y_true = y_true[mask]
+        y_pred = y_pred[mask]
+        y_uncorrected = y_uncorrected[mask]
+        if len(y_true) == 0:
+            print(f"  No samples in VHM0 range {vhm0_range}, skipping.")
+            return
+        print(f"  Filtered to {len(y_true)} samples in range {vhm0_range[0]}-{vhm0_range[1]}m")
+
+    file_suffix = f"_{vhm0_range[0]}-{vhm0_range[1]}m" if vhm0_range else ""
+    title_suffix = f" (VHM0 {vhm0_range[0]}-{vhm0_range[1]}m)" if vhm0_range else ""
 
     # Pre-compute KDE for each dataset once (reused across all 3 plots)
     print("Computing KDEs (cached for reuse)...")
@@ -1324,21 +1307,16 @@ def plot_vhm0_distributions(
 
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
-    ax.set_title(f"{var_name_full}", fontsize=14, fontweight="bold")
+    ax.set_title(f"{var_name_full}{title_suffix}", fontsize=14, fontweight="bold")
     ax.legend(fontsize=11, framealpha=0.9, loc="upper right")
     ax.grid(True, alpha=0.3)
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / f'{var_name}_distributions.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")
 
     # Plot 2: Model vs Reference (reusing cached KDEs)
     _, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -1364,7 +1342,7 @@ def plot_vhm0_distributions(
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
     ax.set_title(
-        f"{var_name_full} Distribution Comparison (Model vs Reference)",
+        f"{var_name_full} Distribution Comparison (Model vs Reference){title_suffix}",
         fontsize=14,
         fontweight="bold",
     )
@@ -1373,15 +1351,10 @@ def plot_vhm0_distributions(
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions_model_vs_reference.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions_model_vs_reference{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / '{var_name}_distributions_model_vs_reference.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")
 
     # Plot 3: Reference vs Uncorrected (reusing cached KDEs)
     _, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -1407,7 +1380,7 @@ def plot_vhm0_distributions(
     ax.set_xlabel(f"{var_name} ({unit})", fontsize=12, fontweight="bold")
     ax.set_ylabel("Density", fontsize=12, fontweight="bold")
     ax.set_title(
-        f"{var_name_full} Distribution Comparison (Reference vs Uncorrected)",
+        f"{var_name_full} Distribution Comparison (Reference vs Uncorrected){title_suffix}",
         fontsize=14,
         fontweight="bold",
     )
@@ -1416,12 +1389,7 @@ def plot_vhm0_distributions(
     ax.set_xlim(x_min, x_max)
 
     plt.tight_layout()
-    plt.savefig(
-        output_dir / f"{var_name}_distributions_reference_vs_uncorrected.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
+    fname = f"{var_name}_distributions_reference_vs_uncorrected{file_suffix}.png"
+    plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
-    print(
-        f"Saved VHM0 distribution plot to {output_dir / '{var_name}_distributions_reference_vs_uncorrected.png'}"
-    )
+    print(f"Saved VHM0 distribution plot to {output_dir / fname}")

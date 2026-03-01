@@ -13,7 +13,9 @@ def mdn_nll_loss(pi, mu, sigma, y, mask=None, eps=1e-6):
     returns scalar NLL loss
     """
     # ===== CLEAN NaN VALUES FIRST (from land pixels) =====
-    pi = torch.nan_to_num(pi, nan=1.0/pi.shape[1], posinf=1.0, neginf=0.0)  # Use uniform distribution for NaN
+    pi = torch.nan_to_num(
+        pi, nan=1.0 / pi.shape[1], posinf=1.0, neginf=0.0
+    )  # Use uniform distribution for NaN
     mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
     sigma = torch.nan_to_num(sigma, nan=1.0, posinf=10.0, neginf=eps)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
@@ -22,7 +24,7 @@ def mdn_nll_loss(pi, mu, sigma, y, mask=None, eps=1e-6):
     sigma = torch.clamp(sigma, min=eps, max=100.0)
 
     # Expand y to match mixture dimension
-    y_expanded = y.expand_as(mu)    # [B, K, H, W]
+    y_expanded = y.expand_as(mu)  # [B, K, H, W]
 
     # Compute log Gaussian density (more stable than exp then log)
     # log N(y|mu,sigma) = -0.5*log(2*pi) - log(sigma) - 0.5*((y-mu)/sigma)^2
@@ -38,15 +40,25 @@ def mdn_nll_loss(pi, mu, sigma, y, mask=None, eps=1e-6):
     # log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
     max_log_weighted = log_weighted.max(dim=1, keepdim=True)[0]
     log_sum_exp = torch.sum(torch.exp(log_weighted - max_log_weighted), dim=1)
-    log_likelihood = max_log_weighted.squeeze(1) + torch.log(log_sum_exp + eps)  # [B, H, W]
+    log_likelihood = max_log_weighted.squeeze(1) + torch.log(
+        log_sum_exp + eps
+    )  # [B, H, W]
 
     # Check for NaN before masking (debug)
     if torch.isnan(log_likelihood).any():
         print("WARNING: NaN in MDN log_likelihood BEFORE masking!")
-        print(f"  pi range: [{pi.min():.4f}, {pi.max():.4f}], has_nan: {torch.isnan(pi).any()}")
-        print(f"  mu range: [{mu.min():.4f}, {mu.max():.4f}], has_nan: {torch.isnan(mu).any()}")
-        print(f"  sigma range: [{sigma.min():.4f}, {sigma.max():.4f}], has_nan: {torch.isnan(sigma).any()}")
-        print(f"  log_sum_exp range: [{log_sum_exp.min():.4f}, {log_sum_exp.max():.4f}]")
+        print(
+            f"  pi range: [{pi.min():.4f}, {pi.max():.4f}], has_nan: {torch.isnan(pi).any()}"
+        )
+        print(
+            f"  mu range: [{mu.min():.4f}, {mu.max():.4f}], has_nan: {torch.isnan(mu).any()}"
+        )
+        print(
+            f"  sigma range: [{sigma.min():.4f}, {sigma.max():.4f}], has_nan: {torch.isnan(sigma).any()}"
+        )
+        print(
+            f"  log_sum_exp range: [{log_sum_exp.min():.4f}, {log_sum_exp.max():.4f}]"
+        )
         # Replace NaN with large negative value (high loss)
         log_likelihood = torch.nan_to_num(log_likelihood, nan=-10.0)
 

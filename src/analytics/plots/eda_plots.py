@@ -5,7 +5,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 
 
 def plot_time_series(ts: pd.Series, save_path=None, show=True):
-    plt.figure(figsize=(14,5))
+    plt.figure(figsize=(14, 5))
     plt.plot(ts.index, ts, label="Actual")
     plt.title("Actual Time Series")
     plt.legend()
@@ -15,10 +15,17 @@ def plot_time_series(ts: pd.Series, save_path=None, show=True):
         plt.show()
     plt.close()
 
+
 def plot_outliers(ts: pd.Series, outlier_mask, save_path=None, show=True):
-    plt.figure(figsize=(14,5))
+    plt.figure(figsize=(14, 5))
     plt.plot(ts.index, ts, label="Actual")
-    plt.scatter(ts.index[outlier_mask], ts[outlier_mask], color="crimson", marker="x", label="Outliers")
+    plt.scatter(
+        ts.index[outlier_mask],
+        ts[outlier_mask],
+        color="crimson",
+        marker="x",
+        label="Outliers",
+    )
     plt.title("Actual TS vs. Outliers")
     plt.legend()
     if save_path:
@@ -27,8 +34,16 @@ def plot_outliers(ts: pd.Series, outlier_mask, save_path=None, show=True):
         plt.show()
     plt.close()
 
-def plot_smoothed_differenced(ts: pd.Series, smoothed: pd.Series, differenced: pd.Series, scaled_series: pd.Series, save_path=None, show=True):
-    fig, axs = plt.subplots(4, 1, figsize=(14,8), sharex=True)
+
+def plot_smoothed_differenced(
+    ts: pd.Series,
+    smoothed: pd.Series,
+    differenced: pd.Series,
+    scaled_series: pd.Series,
+    save_path=None,
+    show=True,
+):
+    fig, axs = plt.subplots(4, 1, figsize=(14, 8), sharex=True)
     axs[0].plot(ts.index, ts, label="Actual TS", color="blue")
     axs[0].set_title("Actual TS")
     axs[0].legend()
@@ -46,6 +61,7 @@ def plot_smoothed_differenced(ts: pd.Series, smoothed: pd.Series, differenced: p
     if show:
         plt.show()
     plt.close()
+
 
 def plot_distribution(ts: pd.Series, feature_col_name: str, save_path=None, show=False):
     plt.figure(figsize=(10, 5))
@@ -65,7 +81,7 @@ def plot_monthly_seasonality(df: pd.Series, value_col: str, save_path=None):
     Plot average value per month across years.
     """
     plt.figure(figsize=(8, 4))
-    plt.plot(df["month"], df["monthly_mean"], color='xkcd:amethyst', marker="o")
+    plt.plot(df["month"], df["monthly_mean"], color="xkcd:amethyst", marker="o")
     plt.title(f"Monthly Mean {value_col}")
     plt.xlabel("Month")
     plt.ylabel(f"Mean {value_col}")
@@ -87,22 +103,23 @@ def plot_weekly_seasonality(df: pd.Series, value_col: str, save_path=None):
         plt.savefig(save_path, bbox_inches="tight")
     plt.close()
 
+
 def plot_weekly_month_seasonality(df: pd.Series, value_col: str, save_path=None):
     fig, ax = plt.subplots()
     for month in sorted(df["month"].unique()):
         monthly = df[df["month"] == month]
         weekly_means = monthly.groupby("weekday")[f"{value_col}_mean"].mean()
         x = range(7)
-        line, = ax.plot(x, weekly_means, label=f"Month {month}")
+        (line,) = ax.plot(x, weekly_means, label=f"Month {month}")
         ax.annotate(
             f"{month}",
             xy=(x[-1], weekly_means.iloc[-1]),
             xytext=(5, 0),
             textcoords="offset points",
             color=line.get_color(),
-            va='center',
+            va="center",
             fontsize=9,
-            fontweight="bold"
+            fontweight="bold",
         )
 
     ax.set_xlabel("Day of Week (0=Mon)")
@@ -114,11 +131,12 @@ def plot_weekly_month_seasonality(df: pd.Series, value_col: str, save_path=None)
         plt.savefig(save_path, bbox_inches="tight")
     plt.close()
 
+
 def plot_hourly_by_weekday(
     df: pd.DataFrame,
     value_col: str = "VHM0_mean",
     weekday_labels: list = None,
-    save_path: str = None
+    save_path: str = None,
 ):
     """
     Plots the average hourly values per weekday using seaborn lineplot.
@@ -181,7 +199,9 @@ def plot_time_series_decomposition(
     ts_clean = ts.dropna()
 
     # Decompose
-    decomposition = seasonal_decompose(ts_clean, period=freq, model=model, extrapolate_trend="freq")
+    decomposition = seasonal_decompose(
+        ts_clean, period=freq, model=model, extrapolate_trend="freq"
+    )
     # decomposition = seasonal_decompose(ts_clean, period=freq, model=model,model='additive')
     trend = decomposition.trend
     seasonal = decomposition.seasonal
@@ -190,23 +210,23 @@ def plot_time_series_decomposition(
     plt.figure(figsize=(15, 12))
 
     plt.subplot(4, 1, 1)
-    plt.plot(ts_clean, label='Original Time Series', color='blue')
-    plt.title('Original Time Series')
+    plt.plot(ts_clean, label="Original Time Series", color="blue")
+    plt.title("Original Time Series")
     plt.legend()
 
     plt.subplot(4, 1, 2)
-    plt.plot(trend, label='Trend Component', color='orange')
-    plt.title('Trend Component')
+    plt.plot(trend, label="Trend Component", color="orange")
+    plt.title("Trend Component")
     plt.legend()
 
     plt.subplot(4, 1, 3)
-    plt.plot(seasonal, label='Seasonal Component', color='green')
-    plt.title('Seasonal Component')
+    plt.plot(seasonal, label="Seasonal Component", color="green")
+    plt.title("Seasonal Component")
     plt.legend()
 
     plt.subplot(4, 1, 4)
-    plt.plot(residual, label='Residual Component', color='red')
-    plt.title('Residual Component')
+    plt.plot(residual, label="Residual Component", color="red")
+    plt.title("Residual Component")
     plt.legend()
 
     plt.tight_layout()

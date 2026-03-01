@@ -1,5 +1,6 @@
 from lightning.pytorch.callbacks import BaseFinetuning
 
+
 class FreezeEncoderCallback(BaseFinetuning):
     def __init__(self, aggressive_freeze=False):
         super().__init__()

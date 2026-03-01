@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def reconstruct_vhm0_values(
     predict_bias: bool,
     predict_bias_log_space: bool,

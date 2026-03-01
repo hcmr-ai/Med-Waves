@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,19 +27,20 @@ class MDNHead(nn.Module):
         x: [B, C, H, W]
         returns pi, mu, sigma
         """
-        mdn_out = self.mdn_conv(x)                  # [B, 3K, H, W]
+        mdn_out = self.mdn_conv(x)  # [B, 3K, H, W]
         # B, C, H, W = mdn_out.shape
 
         # Split into mixture components
         pi, mu, sigma_raw = torch.split(mdn_out, self.K, dim=1)
 
         # Mixture weights: softmax over K
-        pi = F.softmax(pi, dim=1)                   # [B, K, H, W]
+        pi = F.softmax(pi, dim=1)  # [B, K, H, W]
 
         # Sigma: softplus for stability
-        sigma = F.softplus(sigma_raw) + 1e-3        # positive, stable
+        sigma = F.softplus(sigma_raw) + 1e-3  # positive, stable
 
         return pi, mu, sigma
+
 
 # Helper functions for MDN inference
 def mdn_sample(pi, mu, sigma):
@@ -48,7 +48,7 @@ def mdn_sample(pi, mu, sigma):
     Sample from MDN mixture.
     """
     # Choose component per pixel
-    comp = torch.distributions.Categorical(pi.permute(0,2,3,1)).sample()
+    comp = torch.distributions.Categorical(pi.permute(0, 2, 3, 1)).sample()
     comp = comp.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
 
     # Gather selected component parameters
@@ -58,6 +58,7 @@ def mdn_sample(pi, mu, sigma):
     # Sample from chosen Gaussian
     eps = torch.randn_like(mu_sel)
     return mu_sel + sigma_sel * eps
+
 
 def mdn_expected_value(pi, mu):
     """

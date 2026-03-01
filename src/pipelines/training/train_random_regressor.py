@@ -9,7 +9,13 @@ from tqdm import tqdm
 
 
 class RandomDeltaSampling:
-    def __init__(self, seed: int = 42, comet_experiment: Experiment = None, log_plots_per_file: bool = False, run_id: int = 0):
+    def __init__(
+        self,
+        seed: int = 42,
+        comet_experiment: Experiment = None,
+        log_plots_per_file: bool = False,
+        run_id: int = 0,
+    ):
         self.seed = seed
         self.run_id = run_id
         self.error_distribution = {}
@@ -18,7 +24,7 @@ class RandomDeltaSampling:
             self.comet = Experiment(
                 api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
                 project_name="hcmr-ai",
-                workspace="ioannisgkinis"
+                workspace="ioannisgkinis",
             )
             exp_name = f"random_regressor_bias_correction_{datetime.now().strftime('%Y%m%d_%H%M')}"
             self.comet.set_name(exp_name)
@@ -44,6 +50,7 @@ class RandomDeltaSampling:
 
     def _log_histogram(self, values, label: str, bins: int = 100):
         import matplotlib.pyplot as plt
+
         print(f"📊 Logging error histogram for '{label}'...")
 
         # Wrap values in Polars for fast binning
@@ -63,11 +70,11 @@ class RandomDeltaSampling:
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.bar(
             bin_centers,
-            counts[:len(bin_centers)],  # Ensure alignment
+            counts[: len(bin_centers)],  # Ensure alignment
             width=bin_width,
-            edgecolor='black',
+            edgecolor="black",
             alpha=0.7,
-            rasterized=True
+            rasterized=True,
         )
         ax.set_title(f"Error Distribution: {label}")
         ax.set_xlabel("Error (target - input)")
@@ -106,9 +113,7 @@ class RandomDeltaSampling:
         print(f"💾 Saving error distributions to directory: {base_dir}")
 
         for label, errors in self.error_distribution.items():
-            df = pl.DataFrame({
-                "error": pl.Series(errors)
-            })
+            df = pl.DataFrame({"error": pl.Series(errors)})
             file_path = base_dir / f"{label}.parquet"
             df.write_parquet(file_path)
             print(f"  ✅ Saved {len(errors)} errors for '{label}' → {file_path}")
@@ -153,7 +158,7 @@ class RandomDeltaSampling:
         output_dir: str,
         predictions: list[tuple[str, str, str]],
         target_cols: dict,
-        sample_fraction: float = 0.05
+        sample_fraction: float = 0.05,
     ):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,7 +176,9 @@ class RandomDeltaSampling:
 
         for file in tqdm(eval_files, desc="Predicting"):
             df = pl.read_parquet(file)
-            df = df.drop_nulls(subset=["VHM0", "corrected_VHM0", "VTM02", "corrected_VTM02"])
+            df = df.drop_nulls(
+                subset=["VHM0", "corrected_VHM0", "VTM02", "corrected_VTM02"]
+            )
 
             new_cols = []
 
@@ -252,7 +259,6 @@ class RandomDeltaSampling:
         #     sampled_inputs[output_col] = sampled["input"].to_list()
         #     sampled_targets[output_col] = sampled["target"].to_list()
 
-
         # del all_truths, all_inputs, all_preds
 
         # self._log_prediction_distribution(
@@ -292,7 +298,9 @@ class RandomDeltaSampling:
                 "mae": mean_absolute_error(y_true, y_pred),
                 "mae_clipped": mean_absolute_error(y_true, np.clip(y_pred, 0, None)),
                 "rmse": np.sqrt(mean_squared_error(y_true, y_pred)),
-                "rmse_clipped": np.sqrt(mean_squared_error(y_true, np.clip(y_pred, 0, None))),
+                "rmse_clipped": np.sqrt(
+                    mean_squared_error(y_true, np.clip(y_pred, 0, None))
+                ),
                 "bias": np.mean(y_pred - y_true),
                 "r2": r2_score(y_true, y_pred),
             }
@@ -308,45 +316,48 @@ class RandomDeltaSampling:
             if target_col not in y_true_dict:
                 continue
 
-            df = pl.DataFrame({
-                "y_true": y_true_dict[target_col],
-                "y_pred": preds
-            }).with_columns([
-                (pl.col("y_pred").clip(0.0, None)).alias("y_pred_clipped")
-            ])
+            df = pl.DataFrame(
+                {"y_true": y_true_dict[target_col], "y_pred": preds}
+            ).with_columns([(pl.col("y_pred").clip(0.0, None)).alias("y_pred_clipped")])
 
             # Compute errors
-            df = df.with_columns([
-                (pl.col("y_pred") - pl.col("y_true")).alias("diff"),
-                (pl.col("y_pred_clipped") - pl.col("y_true")).alias("diff_clipped"),
-            ])
+            df = df.with_columns(
+                [
+                    (pl.col("y_pred") - pl.col("y_true")).alias("diff"),
+                    (pl.col("y_pred_clipped") - pl.col("y_true")).alias("diff_clipped"),
+                ]
+            )
 
             # Compute metrics using Polars expressions
             metrics = {
                 "mae": df.select(pl.col("diff").abs().mean()).item(),
                 "mae_clipped": df.select(pl.col("diff_clipped").abs().mean()).item(),
                 "rmse": df.select((pl.col("diff") ** 2).mean().sqrt()).item(),
-                "rmse_clipped": df.select((pl.col("diff_clipped") ** 2).mean().sqrt()).item(),
+                "rmse_clipped": df.select(
+                    (pl.col("diff_clipped") ** 2).mean().sqrt()
+                ).item(),
                 "bias": df.select(pl.col("diff").mean()).item(),
             }
 
             # R2 still needs NumPy
             try:
                 from sklearn.metrics import r2_score
-                metrics["r2"] = r2_score(df["y_true"].to_numpy(), df["y_pred"].to_numpy())
+
+                metrics["r2"] = r2_score(
+                    df["y_true"].to_numpy(), df["y_pred"].to_numpy()
+                )
             except Exception:
                 metrics["r2"] = float("nan")
 
             for name, val in metrics.items():
                 self.comet.log_metric(f"{pred_col}_{name}", val)
 
-
     def _log_prediction_distribution(
         self,
         predictions: dict[str, list[float]],
         inputs: dict[str, list[float]],
         targets: dict[str, list[float]],
-        file_name: str
+        file_name: str,
     ):
         print("⚡ Fast histogram generation using Polars")
         import matplotlib.pyplot as plt
@@ -360,10 +371,14 @@ class RandomDeltaSampling:
             min_val, max_val = float(np.min(all_vals)), float(np.max(all_vals))
             bins = np.linspace(min_val, max_val, 101)  # 100 bins
 
-            def compute_hist(data: list[float], label: str, bins: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            def compute_hist(
+                data: list[float], label: str, bins: np.ndarray
+            ) -> tuple[np.ndarray, np.ndarray]:
                 df = pl.DataFrame({"value": data})
                 bin_indices = np.digitize(df["value"].to_numpy(), bins) - 1
-                counts = np.bincount(bin_indices, minlength=len(bins) - 1)[:len(bins) - 1]
+                counts = np.bincount(bin_indices, minlength=len(bins) - 1)[
+                    : len(bins) - 1
+                ]
                 bin_centers = 0.5 * (bins[:-1] + bins[1:])
                 return bin_centers, counts
 
@@ -372,12 +387,21 @@ class RandomDeltaSampling:
             for values, label, color in zip(
                 [input_values, pred_values, target_values],
                 ["Input", "Predicted", "Target"],
-                ["blue", "green", "orange"], strict=False
+                ["blue", "green", "orange"],
+                strict=False,
             ):
                 if not values:
                     continue
                 x, y = compute_hist(values, label, bins)
-                ax.bar(x, y, width=(x[1] - x[0]), alpha=0.3, label=f"{label}", edgecolor='black', color=color)
+                ax.bar(
+                    x,
+                    y,
+                    width=(x[1] - x[0]),
+                    alpha=0.3,
+                    label=f"{label}",
+                    edgecolor="black",
+                    color=color,
+                )
 
             ax.set_title(f"Prediction Distribution: {col}")
             ax.set_xlabel(col)
@@ -400,7 +424,7 @@ class RandomDeltaSampling:
         metrics: list[str] | None = None,
         file_prefix: str = "",
         grid_resolution: float = 0.01,
-        cmap: str = "viridis"
+        cmap: str = "viridis",
     ):
         if metrics is None:
             metrics = ["rmse", "mae", "bias"]
@@ -410,16 +434,25 @@ class RandomDeltaSampling:
         import matplotlib.pyplot as plt
 
         def bin_coords(df, lat_col, lon_col, res):
-            return df.with_columns([
-                (pl.col(lat_col) / res).round(0) * res,
-                (pl.col(lon_col) / res).round(0) * res
-            ]).rename({lat_col: "lat_bin", lon_col: "lon_bin"})
+            return df.with_columns(
+                [
+                    (pl.col(lat_col) / res).round(0) * res,
+                    (pl.col(lon_col) / res).round(0) * res,
+                ]
+            ).rename({lat_col: "lat_bin", lon_col: "lon_bin"})
 
         def compute_metric_expr(metric, pred_col, target_col):
             if metric == "rmse":
-                return ((pl.col(pred_col) - pl.col(target_col)) ** 2).mean().sqrt().alias("metric")
+                return (
+                    ((pl.col(pred_col) - pl.col(target_col)) ** 2)
+                    .mean()
+                    .sqrt()
+                    .alias("metric")
+                )
             elif metric == "mae":
-                return (pl.col(pred_col) - pl.col(target_col)).abs().mean().alias("metric")
+                return (
+                    (pl.col(pred_col) - pl.col(target_col)).abs().mean().alias("metric")
+                )
             elif metric == "bias":
                 return (pl.col(pred_col) - pl.col(target_col)).mean().alias("metric")
             else:
@@ -429,9 +462,9 @@ class RandomDeltaSampling:
 
         for pred_col, target_col in prediction_target_pairs:
             for metric in metrics:
-                grouped = df.group_by(["lat_bin", "lon_bin"]).agg([
-                    compute_metric_expr(metric, pred_col, target_col)
-                ])
+                grouped = df.group_by(["lat_bin", "lon_bin"]).agg(
+                    [compute_metric_expr(metric, pred_col, target_col)]
+                )
 
                 lats = grouped["lat_bin"].to_numpy()
                 lons = grouped["lon_bin"].to_numpy()
@@ -442,20 +475,26 @@ class RandomDeltaSampling:
                 ax.coastlines()
 
                 scatter = ax.scatter(
-                    lons, lats, c=values, cmap=cmap, s=10, alpha=0.8, transform=ccrs.PlateCarree(), rasterized=True
+                    lons,
+                    lats,
+                    c=values,
+                    cmap=cmap,
+                    s=10,
+                    alpha=0.8,
+                    transform=ccrs.PlateCarree(),
+                    rasterized=True,
                 )
 
-                ax.add_feature(cfeature.BORDERS, linestyle=':')
+                ax.add_feature(cfeature.BORDERS, linestyle=":")
                 ax.set_title(f"{metric.upper()} Map for {pred_col}")
                 plt.colorbar(scatter, ax=ax, label=metric.upper(), shrink=0.6)
                 plt.tight_layout()
 
                 self.comet.log_figure(
                     figure_name=f"{file_prefix}map__{metric}__{pred_col}.png",
-                    figure=fig
+                    figure=fig,
                 )
                 plt.close(fig)
-
 
     def log_saved_predictions_to_comet(self, prediction_dir: str):
         prediction_dir = Path(prediction_dir)
@@ -478,16 +517,18 @@ class RandomDeltaSampling:
             # Prepare per-file dictionaries
             per_file_preds = {
                 "predicted_VHM0": df["predicted_VHM0"].to_list(),
-                "predicted_VTM02": df["predicted_VTM02"].to_list()
+                "predicted_VTM02": df["predicted_VTM02"].to_list(),
             }
             per_file_originals = {
                 "predicted_VHM0": df["VHM0"].to_list(),
-                "predicted_VTM02": df["VTM02"].to_list()
+                "predicted_VTM02": df["VTM02"].to_list(),
             }
 
             # Log histograms just for this file
             print(f"📊 Logging histograms for {file.name} to Comet...")
-            self._log_prediction_distribution(per_file_preds, per_file_originals, file.name)
+            self._log_prediction_distribution(
+                per_file_preds, per_file_originals, file.name
+            )
 
 
 def main(run_id: int):
@@ -507,7 +548,10 @@ def main(run_id: int):
         exit()
 
     import random
-    reg = RandomDeltaSampling(seed=random.randint(0, 1000000), log_plots_per_file=False, run_id=run_id)
+
+    reg = RandomDeltaSampling(
+        seed=random.randint(0, 1000000), log_plots_per_file=False, run_id=run_id
+    )
 
     if load_from_parquet:
         reg.load_error_distribution(f"{output_dir}/error_distribution/sub_set_3_months")
@@ -515,10 +559,16 @@ def main(run_id: int):
         patterns = ["WAVEAN20211", "WAVEAN20221"]
         reg.comet.log_parameter("train_file_patterns", ", ".join(patterns))
         train_files = sorted(
-            file for pattern in patterns for file in train_dir.glob(f"{pattern}*.parquet")
+            file
+            for pattern in patterns
+            for file in train_dir.glob(f"{pattern}*.parquet")
         )
-        reg.fit_many(train_files, input_col="VHM0", target_col="corrected_VHM0", label="swh")
-        reg.fit_many(train_files, input_col="VTM02", target_col="corrected_VTM02", label="mwp")
+        reg.fit_many(
+            train_files, input_col="VHM0", target_col="corrected_VHM0", label="swh"
+        )
+        reg.fit_many(
+            train_files, input_col="VTM02", target_col="corrected_VTM02", label="mwp"
+        )
         reg.save_error_distribution(f"{output_dir}/error_distribution")
 
     patterns = ["WAVEAN2023"]
@@ -533,16 +583,16 @@ def main(run_id: int):
         output_dir=output_dir,
         predictions=[
             ("VHM0", "swh", "predicted_VHM0"),
-            ("VTM02", "mwp", "predicted_VTM02")
+            ("VTM02", "mwp", "predicted_VTM02"),
         ],
         target_cols={
             "predicted_VHM0": "corrected_VHM0",
-            "predicted_VTM02": "corrected_VTM02"
-        }
+            "predicted_VTM02": "corrected_VTM02",
+        },
     )
 
 
 if __name__ == "__main__":
     for i in range(3, 5):
-        print(f'Running iteration {i}')
+        print(f"Running iteration {i}")
         main(i)
