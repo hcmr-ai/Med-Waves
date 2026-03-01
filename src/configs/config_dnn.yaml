@@ -3,7 +3,7 @@
 
 # Data configuration
 data:
-  data_path: "/opt/dlami/nvme/preprocessed_subsampled_step_5/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
+  data_path: "/opt/dlami/nvme/preprocessed_extended_subsampled_step_5/" # "/mnt/ebs/" # "/Users/deeplab/Documents/projects/hcmr/data/hourly/" # "s3://medwav-dev-data/parquet/hourly/"
   file_pattern: "WAVEAN*.pt"
   train_year: [2018, 2019, 2020, 2021]
   val_year: [2022]
@@ -13,17 +13,19 @@ data:
   patch_size: null # [256, 256] # Smaller patches = faster training (was [128, 128])
   stride: null # [256, 256] # Stride for sliding window
   min_valid_pixels: 0.3 # Only keep patches with >30% sea pixels
-  use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
+  # use_balanced_sampling: false # Use balanced sampling (equal samples per wave height bin)
   max_files: null # Limit number of files for testing, null = use all
   random_seed: 42
   subsample_step: null # Data already subsampled in files, no additional runtime subsampling
   use_cache: false # Cache files in memory (reduces repeated I/O)
   max_cache_size: 20 # Number of files to keep in cache per worker (20 files × 44MB = 880MB per worker)
-  use_patch_sampling: true # Use patch sampling
+  use_patch_sampling: false # Use patch sampling
+  sampling_mode: exhaustive
   add_sea_mask_channel: false # Add sea mask channel to input
   predict_log_correction: false # Predict log correction (log(DA+eps) - log(raw+eps))
   predict_bias: true # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
   bin_sampling_weights: null # [3,2,1] # Sampling weights for each bin
+  region_filter: mediterranean # Region filter: "atlantic", "mediterranean", or null for no filtering (Gibraltar boundary at lon=-5.5°)
 
 
   # Data preprocessing
@@ -42,16 +44,23 @@ data:
       "corrected_VTM02",
       "WDIR",
       "VMDR",
+      "wind_dir_sin",
+      "wind_dir_cos",
+      "sin_delta",
+      "alongwind",
+      "crosswind",
+      "storm_regime",
+      "storm_regime_sig",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "scalers/BU24h_zscore_target_20_21_all_with_corrected.pkl"
+  normalizer_path: "scalers/BU24h_zscore_18-21_atla_extended.pkl"
 
 # Model configuration
 model:
   model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
-  in_channels: 15 # Number of input channels (all features except excluded)
+  in_channels: 16 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
-  loss_type: "mse" # Options: "mse", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
+  loss_type: "mse" # Options: "mse", "mse_huber_tail", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
   filters: [64, 128, 256]
   dropout: 0
   add_vhm0_residual: false
@@ -118,26 +127,28 @@ training:
   aggressive_freeze: false
 # Checkpoint configuration
 checkpoint:
-  resume_from_checkpoint: /opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights/epoch=18-val_loss=0.02.ckpt # -21_mse_64_lambda_lr/epoch=38-val_loss=0.01.ckpt # Localepoch=01-val_loss=0.04.ckpt" # Path to checkpoint file to resume from
-  checkpoint_dir: "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
-  s3_sync_dir: "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights" # S3 backup for spot instances
+  resume_from_checkpoint: null
+  checkpoint_dir: /opt/dlami/nvme/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean
+  s3_sync_dir: s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
 
 # Logging configuration
 logging:
-  log_dir: "/opt/dlami/nvme/logs_dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
-  experiment_name: "dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_patch_sampling_64_lambda_lr_bias_correction_bin_sampling_weights"
+  log_dir: /opt/dlami/nvme/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean
+  experiment_name: dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean  
   use_comet: true
   comet_tags:
     [
       "wave_height",
       "transunet",
       "mse",
+      "norm_vhm0",
       "bias_correction",
       "predict_bias",
       "lambda_lr",
-      "patch_sampling",
-      "bin_sampling_weights",
+      "cos_delta",
+      "region_filter",
+      "mediterranean"
     ]
-  comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler"
+  comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler for Mediterranean region with cos_delta feature"
