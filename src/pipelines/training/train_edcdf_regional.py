@@ -40,8 +40,15 @@ LOCAL_OUTPUT_BASE = "data/edcdf_regional"
 
 GIBRALTAR_LON = -5.5
 
+BISCAY_LAT = 43.0
+BISCAY_LON = 0.0
+
 REGIONS = {
     "atlantic": lambda df: df.filter(pl.col("longitude") < GIBRALTAR_LON),
+    "atlantic_biscay": lambda df: df.filter(
+        (pl.col("longitude") < GIBRALTAR_LON)
+        | ((pl.col("latitude") > BISCAY_LAT) & (pl.col("longitude") < BISCAY_LON))
+    ),
     "mediterranean": lambda df: df.filter(pl.col("longitude") >= GIBRALTAR_LON),
     "all": lambda df: df,
 }

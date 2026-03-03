@@ -142,7 +142,7 @@ class TimestepPatchWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE (TimestepPatchWaveDataset) ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
 
             # Extract coordinates from first file
             lat_idx = feature_cols.index("latitude")
@@ -152,14 +152,16 @@ class TimestepPatchWaveDataset(Dataset):
 
             # Gibraltar boundary
             GIBRALTAR_LON = -5.5
+            BISCAY_LAT = 43.0
+            BISCAY_LON = 0.0
+            biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
 
             # Find which columns (longitude) and rows (latitude) to keep
+            # For each column, check if ANY pixel in that column is in the target region
             if self.region_filter == "atlantic":
-                region_condition = lon_data < GIBRALTAR_LON
-                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+                region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
             elif self.region_filter == "mediterranean":
-                region_condition = lon_data >= GIBRALTAR_LON
-                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+                region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
             else:
                 raise ValueError(f"Unknown region_filter: {self.region_filter}")
 

@@ -122,15 +122,18 @@ class CachedWaveDataset(Dataset):
                     lat_data = sample_tensor[0, ..., lat_idx]
                     lon_data = sample_tensor[0, ..., lon_idx]
 
-                # Gibraltar boundary
+                # Gibraltar boundary and Bay of Biscay (Atlantic water above Gibraltar)
                 GIBRALTAR_LON = -5.5
+                BISCAY_LAT = 43.0
+                BISCAY_LON = 0.0
+                biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
 
                 # Find which columns (longitude) and rows (latitude) to keep
                 # For each column, check if ANY pixel in that column is in the target region
                 if self.region_filter == "atlantic":
-                    region_condition = lon_data < GIBRALTAR_LON
+                    region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
                 elif self.region_filter == "mediterranean":
-                    region_condition = lon_data >= GIBRALTAR_LON
+                    region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
                 else:
                     raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -184,11 +187,11 @@ class CachedWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
             if self.region_filter == "atlantic":
-                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+                print("  Keeping pixels: lon < -5.5° OR (lat > 43° AND lon < 0°)")
             elif self.region_filter == "mediterranean":
-                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+                print("  Keeping pixels: lon >= -5.5° AND NOT (lat > 43° AND lon < 0°)")
             print("================================\n")
         else:
             print("  No region filtering (using all pixels)")
