@@ -110,6 +110,7 @@ class CachedWaveDataset(Dataset):
             self.crop_w_indices = None
             self.cropped_lat_grid = None
             self.cropped_lon_grid = None
+            self.pixel_exclusion_mask = None
             if self.region_filter is not None:
                 lat_idx = sample_feature_cols.index("latitude")
                 lon_idx = sample_feature_cols.index("longitude")
@@ -155,6 +156,22 @@ class CachedWaveDataset(Dataset):
                 self.cropped_lon_grid = lon_data[self.crop_h_indices, :][
                     :, self.crop_w_indices
                 ]
+
+                # Pixel-level exclusion mask for non-region pixels within cropped rectangle
+                # True = pixel to EXCLUDE (set to NaN in __getitem__)
+                self.pixel_exclusion_mask = None
+                if self.region_filter == "mediterranean":
+                    exclude = (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                elif self.region_filter == "atlantic":
+                    is_med = (self.cropped_lon_grid >= GIBRALTAR_LON) & ~(
+                        (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                    )
+                    exclude = is_med
+                else:
+                    exclude = None
+                if exclude is not None and exclude.any():
+                    self.pixel_exclusion_mask = exclude
+                    print(f"  Pixel-level region exclusion: {exclude.sum().item()} pixels masked")
 
                 original_size = lat_data.shape[0] * lat_data.shape[1]
                 cropped_size = len(self.crop_h_indices) * len(self.crop_w_indices)
@@ -352,6 +369,11 @@ class CachedWaveDataset(Dataset):
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             # Crop to only include target region (e.g., Mediterranean only)
             hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
+
+        # NaN-out non-region pixels so they are excluded by the mask
+        if self.pixel_exclusion_mask is not None:
+            hour_data = hour_data.clone()
+            hour_data[self.pixel_exclusion_mask] = float("nan")
 
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X

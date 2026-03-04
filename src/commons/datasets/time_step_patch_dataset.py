@@ -184,6 +184,21 @@ class TimestepPatchWaveDataset(Dataset):
                 :, self.crop_w_indices
             ]
 
+            # Pixel-level exclusion mask for non-region pixels within cropped rectangle
+            self.pixel_exclusion_mask = None
+            if self.region_filter == "mediterranean":
+                exclude = (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+            elif self.region_filter == "atlantic":
+                is_med = (self.cropped_lon_grid >= GIBRALTAR_LON) & ~(
+                    (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                )
+                exclude = is_med
+            else:
+                exclude = None
+            if exclude is not None and exclude.any():
+                self.pixel_exclusion_mask = exclude
+                print(f"  Pixel-level region exclusion: {exclude.sum().item()} pixels masked")
+
             # Update H, W to reflect cropped dimensions
             old_H, old_W = self.H, self.W
             self.H = len(self.crop_h_indices)
@@ -199,6 +214,7 @@ class TimestepPatchWaveDataset(Dataset):
         else:
             self.cropped_lat_grid = None
             self.cropped_lon_grid = None
+            self.pixel_exclusion_mask = None
 
         # Build index map (H, W are final after region cropping)
         ph, pw = self.patch_cfg.patch_size
@@ -299,6 +315,10 @@ class TimestepPatchWaveDataset(Dataset):
         # Apply spatial cropping if region filtering is enabled
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             hour0 = hour0[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
+
+        if self.pixel_exclusion_mask is not None:
+            hour0 = hour0.clone()
+            hour0[self.pixel_exclusion_mask] = float("nan")
 
         vhm0_idx = feature_cols.index("VHM0")
         vhm0 = hour0[..., vhm0_idx : vhm0_idx + 1]  # (H,W,1)
@@ -429,6 +449,10 @@ class TimestepPatchWaveDataset(Dataset):
         # Apply spatial cropping if region filtering is enabled
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
+
+        if self.pixel_exclusion_mask is not None:
+            hour_data = hour_data.clone()
+            hour_data[self.pixel_exclusion_mask] = float("nan")
 
         # Input columns: features_order if provided, else all minus excluded/targets
         target_colnames = list(self.target_columns.values())
