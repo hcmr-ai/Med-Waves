@@ -25,6 +25,7 @@ def plot_rmse_maps(
     geo_bounds: dict,
     unit: str,
     output_dir: Path,
+    dataset_coords: tuple = None,
 ):
     """Plot spatial RMSE maps for model and baseline."""
     if not test_files or not spatial_errors_model:
@@ -34,15 +35,19 @@ def plot_rmse_maps(
     cmap = plt.get_cmap("jet").copy()
     cmap.set_bad("white")
 
-    # Load coordinates from first test file
-    try:
-        lat_grid, lon_grid = load_coordinates_from_parquet(
-            "s3://" + test_files[0], subsample_step=subsample_step
-        )
-        logger.info(f"Coordinate grid shape: {lat_grid.shape}")
-    except Exception as e:
-        logger.error(f"Failed to load coordinates: {e}")
-        return
+    # Use dataset coordinates (region-cropped) if provided, else load from file
+    if dataset_coords is not None:
+        lat_grid, lon_grid = dataset_coords
+        logger.info(f"Using dataset coordinates: {lat_grid.shape}")
+    else:
+        try:
+            lat_grid, lon_grid = load_coordinates_from_parquet(
+                "s3://" + test_files[0], subsample_step=subsample_step
+            )
+            logger.info(f"Coordinate grid shape: {lat_grid.shape}")
+        except Exception as e:
+            logger.error(f"Failed to load coordinates: {e}")
+            return
 
     # Aggregate spatial errors across all batches
     total_error_sq_model = np.zeros_like(lat_grid)

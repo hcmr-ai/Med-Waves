@@ -94,9 +94,11 @@ class ModelEvaluator:
         target_columns: dict = None,
         apply_bilateral_filter: bool = False,
         apply_delta_corrector_flag: bool = False,
+        region_filter: str = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
+        self.region_filter = region_filter
         self.model = model.to(device)
         self.model.eval()
 
@@ -104,6 +106,7 @@ class ModelEvaluator:
         self.low_wave_model = None
         try:
             low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
+            low_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta/epoch=16-val_loss=0.02.ckpt"
             low_wave_ckpt = ""
             # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced/epoch=19-val_loss=0.01.ckpt"
             logger.info(
@@ -180,6 +183,7 @@ class ModelEvaluator:
         try:
             high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
             high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
+            high_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean/epoch=10-val_loss=0.01.ckpt"
             high_wave_ckpt = ""
             print(
                 f"[HIGH-WAVE] Loading specialized model for 8-9m waves from {high_wave_ckpt}"
@@ -282,6 +286,10 @@ class ModelEvaluator:
         self.geo_mask = None
         if self.geo_bounds and self.test_files:
             self._load_geographic_mask()
+
+        # Build static spatial exclusion mask (Bay of Biscay: Atlantic water above Gibraltar)
+        self.atlantic_exclusion_mask = None
+        # self._build_atlantic_exclusion_mask()
 
         # Add spatial accumulators for RMSE maps
         self.spatial_errors_model = []  # Store (error_map, count_map) for each batch
@@ -557,8 +565,9 @@ class ModelEvaluator:
             logger.info("Loading geographic coordinates for filtering...")
 
             # Try to get coordinates from dataset (handles region filtering automatically)
-            if hasattr(self.test_dataset, "get_coordinates"):
-                lat_grid, lon_grid = self.test_dataset.get_coordinates()
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
                 logger.info(
                     "Loaded coordinates from dataset (respects region filtering if enabled)"
                 )
@@ -580,13 +589,16 @@ class ModelEvaluator:
             )
             geo_mask = lat_mask & lon_mask
 
-            if self.region_filter == "mediterranean":
-                med_mask = lon_grid >= -5.5  # East of Gibraltar
-                geo_mask = geo_mask & med_mask
-            elif self.region_filter == "atlantic":
-                atl_mask = lon_grid < -5.5  # West of Gibraltar
-                geo_mask = geo_mask & atl_mask
+            GIBRALTAR_LON = -5.5
+            BISCAY_LAT = 43.0
+            BISCAY_LON = 0.0
+            biscay = (lat_grid > BISCAY_LAT) & (lon_grid < BISCAY_LON)
 
+            if self.region_filter == "mediterranean":
+                geo_mask = geo_mask & (lon_grid >= GIBRALTAR_LON) & ~biscay
+            elif self.region_filter == "atlantic":
+                geo_mask = geo_mask & ((lon_grid < GIBRALTAR_LON) | biscay)
+            
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
 
@@ -604,6 +616,30 @@ class ModelEvaluator:
                 f"Failed to load geographic mask: {e}. Continuing without geographic filtering."
             )
             self.geo_mask = None
+
+    def _build_atlantic_exclusion_mask(self):
+        """Build a static 2D mask excluding Bay of Biscay pixels (lat > 43.5° AND lon < 0°).
+
+        These are Atlantic water pixels that leak through the simple lon >= -5.5° Mediterranean cut.
+        The mask is True for pixels to KEEP (Mediterranean) and False for excluded pixels.
+        """
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                exclude = (lat_grid > 43.0) & (lon_grid < 0.0)
+                keep_mask = ~exclude
+                n_excluded = exclude.sum()
+                if n_excluded > 0:
+                    self.atlantic_exclusion_mask = torch.from_numpy(keep_mask).to(
+                        self.device
+                    )
+                    logger.info(
+                        f"Atlantic exclusion mask: excluding {n_excluded} Bay of Biscay pixels "
+                        f"(lat > 43.0° AND lon < 0°)"
+                    )
+        except Exception as e:
+            logger.warning(f"Could not build Atlantic exclusion mask: {e}")
 
     def _reconstruct_wave_heights(
         self, bias: torch.Tensor, vhm0: torch.Tensor
@@ -676,7 +712,13 @@ class ModelEvaluator:
                 error_map_baseline = None
                 error_map_baseline_mae = None
 
-        count_map = mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
+        combined_mask = mask.float()
+        if self.atlantic_exclusion_mask is not None:
+            # Broadcast 2D (H, W) mask to match 4D (N, C, H, W)
+            h, w = combined_mask.shape[2], combined_mask.shape[3]
+            exc = self.atlantic_exclusion_mask[:h, :w].float()
+            combined_mask = combined_mask * exc.unsqueeze(0).unsqueeze(0)
+        count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
         error_map = error_map * count_map
@@ -702,8 +744,13 @@ class ModelEvaluator:
                 }
             )
 
-        # Apply mask
-        mask_flat = mask.flatten()
+        # Apply mask (including Atlantic exclusion)
+        mask_combined = mask.clone()
+        if self.atlantic_exclusion_mask is not None:
+            h, w = mask_combined.shape[2], mask_combined.shape[3]
+            exc = self.atlantic_exclusion_mask[:h, :w]
+            mask_combined = mask_combined & exc.unsqueeze(0).unsqueeze(0)
+        mask_flat = mask_combined.flatten()
         y_true_flat = y.flatten()[mask_flat]
         y_pred_flat = y_pred.flatten()[mask_flat]
 
@@ -722,6 +769,14 @@ class ModelEvaluator:
             y_uncorrected = vhm0_flat
         else:
             y_uncorrected = None
+
+        # Filter out extreme wave heights (true VHM0 >= 11m)
+        # valid_range_mask = y_true_wave_heights < 11.0
+        # valid_range_mask_np = valid_range_mask.cpu().numpy()
+        # y_true_wave_heights = y_true_wave_heights[valid_range_mask]
+        # y_pred_wave_heights = y_pred_wave_heights[valid_range_mask]
+        # if y_uncorrected is not None:
+        #     y_uncorrected = y_uncorrected[valid_range_mask]
 
         # Convert to numpy for binning
         y_true_np = y_true_wave_heights.cpu().numpy()
@@ -1124,8 +1179,9 @@ class ModelEvaluator:
                         or self.high_wave_model is not None
                     ) and vhm0 is not None:
                         # Create masks for different wave height ranges
-                        low_wave_mask = (vhm0 >= 0.0) & (vhm0 <= 1.0)
-                        high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
+                        low_wave_mask = ((vhm0+y) >= 0.0) & ((vhm0+y) <= 3.0)
+                        # high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
+                        high_wave_mask = ((vhm0+y) >= 5.0) & ((vhm0+y) <= 11.0)
                         mid_wave_mask = ~(low_wave_mask | high_wave_mask)
 
                         # Get predictions from all models
@@ -1188,46 +1244,50 @@ class ModelEvaluator:
                             y_pred = torch.where(
                                 low_wave_mask_aligned, y_pred_low, y_pred
                             )
-                        # Apply DeltaCorrector bias for 11-12m and 12-13m bins (use default model - bias)
-                        # if self.apply_delta_corrector_flag is not None:
-                        #     delta_bins_mask = (
-                        #         (vhm0 >= 11.5) & (vhm0 < 13.0)
-                        #     )
-                        #     if delta_bins_mask.any():
-                        #         y_pred = y_pred.clone()
-                        #         delta = 0.0325
-                        #         if self.predict_bias:
-                        #             # bias = y_true - vhm0
-                        #             y_pred[delta_bins_mask] = delta
-                        #         else:
-                        #             # y_pred is corrected Hs
-                        #             y_pred[delta_bins_mask] = vhm0[delta_bins_mask] + delta
-
                         if self.apply_delta_corrector_flag:
-                            # vhm0: uncorrected wave height (raw model)
-                            # start, end = 11.5, 13.0  # tune as you like
-                            start, end = 11.2, 12.0
+                            y_pred = y_pred.clone()
 
-                            # only in the tail region
-                            tail_mask = vhm0 >= start
-                            if tail_mask.any():
-                                y_pred = y_pred.clone()
+                            # --- Alternative A: outlier ratio clamping ---
+                            max_bias_ratio = 1.5
+                            delta = 0.035
+                            if self.predict_bias:
+                                corrected = vhm0 + y_pred
+                                true_wave = vhm0 + y  # ground truth
+                                outlier_mask = (corrected.abs() > (max_bias_ratio * vhm0.abs().clamp(min=0.1))) & (true_wave >= 11.0)
+                                outlier_mask = (true_wave >= 11.0)
+                                if outlier_mask.any():
+                                    y_pred[outlier_mask] = delta
+                            else:
+                                true_wave = y  # ground truth is already absolute
+                                outlier_mask = (y_pred.abs() > (max_bias_ratio * vhm0.abs().clamp(min=0.1))) & (true_wave >= 11.0)
+                                if outlier_mask.any():
+                                    y_pred[outlier_mask] = vhm0[outlier_mask] + delta
 
-                                # scale in [0, 1]: 1 -> trust DNN, 0 -> ignore DNN (bias=0 => fallback to raw)
-                                # scale = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
-                                scale_lin = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
-                                p = 3.0
-                                scale = scale_lin ** p
-
-                                # apply scaling only on tail pixels
-                                y_pred[tail_mask] = y_pred[tail_mask] * scale[tail_mask]
-
-                                # OPTIONAL: add a tiny fixed delta bias (since your bias = y_true - vhm0)
-                                delta = 0.035
-                                y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
-
-                                max_bias_tail = 0.3
-                                y_pred[tail_mask] = y_pred[tail_mask].clamp(-max_bias_tail, max_bias_tail)
+                            # --- Alternative B: tail fade-out with power scaling ---
+                            # start, end = 10.8, 13.0
+                            # if self.predict_bias:
+                            #     tail_mask = (vhm0 + y) >= start
+                            #     if tail_mask.any():
+                            #         scale_lin = 1.0 - (((vhm0 + y) - start) / (end - start)).clamp(0.0, 1.0)
+                            #         p = 3.0
+                            #         scale = scale_lin ** p
+                            #         y_pred[tail_mask] = y_pred[tail_mask] * scale[tail_mask]
+                            #         delta = 0.035
+                            #         y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
+                            #         max_bias_tail = 0.3
+                            #         y_pred[tail_mask] = y_pred[tail_mask].clamp(-max_bias_tail, max_bias_tail)
+                            # else:
+                            #     tail_mask = y_pred >= start
+                            #     if tail_mask.any():
+                            #         scale_lin = 1.0 - ((y_pred - start) / (end - start)).clamp(0.0, 1.0)
+                            #         p = 3.0
+                            #         scale = scale_lin ** p
+                            #         y_pred[tail_mask] = vhm0[tail_mask] + (y_pred[tail_mask] - vhm0[tail_mask]) * scale[tail_mask]
+                            #         delta = 0.035
+                            #         y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
+                            #         max_bias_tail = 0.3
+                            #         bias_tail = y_pred[tail_mask] - vhm0[tail_mask]
+                            #         y_pred[tail_mask] = vhm0[tail_mask] + bias_tail.clamp(-max_bias_tail, max_bias_tail)
 
                         # Apply high-wave specialized model if available
                         if self.high_wave_model is not None and high_wave_mask.any():
@@ -1918,6 +1978,19 @@ class ModelEvaluator:
 
     def plot_rmse_maps(self):
         """Plot spatial RMSE maps for model and baseline."""
+        # Get coordinates from dataset (respects region cropping)
+        dataset_coords = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                dataset_coords = (lat_grid, lon_grid)
+                logger.info(
+                    f"Using dataset coordinates for RMSE maps: {lat_grid.shape}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not get dataset coordinates: {e}")
+
         plot_rmse_maps_fn(
             spatial_errors_model=self.spatial_errors_model,
             spatial_errors_baseline=self.spatial_errors_baseline,
@@ -1926,6 +1999,7 @@ class ModelEvaluator:
             geo_bounds=self.geo_bounds,
             unit=self.unit,
             output_dir=self.output_dir,
+            dataset_coords=dataset_coords,
         )
 
     def plot_model_better_percentage(self, sea_bin_metrics: Dict[str, Dict]):
@@ -2165,6 +2239,13 @@ def main():
         default=False,
         help="Apply delta corrector to predictions for bins >= 11m",
     )
+    parser.add_argument(
+        "--region-filter",
+        type=str,
+        default=None,
+        choices=["atlantic", "mediterranean"],
+        help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
+    )
     args = parser.parse_args()
 
     config = DNNConfig(args.config)
@@ -2392,6 +2473,7 @@ def main():
 
         # Create geographic bounds dictionary if filtering is requested
         geo_bounds = None
+        region_filter = args.region_filter
         if args.apply_geographic_filtering:
             if patch_size is not None:
                 logger.warning("=" * 80)
@@ -2400,33 +2482,19 @@ def main():
                 )
                 logger.warning("Patches don't maintain spatial coordinate information.")
                 logger.warning("Geographic filtering will be DISABLED.")
-                logger.warning(
-                    "To use geographic filtering, set patch_size to null in config."
-                )
                 logger.warning("=" * 80)
                 geo_bounds = None
             else:
-                # Region filtering is now handled by dataset's region_filter parameter
-                # No need for manual geo_bounds - spatial cropping is done at dataset level
-                region_filter = data_config.get("region_filter", None)
-                if region_filter:
-                    logger.info(
-                        f"Geographic filtering via dataset region_filter: {region_filter} "
-                        f"(spatial cropping at dataset level, Gibraltar boundary: lon=-5.5°)"
-                    )
-                    geo_bounds = None  # Not needed - dataset already crops
-                else:
-                    # Fallback to manual geo_bounds if no region_filter
-                    geo_bounds = {
-                        "lat_min": 30.0,
-                        "lat_max": 46.0,
-                        "lon_min": -5.5,
-                        "lon_max": 36.5,
-                    }
-                    logger.info(
-                        f"Geographic filtering enabled: lat=[{geo_bounds['lat_min']}, {geo_bounds['lat_max']}], "
-                        f"lon=[{geo_bounds['lon_min']}, {geo_bounds['lon_max']}]"
-                    )
+                geo_bounds = {
+                    "lat_min": 30.0,
+                    "lat_max": 46.0,
+                    "lon_min": -18.5,
+                    "lon_max": 36.5,
+                }
+                logger.info(
+                    f"Geographic filtering enabled: region_filter={region_filter}, "
+                    f"geo_bounds={geo_bounds}"
+                )
 
         # Create evaluator and run evaluation
         evaluator = ModelEvaluator(
@@ -2450,6 +2518,7 @@ def main():
             target_columns=target_columns,
             apply_bilateral_filter=False,
             apply_delta_corrector_flag=args.apply_delta_corrector_flag,
+            region_filter=region_filter,
         )
 
         evaluator.evaluate()
