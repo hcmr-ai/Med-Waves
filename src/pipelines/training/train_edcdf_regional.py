@@ -272,7 +272,11 @@ def run_region(
     print(f"\nLoading training data ({len(train_files)} files)...")
     train_df = load_parquet_files(train_files, columns=needed_cols)
     train_df = region_filter(train_df)
-    print(f"  After region filter: {len(train_df):,} rows")
+    n_before = len(train_df)
+    train_df = train_df.drop_nulls(
+        subset=variables + [f"{corrected_suffix}{v}" for v in variables]
+    )
+    print(f"  After region filter: {n_before:,} rows, after drop nulls: {len(train_df):,} rows (dropped {n_before - len(train_df):,})")
 
     # --- Fit EDCDF ---
     print(f"\nFitting EDCDF ({region})...")
@@ -283,7 +287,11 @@ def run_region(
     print(f"\nLoading test data ({len(test_files)} files)...")
     test_df = load_parquet_files(test_files, columns=needed_cols)
     test_df = region_filter(test_df)
-    print(f"  After region filter: {len(test_df):,} rows")
+    n_before = len(test_df)
+    test_df = test_df.drop_nulls(
+        subset=variables + [f"{corrected_suffix}{v}" for v in variables]
+    )
+    print(f"  After region filter: {n_before:,} rows, after drop nulls: {len(test_df):,} rows (dropped {n_before - len(test_df):,})")
 
     # --- Predict ---
     print("\nGenerating predictions...")

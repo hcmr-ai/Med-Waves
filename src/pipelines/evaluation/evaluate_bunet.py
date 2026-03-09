@@ -95,6 +95,8 @@ class ModelEvaluator:
         apply_bilateral_filter: bool = False,
         apply_delta_corrector_flag: bool = False,
         region_filter: str = None,
+        low_wave_ckpt: str = None,
+        high_wave_ckpt: str = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -105,12 +107,13 @@ class ModelEvaluator:
         # Load bin-specific model for 0-2m waves (HARDCODED FOR TESTING)
         self.low_wave_model = None
         try:
-            low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
-            low_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta/epoch=16-val_loss=0.02.ckpt"
-            low_wave_ckpt = ""
+            # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
+            # low_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta/epoch=16-val_loss=0.02.ckpt"
+            # low_wave_ckpt = ""
+            low_wave_ckpt = low_wave_ckpt
             # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced/epoch=19-val_loss=0.01.ckpt"
             logger.info(
-                f"Loading specialized model for 0-2m waves from {low_wave_ckpt}"
+                f"[LOW-WAVE] Loading specialized model for 0-2m waves from {low_wave_ckpt}"
             )
 
             # Load checkpoint manually to extract hyperparameters
@@ -125,7 +128,7 @@ class ModelEvaluator:
 
             # Extract hyperparameters from checkpoint
             hparams = ckpt.get("hyper_parameters", {})
-            logger.info(f"Checkpoint hyperparameters: {list(hparams.keys())}")
+            logger.info(f"[LOW-WAVE] Checkpoint hyperparameters: {list(hparams.keys())}")
 
             # Create model instance with checkpoint hyperparameters
             from src.classifiers.lightning_trainer import WaveBiasCorrector
@@ -154,7 +157,7 @@ class ModelEvaluator:
                 "model.final.weight" in state_dict
                 and "model.task_heads.vhm0.weight" not in state_dict
             ):
-                logger.info("Remapping single-task checkpoint to multi-task format")
+                logger.info("[LOW-WAVE] Remapping single-task checkpoint to multi-task format")
                 # Rename final layer keys: model.final.* → model.task_heads.vhm0.*
                 new_state_dict = {}
                 for key, value in state_dict.items():
@@ -168,10 +171,10 @@ class ModelEvaluator:
             self.low_wave_model.load_state_dict(state_dict, strict=False)
             self.low_wave_model.to(device)
             self.low_wave_model.eval()
-            logger.info("✓ Successfully loaded 0-2m specialized model from state_dict")
+            logger.info("[LOW-WAVE] ✓ Successfully loaded 0-2m specialized model from state_dict")
         except Exception as e:
             logger.warning(
-                f"Failed to load specialized 0-2m model: {e}. Using default model for all predictions."
+                f"[LOW-WAVE] Failed to load specialized 0-2m model: {e}. Using default model for all predictions."
             )
             self.low_wave_model = None
             import traceback
@@ -181,10 +184,10 @@ class ModelEvaluator:
         # Load bin-specific model for >=9m waves (HARDCODED FOR TESTING)
         self.high_wave_model = None
         try:
-            high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
-            high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
-            high_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean/epoch=10-val_loss=0.01.ckpt"
-            high_wave_ckpt = ""
+            # high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
+            # high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
+            # high_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean/epoch=10-val_loss=0.01.ckpt"
+            high_wave_ckpt = high_wave_ckpt
             print(
                 f"[HIGH-WAVE] Loading specialized model for 8-9m waves from {high_wave_ckpt}"
             )
@@ -2440,7 +2443,7 @@ def main():
 
     if checkpoint_path.is_dir():
         # Find all .ckpt files in directory
-        checkpoint_list = sorted(list(checkpoint_path.glob("*.ckpt")))
+        checkpoint_list = sorted(list(checkpoint_path.glob("epoch=1*-val_loss=*.ckpt")))
         if not checkpoint_list:
             raise ValueError(f"No .ckpt files found in directory: {checkpoint_path}")
         logger.info(f"Found {len(checkpoint_list)} checkpoints to evaluate")
@@ -2519,6 +2522,8 @@ def main():
             apply_bilateral_filter=False,
             apply_delta_corrector_flag=args.apply_delta_corrector_flag,
             region_filter=region_filter,
+            low_wave_ckpt=config.config["checkpoint"]["low_wave_ckpt"],
+            high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
         )
 
         evaluator.evaluate()
