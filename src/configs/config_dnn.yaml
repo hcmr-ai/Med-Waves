@@ -24,8 +24,9 @@ data:
   add_sea_mask_channel: false # Add sea mask channel to input
   predict_log_correction: false # Predict log correction (log(DA+eps) - log(raw+eps))
   predict_bias: true # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
+  normalize_target: false
   bin_sampling_weights: null # [3,2,1] # Sampling weights for each bin
-  region_filter: mediterranean # Region filter: "atlantic", "mediterranean", or null for no filtering (Gibraltar boundary at lon=-5.5°)
+  region_filter: atlantic # Region filter: "atlantic", "mediterranean", or null for no filtering (Gibraltar boundary at lon=-5.5°)
 
 
   # Data preprocessing
@@ -34,7 +35,6 @@ data:
     vhm0: "corrected_VHM0"
     # vtm02: "corrected_VTM02"
 
-  normalize_target: false
   excluded_columns: [
       "time",
       "latitude",
@@ -47,18 +47,19 @@ data:
       "wind_dir_sin",
       "wind_dir_cos",
       "sin_delta",
+      "cos_delta",
       "alongwind",
       "crosswind",
       "storm_regime",
       "storm_regime_sig",
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
-  normalizer_path: "scalers/BU24h_zscore_18-21_atla_extended.pkl"
+  normalizer_path: scalers/BU24h_zscore_target_20_21_all_with_corrected.pkl
 
 # Model configuration
 model:
   model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
-  in_channels: 16 # Number of input channels (all features except excluded)
+  in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
   loss_type: "mse" # Options: "mse", "mse_huber_tail", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
   filters: [64, 128, 256]
@@ -127,16 +128,18 @@ training:
   aggressive_freeze: false
 # Checkpoint configuration
 checkpoint:
-  resume_from_checkpoint: null
+  resume_from_checkpoint: /opt/dlami/nvme/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered/epoch=14-val_loss=0.04.ckpt
   checkpoint_dir: /opt/dlami/nvme/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean
   s3_sync_dir: s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
+  high_wave_ckpt: null
+  low_wave_ckpt: null
 
 # Logging configuration
 logging:
   log_dir: /opt/dlami/nvme/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean
-  experiment_name: dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean  
+  experiment_name: dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered
   use_comet: true
   comet_tags:
     [
