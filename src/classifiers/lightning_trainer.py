@@ -471,8 +471,9 @@ class WaveBiasCorrector(pl.LightningModule):
                     else "train_baseline"
                 )
 
-                if self.predict_bias and vhm0_for_reconstruction is not None:
+                if self.predict_bias and vhm0_for_reconstruction is not None and task_name == "vhm0":
                     # Reconstruct full wave heights from bias
+                    # Only valid for vhm0 task since vhm0_for_reconstruction is VHM0
                     vhm0_for_reconstruction_masked = vhm0_for_reconstruction[
                         :, :, :min_h, :min_w
                     ][mask_crop]
@@ -492,6 +493,7 @@ class WaveBiasCorrector(pl.LightningModule):
                     )
                 else:
                     # Direct wave height prediction - use denormalized values
+                    # Also used for non-vhm0 tasks in predict_bias mode (no raw counterpart in batch)
                     self._log_sea_bin_metrics(
                         y_true_task_denorm[mask_crop],
                         y_pred_task_denorm[mask_crop],
@@ -502,7 +504,7 @@ class WaveBiasCorrector(pl.LightningModule):
                         if vhm0_for_reconstruction is not None
                         else None
                     )
-                    if vhm0_crop is not None:
+                    if vhm0_crop is not None and task_name == "vhm0":
                         self._log_sea_bin_metrics(
                             y_true_task_denorm[mask_crop],
                             vhm0_crop[mask_crop],
@@ -808,8 +810,9 @@ class WaveBiasCorrector(pl.LightningModule):
                     else "val_baseline"
                 )
 
-                if self.predict_bias and vhm0_for_reconstruction is not None:
+                if self.predict_bias and vhm0_for_reconstruction is not None and task_name == "vhm0":
                     # Reconstruct full wave heights from bias
+                    # Only valid for vhm0 task since vhm0_for_reconstruction is VHM0
                     vhm0_for_reconstruction_masked = vhm0_for_reconstruction[
                         :, :, :min_h, :min_w
                     ][mask_crop]
@@ -829,6 +832,7 @@ class WaveBiasCorrector(pl.LightningModule):
                     )
                 else:
                     # Direct wave height prediction - use denormalized values
+                    # Also used for non-vhm0 tasks in predict_bias mode (no raw counterpart in batch)
                     self._log_sea_bin_metrics(
                         y_true_task_denorm[mask_crop],
                         y_pred_task_denorm[mask_crop],
@@ -839,7 +843,7 @@ class WaveBiasCorrector(pl.LightningModule):
                         if vhm0_for_reconstruction is not None
                         else None
                     )
-                    if vhm0_crop is not None:
+                    if vhm0_crop is not None and task_name == "vhm0":
                         self._log_sea_bin_metrics(
                             y_true_task_denorm[mask_crop],
                             vhm0_crop[mask_crop],

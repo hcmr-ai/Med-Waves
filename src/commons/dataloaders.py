@@ -60,10 +60,11 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         "region_filter", None
     )  # None, "atlantic", "mediterranean", "eastern_med"
 
-    normalizer = WaveNormalizer.load_from_s3(
-        "medwav-dev-data", data_config["normalizer_path"]
-    )
-    # normalizer = WaveNormalizer.load_from_disk(data_config["normalizer_path"])
+    normalizer_path = data_config["normalizer_path"]
+    if normalizer_path.startswith("s3://") or not normalizer_path.startswith("/"):
+        normalizer = WaveNormalizer.load_from_s3("medwav-dev-data", normalizer_path)
+    else:
+        normalizer = WaveNormalizer().load(normalizer_path)
     logger.info(f"Normalizer: {normalizer.mode}")
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")

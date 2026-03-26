@@ -2,7 +2,14 @@ import argparse
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Redirect temp files to /mnt (1.3TB) instead of /tmp on root (29GB)
+_mnt_tmp = "/mnt/blobfuse-cache/tmp"
+os.makedirs(_mnt_tmp, exist_ok=True)
+tempfile.tempdir = _mnt_tmp
+os.environ["TMPDIR"] = _mnt_tmp
 
 # Add src to Python path
 project_root = Path(__file__).parent.parent.parent
@@ -249,8 +256,9 @@ def main():
     os.makedirs(config.config["checkpoint"]["checkpoint_dir"], exist_ok=True)
     os.makedirs(config.config["logging"]["log_dir"], exist_ok=True)
 
-    # Initialize S3 filesystem
-    fs = s3fs.S3FileSystem()
+    # Initialize S3 filesystem only when data is on S3
+    data_path = config.config["data"]["data_path"]
+    fs = s3fs.S3FileSystem() if data_path.startswith("s3://") else None
 
     # Create data loaders
     logger.info("Creating data loaders...")
