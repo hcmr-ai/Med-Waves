@@ -79,7 +79,7 @@ VAR_CONFIG = {
 
 def load_predictions(predictions_dir: Path) -> pl.DataFrame:
     """Load all WAVEAN*.parquet prediction files from a directory."""
-    files = sorted(predictions_dir.glob("WAVEAN*.parquet"))
+    files = sorted(predictions_dir.glob("WAVEAN2022*.parquet"))
     if not files:
         raise FileNotFoundError(f"No WAVEAN*.parquet files in {predictions_dir}")
 
@@ -116,9 +116,12 @@ def build_sea_bin_data(
         if col not in df.columns:
             raise ValueError(f"Missing column '{col}' in predictions DataFrame")
 
-    pred = df[pred_col].to_numpy()
-    target = df[target_col].to_numpy()
-    uncorrected = df[uncorrected_col].to_numpy()
+    pred = df[pred_col].to_numpy().astype(float)
+    target = df[target_col].to_numpy().astype(float)
+    uncorrected = df[uncorrected_col].to_numpy().astype(float)
+
+    finite = np.isfinite(pred) & np.isfinite(target) & np.isfinite(uncorrected)
+    pred, target, uncorrected = pred[finite], target[finite], uncorrected[finite]
 
     model_errors = pred - target
     baseline_errors = uncorrected - target
@@ -191,14 +194,20 @@ def build_plot_samples(
     pred_col = f"predicted_{var}"
     target_col = f"{corrected_suffix}{var}"
 
-    if len(df) > max_samples:
-        df = df.sample(n=max_samples, seed=42)
+    nan_cols = [pred_col, target_col, var]
+    df_clean = df.with_columns([
+        pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
+        for c in nan_cols
+    ]).drop_nulls(subset=nan_cols)
+
+    if len(df_clean) > max_samples:
+        df_clean = df_clean.sample(n=max_samples, seed=42)
 
     return {
-        "y_true": df[target_col].to_numpy().tolist(),
-        "y_pred": df[pred_col].to_numpy().tolist(),
-        "y_uncorrected": df[var].to_numpy().tolist(),
-        "vhm0": df[var].to_numpy().tolist(),
+        "y_true": df_clean[target_col].to_numpy().tolist(),
+        "y_pred": df_clean[pred_col].to_numpy().tolist(),
+        "y_uncorrected": df_clean[var].to_numpy().tolist(),
+        "vhm0": df_clean[var].to_numpy().tolist(),
     }
 
 
@@ -208,9 +217,12 @@ def compute_overall_metrics(
     corrected_suffix: str = "corrected_",
 ) -> Dict[str, float]:
     """Compute overall metrics for a variable."""
-    pred = df[f"predicted_{var}"].to_numpy()
-    target = df[f"{corrected_suffix}{var}"].to_numpy()
-    uncorrected = df[var].to_numpy()
+    pred = df[f"predicted_{var}"].to_numpy().astype(float)
+    target = df[f"{corrected_suffix}{var}"].to_numpy().astype(float)
+    uncorrected = df[var].to_numpy().astype(float)
+
+    finite = np.isfinite(pred) & np.isfinite(target) & np.isfinite(uncorrected)
+    pred, target, uncorrected = pred[finite], target[finite], uncorrected[finite]
 
     residuals = pred - target
     baseline_residuals = uncorrected - target

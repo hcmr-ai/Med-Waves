@@ -576,10 +576,9 @@ class ModelEvaluator:
                 )
             else:
                 # Fallback to loading from file (legacy)
+                coord_file = self.test_files[0]
                 lat_grid, lon_grid = load_coordinates_from_parquet(
-                    "s3://" + self.test_files[0]
-                    if not self.test_files[0].startswith("s3://")
-                    else self.test_files[0],
+                    coord_file,
                     subsample_step=self.subsample_step,
                 )
 
@@ -2268,21 +2267,38 @@ def main():
     files = get_file_list(
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
     )
-    _test_files_parq = get_file_list(
-        f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
-        # "/data/users/aiuser/parquet",
-        f"WAVEAN{data_config.get('test_year', [2023])[0]}*.parquet",
+    test_year_cfg = data_config.get("test_year", [2023])
+    test_year = test_year_cfg[0] if isinstance(test_year_cfg, list) else test_year_cfg
+    parquet_data_path = data_config.get(
+        "diagnostics_parquet_data_path",
+        "/mnt/blobstorage/parquet/hourly/",
     )
-
-    _, _, test_files_parq = split_files_by_year(
-        _test_files_parq,
-        train_year=data_config.get("train_year", 2021),
-        val_year=data_config.get("val_year", 2022),
-        test_year=data_config.get("test_year", 2023),
-        val_months=data_config.get("val_months", []),
-        test_months=data_config.get("test_months", []),
+    parquet_file_pattern = data_config.get(
+        "diagnostics_parquet_file_pattern", f"WAVEAN{test_year}*.parquet"
     )
-    print(test_files_parq[:10])
+    test_files_parq = []
+    try:
+        _test_files_parq = get_file_list(parquet_data_path, parquet_file_pattern)
+        # Enforce test-year filtering even when a broad file pattern/path is used.
+        year_prefix = f"WAVEAN{int(test_year)}"
+        _test_files_parq = [
+            fp for fp in _test_files_parq if fp.rsplit("/", 1)[-1].startswith(year_prefix)
+        ]
+        _, _, test_files_parq = split_files_by_year(
+            _test_files_parq,
+            train_year=data_config.get("train_year", 2021),
+            val_year=data_config.get("val_year", 2022),
+            test_year=data_config.get("test_year", 2023),
+            val_months=data_config.get("val_months", []),
+            test_months=data_config.get("test_months", []),
+        )
+        print(test_files_parq[:10])
+    except Exception as e:
+        logger.warning(
+            "Could not list diagnostics parquet files (%s). "
+            "Continuing without timestamp-based diagnostics.",
+            e,
+        )
 
     logger.info(f"Found {len(files)} files")
 
@@ -2299,15 +2315,16 @@ def main():
     logger.info(f"Test files: {len(test_files)}")
     logger.info(f"Train files: {len(train_files)}")
 
-    # Load normalizer (same as training)
-    normalizer = WaveNormalizer.load_from_s3(
-        "medwav-dev-data", data_config["normalizer_path"]
-    )
-    # normalizer = WaveNormalizer.load_from_disk(
-    #     data_config["normalizer_path"]
-    # )
+    # Load normalizer (supports both local and s3:// paths)
+    normalizer_path = str(data_config["normalizer_path"])
+    if normalizer_path.startswith("s3://"):
+        s3_uri = normalizer_path.replace("s3://", "", 1)
+        bucket, key = s3_uri.split("/", 1)
+        normalizer = WaveNormalizer.load_from_s3(bucket, key)
+    else:
+        normalizer = WaveNormalizer().load(normalizer_path)
     logger.info(f"Normalizer: {normalizer.mode}")
-    logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
+    logger.info(f"Loaded normalizer from {normalizer_path}")
 
     # CRITICAL: Set target_stats_ for the target column we're evaluating
     # Without this, inverse_transform_torch falls back to the last channel!
@@ -2505,7 +2522,7 @@ def main():
             test_loader=test_loader,
             output_dir=Path(args.output_dir)
             / config.config["logging"]["experiment_name"]
-            / checkpoint.stem,  # Use checkpoint filename without extension
+            / str(test_year) /checkpoint.stem,  # Use checkpoint filename without extension
             predict_bias=predict_bias,
             device="cuda",
             normalizer=normalizer,

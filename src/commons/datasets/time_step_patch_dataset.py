@@ -501,11 +501,18 @@ class TimestepPatchWaveDataset(Dataset):
             y_full = hour_data[..., tgt_idx : tgt_idx + 1]
             y = y_full[i0 : i0 + ph, j0 : j0 + pw, :]
 
-            if self.predict_log_correction:
-                # z = log(DA+eps) - log(raw+eps)
-                y = torch.log(y + self.eps) - torch.log(vhm0 + self.eps)
-            elif self.predict_bias:
-                y = y - vhm0
+            if self.predict_log_correction or self.predict_bias:
+                # Derive the raw (uncorrected) counterpart per task
+                # e.g. "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+                raw_col = tgt_col.replace("corrected_", "")
+                raw_idx = feature_cols.index(raw_col)
+                raw_full = hour_data[..., raw_idx : raw_idx + 1]
+                raw = raw_full[i0 : i0 + ph, j0 : j0 + pw, :]
+
+                if self.predict_log_correction:
+                    y = torch.log(y + self.eps) - torch.log(raw + self.eps)
+                else:
+                    y = y - raw
 
             targets[task_name] = y
 
@@ -524,8 +531,23 @@ class TimestepPatchWaveDataset(Dataset):
             X = torch.nan_to_num(X, nan=0.0)
 
             if self.normalize_target:
-                # Not recommended unless your normalizer supports stable per-target normalization.
+                target_column_map = {
+                    "vhm0": "corrected_VHM0",
+                    "vtm02": "corrected_VTM02",
+                }
                 for task_name, y in targets.items():
+                    target_col = target_column_map.get(
+                        task_name, f"corrected_{task_name.upper()}"
+                    )
+                    if (
+                        self.normalizer.feature_order_ is not None
+                        and target_col in self.normalizer.feature_order_
+                    ):
+                        target_idx = self.normalizer.feature_order_.index(target_col)
+                        if target_idx in self.normalizer.stats_:
+                            self.normalizer.target_stats_ = self.normalizer.stats_[
+                                target_idx
+                            ]
                     _, y_norm = self.normalizer.transform_torch(
                         X.clone(), normalize_target=True, target=y
                     )

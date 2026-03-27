@@ -54,6 +54,23 @@ REGIONS = {
 }
 
 
+def subsample_spatial(df: pl.DataFrame, step: int) -> pl.DataFrame:
+    """Keep every `step`-th unique latitude and longitude (regular grid thinning)."""
+    if step <= 1:
+        return df
+    lats = sorted(df["latitude"].unique().to_list())
+    lons = sorted(df["longitude"].unique().to_list())
+    keep_lats = set(lats[::step])
+    keep_lons = set(lons[::step])
+    before = len(df)
+    df = df.filter(
+        pl.col("latitude").is_in(keep_lats) & pl.col("longitude").is_in(keep_lons)
+    )
+    print(f"  Spatial subsample (step={step}): {before:,} -> {len(df):,} rows "
+          f"({len(keep_lats)} lats × {len(keep_lons)} lons)")
+    return df
+
+
 def list_parquet_files(years: List[int], base_path: str = S3_PARQUET_BASE) -> List[str]:
     """List parquet file paths for given years from S3 or local."""
     is_s3 = base_path.startswith("s3://")
@@ -74,12 +91,28 @@ def list_parquet_files(years: List[int], base_path: str = S3_PARQUET_BASE) -> Li
     return all_files
 
 
+def _build_spatial_mask(
+    first_file: str, columns: List[str], spatial_step: int,
+) -> Tuple[set, set]:
+    """Read one file to discover the unique lat/lon grid, return the keep sets."""
+    df = pl.read_parquet(first_file, columns=["latitude", "longitude"])
+    lats = sorted(df["latitude"].unique().to_list())
+    lons = sorted(df["longitude"].unique().to_list())
+    return set(lats[::spatial_step]), set(lons[::spatial_step])
+
+
 def load_parquet_files(
     file_paths: List[str],
     columns: List[str],
     batch_size: int = 30,
+    spatial_step: int = 1,
 ) -> pl.DataFrame:
-    """Load parquet files into a single DataFrame, reading only needed columns."""
+    """Load parquet files, applying spatial subsampling per-batch to limit memory."""
+    keep_lats, keep_lons = None, None
+    if spatial_step > 1:
+        keep_lats, keep_lons = _build_spatial_mask(file_paths[0], columns, spatial_step)
+        print(f"  Spatial subsample (step={spatial_step}): keeping {len(keep_lats)} lats × {len(keep_lons)} lons")
+
     all_dfs = []
     for i in tqdm(range(0, len(file_paths), batch_size), desc="Loading parquet batches"):
         batch = file_paths[i : i + batch_size]
@@ -92,7 +125,13 @@ def load_parquet_files(
                 print(f"  Warning: skipping {fp}: {e}")
                 continue
         if batch_dfs:
-            all_dfs.append(pl.concat(batch_dfs))
+            chunk = pl.concat(batch_dfs)
+            if keep_lats is not None:
+                chunk = chunk.filter(
+                    pl.col("latitude").is_in(keep_lats)
+                    & pl.col("longitude").is_in(keep_lons)
+                )
+            all_dfs.append(chunk)
 
     if not all_dfs:
         raise RuntimeError("No parquet files loaded successfully")
@@ -117,12 +156,15 @@ def fit_edcdf(
     corrector.fit(df_clean, variables=variables, corrected_suffix=corrected_suffix)
 
     for var in variables:
-        model_vals = df_clean[var].to_numpy()
-        obs_vals = df_clean[f"{corrected_suffix}{var}"].to_numpy()
+        model_vals = df_clean[var].to_numpy().astype(float)
+        obs_vals = df_clean[f"{corrected_suffix}{var}"].to_numpy().astype(float)
+        finite_mask = np.isfinite(model_vals) & np.isfinite(obs_vals)
+        n_finite = int(finite_mask.sum())
+        mv, ov = model_vals[finite_mask], obs_vals[finite_mask]
         print(
-            f"    {var}: model range [{model_vals.min():.3f}, {model_vals.max():.3f}], "
-            f"obs range [{obs_vals.min():.3f}, {obs_vals.max():.3f}], "
-            f"n={len(model_vals):,}"
+            f"    {var}: model range [{mv.min():.3f}, {mv.max():.3f}], "
+            f"obs range [{ov.min():.3f}, {ov.max():.3f}], "
+            f"n_finite={n_finite:,} / {len(model_vals):,}"
         )
 
     return corrector
@@ -140,8 +182,12 @@ def evaluate_predictions(
         target_col = f"{corrected_suffix}{var}"
 
         valid = df.drop_nulls(subset=[pred_col, target_col])
-        y_pred = valid[pred_col].to_numpy()
-        y_true = valid[target_col].to_numpy()
+        y_pred = valid[pred_col].to_numpy().astype(float)
+        y_true = valid[target_col].to_numpy().astype(float)
+        y_raw = valid[var].to_numpy().astype(float)
+
+        finite = np.isfinite(y_pred) & np.isfinite(y_true) & np.isfinite(y_raw)
+        y_pred, y_true, y_raw = y_pred[finite], y_true[finite], y_raw[finite]
 
         if len(y_pred) == 0:
             metrics[var] = {"error": "no valid data"}
@@ -158,7 +204,7 @@ def evaluate_predictions(
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
 
         # Baseline metrics (uncorrected model vs observed)
-        baseline_residuals = valid[var].to_numpy() - y_true
+        baseline_residuals = y_raw - y_true
         baseline_rmse = np.sqrt(np.mean(baseline_residuals**2))
         baseline_mae = np.mean(np.abs(baseline_residuals))
         baseline_bias = np.mean(baseline_residuals)
@@ -190,6 +236,15 @@ def compute_detailed_metrics(
     resolution: float = 0.25,
 ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """Compute daily, monthly, and spatial metrics from prediction DataFrame."""
+    nan_filter_cols = (
+        variables
+        + [f"{corrected_suffix}{v}" for v in variables]
+        + [f"predicted_{v}" for v in variables]
+    )
+    df = df.with_columns([
+        pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
+        for c in nan_filter_cols
+    ]).drop_nulls(subset=nan_filter_cols)
     lazy = df.lazy().with_columns(pl.col("timestamp").dt.date().alias("day"))
 
     def metric_block(source: str, target: str, prefix: str):
@@ -255,6 +310,7 @@ def run_region(
     upload_s3: bool,
     train_years: List[int],
     test_years: List[int],
+    spatial_step: int = 1,
 ) -> Dict:
     """Train and evaluate EDCDF for a single region."""
     print(f"\n{'=' * 80}")
@@ -270,7 +326,7 @@ def run_region(
 
     # --- Load & filter training data ---
     print(f"\nLoading training data ({len(train_files)} files)...")
-    train_df = load_parquet_files(train_files, columns=needed_cols)
+    train_df = load_parquet_files(train_files, columns=needed_cols, spatial_step=spatial_step)
     train_df = region_filter(train_df)
     n_before = len(train_df)
     train_df = train_df.drop_nulls(
@@ -285,7 +341,7 @@ def run_region(
 
     # --- Load & filter test data ---
     print(f"\nLoading test data ({len(test_files)} files)...")
-    test_df = load_parquet_files(test_files, columns=needed_cols)
+    test_df = load_parquet_files(test_files, columns=needed_cols, spatial_step=spatial_step)
     test_df = region_filter(test_df)
     n_before = len(test_df)
     test_df = test_df.drop_nulls(
@@ -360,6 +416,7 @@ def run_region(
         "variables": variables,
         "corrected_suffix": corrected_suffix,
         "gibraltar_lon": GIBRALTAR_LON,
+        "spatial_step": spatial_step,
         "overall_metrics": overall_metrics,
         "train_files_count": len(train_files),
         "test_files_count": len(test_files),
@@ -412,15 +469,20 @@ def main():
         help="Local output directory",
     )
     parser.add_argument("--no-s3", action="store_true", help="Skip S3 upload")
+    parser.add_argument(
+        "--spatial-step", type=int, default=1,
+        help="Keep every Nth lat/lon for spatial thinning (default: 1 = no thinning, 5 matches .pt subsampling)",
+    )
     args = parser.parse_args()
 
     print("EDCDF Regional Training & Evaluation")
     print("=" * 80)
-    print(f"  Train years: {args.train_years}")
-    print(f"  Test years:  {args.test_years}")
-    print(f"  Regions:     {args.regions}")
-    print(f"  Variables:   {args.variables}")
-    print(f"  Data source: {args.parquet_base}")
+    print(f"  Train years:  {args.train_years}")
+    print(f"  Test years:   {args.test_years}")
+    print(f"  Regions:      {args.regions}")
+    print(f"  Variables:    {args.variables}")
+    print(f"  Data source:  {args.parquet_base}")
+    print(f"  Spatial step: {args.spatial_step}")
     print()
 
     print("Listing training files...")
@@ -443,6 +505,7 @@ def main():
             upload_s3=not args.no_s3,
             train_years=args.train_years,
             test_years=args.test_years,
+            spatial_step=args.spatial_step,
         )
         results.append(result)
 
