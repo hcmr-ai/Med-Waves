@@ -110,6 +110,7 @@ class CachedWaveDataset(Dataset):
             self.crop_w_indices = None
             self.cropped_lat_grid = None
             self.cropped_lon_grid = None
+            self.pixel_exclusion_mask = None
             if self.region_filter is not None:
                 lat_idx = sample_feature_cols.index("latitude")
                 lon_idx = sample_feature_cols.index("longitude")
@@ -122,15 +123,18 @@ class CachedWaveDataset(Dataset):
                     lat_data = sample_tensor[0, ..., lat_idx]
                     lon_data = sample_tensor[0, ..., lon_idx]
 
-                # Gibraltar boundary
+                # Gibraltar boundary and Bay of Biscay (Atlantic water above Gibraltar)
                 GIBRALTAR_LON = -5.5
+                BISCAY_LAT = 43.0
+                BISCAY_LON = 0.0
+                biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
 
                 # Find which columns (longitude) and rows (latitude) to keep
                 # For each column, check if ANY pixel in that column is in the target region
                 if self.region_filter == "atlantic":
-                    region_condition = lon_data < GIBRALTAR_LON
+                    region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
                 elif self.region_filter == "mediterranean":
-                    region_condition = lon_data >= GIBRALTAR_LON
+                    region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
                 else:
                     raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -152,6 +156,22 @@ class CachedWaveDataset(Dataset):
                 self.cropped_lon_grid = lon_data[self.crop_h_indices, :][
                     :, self.crop_w_indices
                 ]
+
+                # Pixel-level exclusion mask for non-region pixels within cropped rectangle
+                # True = pixel to EXCLUDE (set to NaN in __getitem__)
+                self.pixel_exclusion_mask = None
+                if self.region_filter == "mediterranean":
+                    exclude = (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                elif self.region_filter == "atlantic":
+                    is_med = (self.cropped_lon_grid >= GIBRALTAR_LON) & ~(
+                        (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                    )
+                    exclude = is_med
+                else:
+                    exclude = None
+                if exclude is not None and exclude.any():
+                    self.pixel_exclusion_mask = exclude
+                    print(f"  Pixel-level region exclusion: {exclude.sum().item()} pixels masked")
 
                 original_size = lat_data.shape[0] * lat_data.shape[1]
                 cropped_size = len(self.crop_h_indices) * len(self.crop_w_indices)
@@ -184,11 +204,11 @@ class CachedWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
             if self.region_filter == "atlantic":
-                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+                print("  Keeping pixels: lon < -5.5° OR (lat > 43° AND lon < 0°)")
             elif self.region_filter == "mediterranean":
-                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+                print("  Keeping pixels: lon >= -5.5° AND NOT (lat > 43° AND lon < 0°)")
             print("================================\n")
         else:
             print("  No region filtering (using all pixels)")
@@ -349,6 +369,11 @@ class CachedWaveDataset(Dataset):
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             # Crop to only include target region (e.g., Mediterranean only)
             hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
+
+        # NaN-out non-region pixels so they are excluded by the mask
+        if self.pixel_exclusion_mask is not None:
+            hour_data = hour_data.clone()
+            hour_data[self.pixel_exclusion_mask] = float("nan")
 
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X

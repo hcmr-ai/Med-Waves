@@ -34,13 +34,17 @@ def visualize_region_classification(file_path, output_dir="./region_maps"):
         lon_data = tensor[0, ..., lon_idx].numpy()
     
     # Classify each pixel
-    # 0 = Atlantic (lon < -5.5), 1 = Mediterranean (lon >= -5.5)
+    # 0 = Atlantic (lon < -5.5 OR Bay of Biscay), 1 = Mediterranean
     GIBRALTAR_LON = -5.5
+    BISCAY_LAT = 43.0
+    BISCAY_LON = 0.0
     region_map = np.full_like(lon_data, np.nan)
     
     # Atlantic = 0, Mediterranean = 1
     region_map[lon_data < GIBRALTAR_LON] = 0  # Atlantic
     region_map[lon_data >= GIBRALTAR_LON] = 1  # Mediterranean
+    biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
+    region_map[biscay_mask] = 0  # Bay of Biscay → Atlantic
     
     # Handle NaN values
     region_map[np.isnan(lat_data) | np.isnan(lon_data)] = np.nan
@@ -48,10 +52,11 @@ def visualize_region_classification(file_path, output_dir="./region_maps"):
     # Count pixels per region
     atlantic_pixels = np.sum(region_map == 0)
     med_pixels = np.sum(region_map == 1)
+    biscay_pixels = np.sum(biscay_mask)
     total_valid = atlantic_pixels + med_pixels
     
     print(f"\n=== File: {file_path} ===")
-    print(f"Atlantic pixels: {atlantic_pixels} ({atlantic_pixels/total_valid*100:.1f}%)")
+    print(f"Atlantic pixels: {atlantic_pixels} ({atlantic_pixels/total_valid*100:.1f}%) (incl. {biscay_pixels} Bay of Biscay)")
     print(f"Mediterranean pixels: {med_pixels} ({med_pixels/total_valid*100:.1f}%)")
     
     # Create visualization
@@ -59,9 +64,11 @@ def visualize_region_classification(file_path, output_dir="./region_maps"):
     ax = plt.axes(projection=ccrs.PlateCarree())
     
     # Plot region classification
+    from matplotlib.colors import ListedColormap
+    cmap_regions = ListedColormap(['red', 'blue'])
     im = ax.pcolormesh(lon_data, lat_data, region_map, 
                        transform=ccrs.PlateCarree(),
-                       cmap='RdBu_r',  # Red=Atlantic, Blue=Med
+                       cmap=cmap_regions,
                        vmin=0, vmax=1,
                        shading='auto')
     
@@ -78,13 +85,16 @@ def visualize_region_classification(file_path, output_dir="./region_maps"):
     ax.plot(GIBRALTAR_LON, GIBRALTAR_LAT, 'g*', 
             markersize=15, transform=ccrs.PlateCarree(),
             label='Gibraltar Strait')
+    ax.plot([BISCAY_LON, GIBRALTAR_LON], [BISCAY_LAT, BISCAY_LAT],
+            'm--', linewidth=2, transform=ccrs.PlateCarree(),
+            label=f'Biscay boundary (lat={BISCAY_LAT}°, lon<{BISCAY_LON}°)')
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax, orientation='horizontal', 
                        pad=0.05, shrink=0.7)
-    cbar.set_label('Region: 0=Atlantic, 1=Mediterranean', fontsize=12)
+    cbar.set_label('Region', fontsize=12)
     cbar.set_ticks([0, 1])
-    cbar.set_ticklabels(['Atlantic', 'Mediterranean'])
+    cbar.set_ticklabels(['Atlantic (incl. Biscay)', 'Mediterranean'])
     
     ax.legend(loc='upper right')
     ax.set_title(f'Region Classification\n{file_path.split("/")[-1]}')
@@ -102,7 +112,7 @@ def visualize_region_classification(file_path, output_dir="./region_maps"):
 
 def main():
     # Configuration - specify a single file to visualize
-    file_path = "/opt/dlami/nvme/preprocessed_subsampled_step_5/WAVEAN20231231.pt"
+    file_path = "/opt/dlami/nvme/preprocessed_extended_subsampled_step_5/WAVEAN20231231.pt"
     
     print(f"\nVisualizing file: {file_path}")
     visualize_region_classification(file_path)

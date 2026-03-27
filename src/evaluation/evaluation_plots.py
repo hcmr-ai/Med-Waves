@@ -25,6 +25,7 @@ def plot_rmse_maps(
     geo_bounds: dict,
     unit: str,
     output_dir: Path,
+    dataset_coords: tuple = None,
 ):
     """Plot spatial RMSE maps for model and baseline."""
     if not test_files or not spatial_errors_model:

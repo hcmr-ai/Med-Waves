@@ -40,7 +40,7 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def __init__(
         self,
-        tasks_config,  # List of tasks: [{'name': 'vhm0', 'loss_type': 'mse', 'weight': 1.0}, ...]
+        tasks_config=None,  # List of tasks: [{'name': 'vhm0', 'loss_type': 'mse', 'weight': 1.0}, ...]
         in_channels=3,
         lr=1e-3,
         loss_type="weighted_mse",
@@ -95,12 +95,12 @@ class WaveBiasCorrector(pl.LightningModule):
         self.use_patch_sampling = use_patch_sampling
         # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
         # Use provided tasks_config and ensure each task has a loss_type
-        self.tasks_config = tasks_config
+        self.tasks_config = tasks_config or [{'name': 'vhm0', 'loss_type': self.loss_type, 'weight': 1.0}]
         # Add loss_type to each task if not already present
         for task in self.tasks_config:
             if "loss_type" not in task:
                 task["loss_type"] = self.loss_type
-        self.auxiliary_tasks = [task["name"] for task in tasks_config]
+        self.auxiliary_tasks = [task["name"] for task in self.tasks_config]
 
         # Store whether we're in multi-task mode
         self.is_multi_task = len(self.auxiliary_tasks) > 1
@@ -125,6 +125,31 @@ class WaveBiasCorrector(pl.LightningModule):
         self.predict_bias = predict_bias
         self.normalizer = normalizer
         self.normalize_target = normalize_target
+    
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
+        # Let Lightning do the initial load
+        import torch
+
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+
+        # Backward compat: rename model.final → model.task_heads.vhm0
+        remap = {
+            "model.final.weight": "model.task_heads.vhm0.weight",
+            "model.final.bias":   "model.task_heads.vhm0.bias",
+        }
+        for old_key, new_key in remap.items():
+            if old_key in state_dict:
+                state_dict[new_key] = state_dict.pop(old_key)
+        ckpt["state_dict"] = state_dict
+
+        # Re-save to a temp buffer and let Lightning load normally
+        import io, torch
+        buf = io.BytesIO()
+        torch.save(ckpt, buf)
+        buf.seek(0)
+        return super().load_from_checkpoint(buf, *args, **kwargs)
 
     def forward(self, x):
         # Handle NaN values in input by replacing with zeros

@@ -49,6 +49,8 @@ SEA_BINS = [
 ]
 
 GIBRALTAR_LON = -5.5
+BISCAY_LAT = 43.0
+BISCAY_LON = 0.0
 
 
 def _build_region_mask(tensor, feature_cols, region_filter):
@@ -58,12 +60,15 @@ def _build_region_mask(tensor, feature_cols, region_filter):
     """
     lat_idx = feature_cols.index("latitude")
     lon_idx = feature_cols.index("longitude")
+    lat_data = tensor[0, :, :, lat_idx]
     lon_data = tensor[0, :, :, lon_idx]
 
+    biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
+
     if region_filter == "mediterranean":
-        return lon_data >= GIBRALTAR_LON
+        return (lon_data >= GIBRALTAR_LON) & ~biscay_mask
     elif region_filter == "atlantic":
-        return lon_data < GIBRALTAR_LON
+        return (lon_data < GIBRALTAR_LON) | biscay_mask
     else:
         raise ValueError(f"Unknown region_filter: {region_filter}")
 
