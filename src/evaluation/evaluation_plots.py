@@ -35,15 +35,21 @@ def plot_rmse_maps(
     cmap = plt.get_cmap("jet").copy()
     cmap.set_bad("white")
 
-    # Load coordinates from first test file
-    try:
-        lat_grid, lon_grid = load_coordinates_from_parquet(
-            test_files[0], subsample_step=subsample_step
-        )
-        logger.info(f"Coordinate grid shape: {lat_grid.shape}")
-    except Exception as e:
-        logger.error(f"Failed to load coordinates: {e}")
-        return
+    # Prefer coordinates coming directly from the evaluation dataset because
+    # they match any runtime cropping/orientation used during inference.
+    if dataset_coords is not None:
+        lat_grid, lon_grid = dataset_coords
+        logger.info(f"Using dataset coordinate grid shape: {lat_grid.shape}")
+    else:
+        # Fallback: load coordinates from first test file
+        try:
+            lat_grid, lon_grid = load_coordinates_from_parquet(
+                test_files[0], subsample_step=subsample_step
+            )
+            logger.info(f"Coordinate grid shape: {lat_grid.shape}")
+        except Exception as e:
+            logger.error(f"Failed to load coordinates: {e}")
+            return
 
     # Aggregate spatial errors across all batches
     total_error_sq_model = np.zeros_like(lat_grid)
