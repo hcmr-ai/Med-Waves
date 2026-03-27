@@ -37,7 +37,7 @@ def plot_rmse_maps(
     # Load coordinates from first test file
     try:
         lat_grid, lon_grid = load_coordinates_from_parquet(
-            "s3://" + test_files[0], subsample_step=subsample_step
+            test_files[0], subsample_step=subsample_step
         )
         logger.info(f"Coordinate grid shape: {lat_grid.shape}")
     except Exception as e:
