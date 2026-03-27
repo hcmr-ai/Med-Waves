@@ -31,9 +31,7 @@ class EDCDFCorrector:
 
             # F_model: value -> probability (mid-rank CDF for ties)
             model_unique, inverse = np.unique(model_sorted, return_inverse=True)
-            p_model_unique = np.empty(len(model_unique))
-            for i in range(len(model_unique)):
-                p_model_unique[i] = p[inverse == i].mean()
+            p_model_unique = np.bincount(inverse, weights=p) / np.bincount(inverse)
             f_model_cdf = interp1d(
                 model_unique, p_model_unique, bounds_error=False, fill_value=(p[0], p[-1])
             )
