@@ -97,6 +97,9 @@ class ModelEvaluator:
         region_filter: str = None,
         low_wave_ckpt: str = None,
         high_wave_ckpt: str = None,
+        static_bias_map_path: str = None,
+        blend_sigma: float = None,
+        domain_mean_recalibration: bool = False,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -311,6 +314,43 @@ class ModelEvaluator:
 
         # Timestamp cache for seasonal analysis
         self._timestamps_cache = {}
+
+        # Static bias map for soft blend and domain-mean recalibration
+        self.static_bias_map = None
+        self.static_bias_valid = None
+        self.static_domain_mean = None
+        self.blend_sigma = blend_sigma
+        self.domain_mean_recalibration = domain_mean_recalibration
+        if static_bias_map_path and (blend_sigma is not None or domain_mean_recalibration):
+            self._load_static_bias_map(static_bias_map_path)
+
+    def _load_static_bias_map(self, path: str):
+        """Load static bias map and crop to match dataset region."""
+        try:
+            raw = np.load(path)
+            valid = ~np.isnan(raw)
+            raw = np.nan_to_num(raw, nan=0.0)
+
+            dataset = self.test_loader.dataset
+            crop_h = getattr(dataset, "crop_h_indices", None)
+            crop_w = getattr(dataset, "crop_w_indices", None)
+            if crop_h is not None and crop_w is not None:
+                raw = raw[crop_h.numpy(), :][:, crop_w.numpy()]
+                valid = valid[crop_h.numpy(), :][:, crop_w.numpy()]
+
+            self.static_bias_map = torch.from_numpy(raw).float().to(self.device)
+            self.static_bias_valid = torch.from_numpy(valid).to(self.device)
+            self.static_domain_mean = self.static_bias_map[self.static_bias_valid].mean().item()
+            logger.info(
+                f"Loaded static bias map ({self.static_bias_map.shape}) "
+                f"with blend_sigma={self.blend_sigma}, "
+                f"domain_mean_recal={self.domain_mean_recalibration}, "
+                f"static_domain_mean={self.static_domain_mean:.6f}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not load static bias map: {e}")
+            self.static_bias_map = None
+            self.static_bias_valid = None
 
     def _reset_accumulators(self):
         """Reset all metric accumulators."""
@@ -649,6 +689,37 @@ class ModelEvaluator:
         """Reconstruct full wave heights from bias: corrected = vhm0 + bias"""
         return bias + vhm0
 
+    def _apply_static_blend(self, dnn_bias: torch.Tensor) -> torch.Tensor:
+        """Blend DNN bias toward static map when the DNN deviates too far.
+
+        trust = exp(-deviation^2 / (2*sigma^2))
+        blended = trust * dnn_bias + (1-trust) * static_bias
+        """
+        if self.static_bias_map is None or self.blend_sigma is None:
+            return dnn_bias
+        h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+        static = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0)
+        valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0)
+        deviation = (dnn_bias - static).abs()
+        trust = torch.exp(-deviation ** 2 / (2 * self.blend_sigma ** 2))
+        blended = trust * dnn_bias + (1 - trust) * static
+        return torch.where(valid, blended, dnn_bias)
+
+    def _recalibrate_domain_mean(
+        self, dnn_bias: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Re-anchor the DNN's domain-average level to the static map's level.
+
+        Preserves the DNN's spatial patterns but shifts the overall mean
+        to match the static map, correcting systematic year-level drift.
+        """
+        if not self.domain_mean_recalibration or self.static_domain_mean is None:
+            return dnn_bias
+        valid = mask.bool() if mask is not None else torch.ones_like(dnn_bias, dtype=torch.bool)
+        dnn_mean = dnn_bias[valid.expand_as(dnn_bias)].mean()
+        offset = dnn_mean - self.static_domain_mean
+        return dnn_bias - offset
+
     def _process_batch(
         self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None
     ):
@@ -685,6 +756,10 @@ class ModelEvaluator:
         # if self.normalize_target and self.normalizer is not None:
         #     y_pred = self.normalizer.inverse_transform_torch(y_pred)
         #     y = self.normalizer.inverse_transform_torch(y)
+
+        if self.predict_bias:
+            y_pred = self._recalibrate_domain_mean(y_pred, mask)
+            y_pred = self._apply_static_blend(y_pred)
 
         # ========== COMPUTE SPATIAL ERROR MAPS FIRST (using full 4D tensors) ==========
         if self.predict_bias:
@@ -2541,6 +2616,9 @@ def main():
             region_filter=region_filter,
             low_wave_ckpt=config.config["checkpoint"]["low_wave_ckpt"],
             high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
+            static_bias_map_path=data_config.get("static_bias_map_path", None),
+            blend_sigma=data_config.get("blend_sigma", None),
+            domain_mean_recalibration=data_config.get("domain_mean_recalibration", False),
         )
 
         evaluator.evaluate()
