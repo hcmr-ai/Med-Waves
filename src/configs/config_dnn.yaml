@@ -10,7 +10,7 @@ data:
   train_year: [2018, 2019, 2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-  test_year: [2017]
+  test_year: [2023]
   test_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   patch_size: null # [256, 256] # Smaller patches = faster training (was [128, 128])
   stride: null # [256, 256] # Stride for sliding window
@@ -31,10 +31,31 @@ data:
   region_filter: mediterranean # Region filter: "atlantic", "mediterranean", or null for no filtering (Gibraltar boundary at lon=-5.5°)
 
   # Post-processing: soft blend DNN bias with static bias map during evaluation
-  static_bias_map_path: /mnt/blobstorage/diagnostics/static_baseline/static_bias_map.npy
-  blend_sigma: 0.10  # meters; controls pull toward static map (lower = more aggressive)
-  domain_mean_recalibration: true  # re-anchor DNN domain-average to static map level per timestep
-
+  static_bias_map_path: /mnt/blobstorage/diagnostics/static_baseline/atlantic/static_bias_map_atlantic.npy
+  blend_sigma: null # 0.0001 #0.20 #0.10  # meters; controls pull toward static map (lower = more aggressive)
+  domain_mean_recalibration: false  # re-anchor DNN domain-average to static map level per timestep
+  # Optional post-processing: blend DNN bias with EDCDF-implied bias (dynamic prior)
+  edcdf_model_path: /mnt/blobstorage/diagnostics/edcdf_regional/atlantic/edcdf_atlantic_train_2018-2019-2020-2021_test_2017-2022-2023/models/edcdf_atlantic_train_2018-2019-2020-2021_test_2017-2022-2023.joblib  # e.g. /mnt/blobstorage/edcdf_regional/atlantic/.../models/...joblib
+  edcdf_blend_sigma: null #0.05  # meters; Gaussian trust sigma for DNN-vs-EDCDF bias blending
+  # Optional hard fallback: in these raw-wave bins, replace DNN bias with EDCDF bias (100%)
+  edcdf_hard_fallback_bins: null #[[0.0, 1.0], [1.0, 2.0]] # [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
+  # Bin source for hard fallback selection: "raw" (vhm0), "edcdf" (EDCDF-corrected), or "true" (eval-only diagnostic)
+  edcdf_fallback_bin_source: "raw"
+  # Optional low-bin affine calibration on predicted bias: b' = a*b + c
+  # Fitted from low-bin diagnostics (0.1m true-subbin OLS):
+  # calm(0-1m): a=0.98145, c=-0.06786; light(1-2m): a=0.99852, c=-0.08003
+  low_bin_affine_source: "raw" # "true" is eval-only diagnostic; use "raw" for deployment-safe runs
+  low_bin_affine_params: null
+  # Uncomment to enable the fitted low-bin affine calibration:
+  # low_bin_affine_params:
+  #   - min: 0.0
+  #     max: 1.0
+  #     a: 0.98145
+  #     c: -0.06786
+  #   - min: 1.0
+  #     max: 2.0
+  #     a: 0.99852
+  #     c: -0.08003
   # Data preprocessing
   # target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
   target_columns: # Multi-task: {task_name: column_name}. Single-task: {task_name: column_name}
@@ -61,11 +82,11 @@ data:
     ] # Columns to exclude from input
   handle_nan: true # Handle NaN values with masking
   # normalizer_path: /mnt/blobstorage-scalers/scalers/BU24h_zscore_target_20_21_all_with_corrected.pkl
-  normalizer_path: /mnt/blobstorage-scalers/scalers/BU24h_zscore_18-21_med_extended.pkl
+  normalizer_path: /mnt/blobstorage-scalers/scalers/BU24h_zscore_18-21_atla_extended.pkl
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
+  model_type: "mlp" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "mlp" (per-pixel MLP baseline), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 15 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
   loss_type: "mse" # Options: "mse", "mse_huber_tail", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
@@ -101,8 +122,8 @@ model:
   tasks_config:
     - name: "vhm0"
       weight: 1.0
-    - name: "vtm02"
-      weight: 1.0
+    # - name: "vtm02"
+    #   weight: 1.0
 # Training configuration
 training:
   batch_size: 64
@@ -136,8 +157,10 @@ training:
 # Checkpoint configuration
 checkpoint:
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered/epoch=14-val_loss=0.04.ckpt
-  resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
-  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
+  # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
+  # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_atlantic/epoch=02-val_loss=0.16.ckpt
+  resume_from_checkpoint: null
+  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_mlp_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
   s3_sync_dir: null # s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
@@ -146,13 +169,13 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
-  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
+  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_mlp_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
+  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_mlp_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean
   use_comet: true
   comet_tags:
     [
       "wave_height",
-      "transunet",
+      "mlp",
       "mse",
       "lambda_lr",
       "bias_correction",
@@ -161,4 +184,4 @@ logging:
       "region_filter",
       "mediterranean"
     ]
-  comet_notes: "DNN training for wave height correction using Transformer-based U-Net architecture with LambdaLR scheduler for Mediterranean region with bias_correction features"
+  comet_notes: "DNN training for wave height correction using MLP architecture with LambdaLR scheduler for Mediterranean region with bias_correction features"
