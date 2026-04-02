@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+import joblib
 import lightning as pl
 import numpy as np
 import torch
@@ -100,6 +101,12 @@ class ModelEvaluator:
         static_bias_map_path: str = None,
         blend_sigma: float = None,
         domain_mean_recalibration: bool = False,
+        edcdf_model_path: str = None,
+        edcdf_blend_sigma: float = None,
+        edcdf_hard_fallback_bins: List[List[float]] = None,
+        edcdf_fallback_bin_source: str = "raw",
+        low_bin_affine_params: List[dict] = None,
+        low_bin_affine_source: str = "raw",
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -324,6 +331,108 @@ class ModelEvaluator:
         if static_bias_map_path and (blend_sigma is not None or domain_mean_recalibration):
             self._load_static_bias_map(static_bias_map_path)
 
+        # Optional EDCDF prior for Gaussian trust blending of predicted bias
+        self.edcdf_corrector = None
+        self.edcdf_blend_sigma = edcdf_blend_sigma
+        self.edcdf_hard_fallback_bins = self._parse_wave_bin_ranges(
+            edcdf_hard_fallback_bins
+        )
+        self.edcdf_fallback_bin_source = (
+            str(edcdf_fallback_bin_source).strip().lower()
+            if edcdf_fallback_bin_source is not None
+            else "raw"
+        )
+        if self.edcdf_fallback_bin_source not in {"raw", "edcdf", "true"}:
+            logger.warning(
+                f"Unknown edcdf_fallback_bin_source='{edcdf_fallback_bin_source}', using 'raw'"
+            )
+            self.edcdf_fallback_bin_source = "raw"
+        if edcdf_model_path and (
+            edcdf_blend_sigma is not None or len(self.edcdf_hard_fallback_bins) > 0
+        ):
+            self._load_edcdf_corrector(edcdf_model_path)
+        self._edcdf_fallback_total_valid = 0
+        self._edcdf_fallback_total_applied = 0
+        self._edcdf_fallback_applied_per_bin = {
+            f"[{lo},{hi})": 0 for lo, hi in self.edcdf_hard_fallback_bins
+        }
+        if self.edcdf_hard_fallback_bins and self.edcdf_fallback_bin_source != "true":
+            logger.info(
+                "EDCDF hard fallback gating is not using true bins "
+                f"(source='{self.edcdf_fallback_bin_source}'). "
+                "Sea-bin plots use true bins, so fallback coverage may differ from plotted bins."
+            )
+
+        self.low_bin_affine_params = self._parse_low_bin_affine_params(
+            low_bin_affine_params
+        )
+        self.low_bin_affine_source = (
+            str(low_bin_affine_source).strip().lower()
+            if low_bin_affine_source is not None
+            else "raw"
+        )
+        if self.low_bin_affine_source not in {"raw", "true"}:
+            logger.warning(
+                f"Unknown low_bin_affine_source='{low_bin_affine_source}', using 'raw'"
+            )
+            self.low_bin_affine_source = "raw"
+
+    def _parse_wave_bin_ranges(self, bins) -> List[tuple]:
+        """Parse [[lo, hi], ...] wave bins into validated [(lo, hi), ...]."""
+        if bins is None:
+            return []
+
+        parsed = []
+        for idx, item in enumerate(bins):
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                logger.warning(
+                    f"Skipping invalid EDCDF fallback bin at index {idx}: {item}"
+                )
+                continue
+            try:
+                lo = float(item[0])
+                hi = float(item[1])
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Skipping non-numeric EDCDF fallback bin at index {idx}: {item}"
+                )
+                continue
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                logger.warning(
+                    f"Skipping invalid EDCDF fallback bin bounds at index {idx}: {item}"
+                )
+                continue
+            parsed.append((lo, hi))
+
+        if parsed:
+            logger.info(f"EDCDF hard fallback bins enabled: {parsed}")
+        return parsed
+
+    def _parse_low_bin_affine_params(self, params) -> List[dict]:
+        """Parse low-bin affine calibration config into validated entries."""
+        if params is None:
+            return []
+        parsed = []
+        for i, p in enumerate(params):
+            if not isinstance(p, dict):
+                logger.warning(f"Skipping invalid low_bin_affine_params[{i}]: {p}")
+                continue
+            try:
+                lo = float(p["min"])
+                hi = float(p["max"])
+                a = float(p["a"])
+                c = float(p["c"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning(f"Skipping malformed low_bin_affine_params[{i}]: {p}")
+                continue
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                logger.warning(f"Skipping invalid low-bin range low_bin_affine_params[{i}]: {p}")
+                continue
+            parsed.append({"min": lo, "max": hi, "a": a, "c": c})
+        if parsed:
+            logger.info(f"Low-bin affine calibration enabled with {len(parsed)} range(s): {parsed}")
+        return parsed
+
     def _load_static_bias_map(self, path: str):
         """Load static bias map and crop to match dataset region."""
         try:
@@ -351,6 +460,19 @@ class ModelEvaluator:
             logger.warning(f"Could not load static bias map: {e}")
             self.static_bias_map = None
             self.static_bias_valid = None
+
+    def _load_edcdf_corrector(self, path: str):
+        """Load fitted EDCDFCorrector used as a dynamic prior."""
+        try:
+            self.edcdf_corrector = joblib.load(path)
+            n_models = len(getattr(self.edcdf_corrector, "cdf_models", {}))
+            logger.info(
+                f"Loaded EDCDF model from {path} with {n_models} variable model(s), "
+                f"edcdf_blend_sigma={self.edcdf_blend_sigma}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not load EDCDF model from {path}: {e}")
+            self.edcdf_corrector = None
 
     def _reset_accumulators(self):
         """Reset all metric accumulators."""
@@ -439,6 +561,234 @@ class ModelEvaluator:
                 "seasons": {"winter": 0, "spring": 0, "summer": 0, "autumn": 0},
             },
         }
+
+        # Detailed diagnostics for first two bins (calm/light)
+        self.low_bin_sample_limit = 200000
+        self.low_bin_diagnostics = {}
+        for bin_config in self.sea_bins:
+            if bin_config["name"] not in {"calm", "light"}:
+                continue
+            bmin = float(bin_config["min"])
+            bmax = float(bin_config["max"])
+            step = 0.1
+            n_true = max(1, int(round((bmax - bmin) / step)))
+            self.low_bin_diagnostics[bin_config["name"]] = {
+                "label": bin_config["label"],
+                "bin_min": bmin,
+                "bin_max": bmax,
+                "step": step,
+                "count": 0,
+                "raw_in_same_bin_count": 0,
+                "sum_true": 0.0,
+                "sum_pred": 0.0,
+                "sum_raw": 0.0,
+                "sum_model_err": 0.0,
+                "sum_model_abs_err": 0.0,
+                "sum_model_sq_err": 0.0,
+                "sum_base_err": 0.0,
+                "sum_base_abs_err": 0.0,
+                "sum_base_sq_err": 0.0,
+                "true_subbin": {
+                    "count": np.zeros(n_true, dtype=np.int64),
+                    "sum_model_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_model_abs_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_model_sq_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_abs_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_sq_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_true": np.zeros(n_true, dtype=np.float64),
+                    "sum_pred": np.zeros(n_true, dtype=np.float64),
+                    "sum_raw": np.zeros(n_true, dtype=np.float64),
+                },
+                "samples": {
+                    "true": [],
+                    "pred": [],
+                    "raw": [],
+                    "model_err": [],
+                    "base_err": [],
+                },
+            }
+
+    def _update_low_bin_diagnostics(
+        self,
+        bin_name: str,
+        bin_y_true: np.ndarray,
+        bin_y_pred: np.ndarray,
+        bin_y_uncorrected: np.ndarray,
+    ) -> None:
+        """Update detailed diagnostics for calm/light bins."""
+        if bin_name not in self.low_bin_diagnostics:
+            return
+        if len(bin_y_true) == 0:
+            return
+
+        stats = self.low_bin_diagnostics[bin_name]
+        n = len(bin_y_true)
+        model_err = bin_y_pred - bin_y_true
+        base_err = bin_y_uncorrected - bin_y_true
+
+        stats["count"] += n
+        stats["raw_in_same_bin_count"] += int(
+            np.sum(
+                (bin_y_uncorrected >= stats["bin_min"])
+                & (bin_y_uncorrected < stats["bin_max"])
+            )
+        )
+        stats["sum_true"] += float(np.sum(bin_y_true))
+        stats["sum_pred"] += float(np.sum(bin_y_pred))
+        stats["sum_raw"] += float(np.sum(bin_y_uncorrected))
+        stats["sum_model_err"] += float(np.sum(model_err))
+        stats["sum_model_abs_err"] += float(np.sum(np.abs(model_err)))
+        stats["sum_model_sq_err"] += float(np.sum(model_err**2))
+        stats["sum_base_err"] += float(np.sum(base_err))
+        stats["sum_base_abs_err"] += float(np.sum(np.abs(base_err)))
+        stats["sum_base_sq_err"] += float(np.sum(base_err**2))
+
+        # True sub-bin diagnostics (0.1m granularity)
+        sub = stats["true_subbin"]
+        n_sub = len(sub["count"])
+        idx = np.floor((bin_y_true - stats["bin_min"]) / stats["step"]).astype(int)
+        idx = np.clip(idx, 0, n_sub - 1)
+        np.add.at(sub["count"], idx, 1)
+        np.add.at(sub["sum_model_err"], idx, model_err)
+        np.add.at(sub["sum_model_abs_err"], idx, np.abs(model_err))
+        np.add.at(sub["sum_model_sq_err"], idx, model_err**2)
+        np.add.at(sub["sum_base_err"], idx, base_err)
+        np.add.at(sub["sum_base_abs_err"], idx, np.abs(base_err))
+        np.add.at(sub["sum_base_sq_err"], idx, base_err**2)
+        np.add.at(sub["sum_true"], idx, bin_y_true)
+        np.add.at(sub["sum_pred"], idx, bin_y_pred)
+        np.add.at(sub["sum_raw"], idx, bin_y_uncorrected)
+
+        # Save a bounded sample for quantile diagnostics
+        samples = stats["samples"]
+        remaining = self.low_bin_sample_limit - len(samples["true"])
+        if remaining > 0:
+            take = min(remaining, n)
+            samples["true"].extend(bin_y_true[:take].tolist())
+            samples["pred"].extend(bin_y_pred[:take].tolist())
+            samples["raw"].extend(bin_y_uncorrected[:take].tolist())
+            samples["model_err"].extend(model_err[:take].tolist())
+            samples["base_err"].extend(base_err[:take].tolist())
+
+    def _save_low_bin_diagnostics(self, sea_bin_metrics: Dict[str, dict]) -> None:
+        """Write detailed low-bin diagnostics (JSON + CSV)."""
+        if not self.low_bin_diagnostics:
+            return
+
+        report = {}
+        rows = []
+        quantiles = [0.01, 0.05, 0.5, 0.95, 0.99]
+
+        for bin_name, stats in self.low_bin_diagnostics.items():
+            count = int(stats["count"])
+            if count == 0:
+                continue
+
+            def _q(arr):
+                if len(arr) == 0:
+                    return None
+                vals = np.quantile(np.array(arr, dtype=np.float64), quantiles)
+                return {
+                    "q01": float(vals[0]),
+                    "q05": float(vals[1]),
+                    "q50": float(vals[2]),
+                    "q95": float(vals[3]),
+                    "q99": float(vals[4]),
+                }
+
+            overall = {
+                "label": stats["label"],
+                "count": count,
+                "raw_in_same_bin_pct": 100.0
+                * float(stats["raw_in_same_bin_count"])
+                / max(1, count),
+                "model_mae": float(stats["sum_model_abs_err"]) / count,
+                "model_rmse": float(np.sqrt(stats["sum_model_sq_err"] / count)),
+                "model_bias": float(stats["sum_model_err"]) / count,
+                "baseline_mae": float(stats["sum_base_abs_err"]) / count,
+                "baseline_rmse": float(np.sqrt(stats["sum_base_sq_err"] / count)),
+                "baseline_bias": float(stats["sum_base_err"]) / count,
+                "mean_true": float(stats["sum_true"]) / count,
+                "mean_pred": float(stats["sum_pred"]) / count,
+                "mean_raw": float(stats["sum_raw"]) / count,
+                "sea_bin_metrics": sea_bin_metrics.get(bin_name, {}),
+                "sample_quantiles": {
+                    "true": _q(stats["samples"]["true"]),
+                    "pred": _q(stats["samples"]["pred"]),
+                    "raw": _q(stats["samples"]["raw"]),
+                    "model_err": _q(stats["samples"]["model_err"]),
+                    "baseline_err": _q(stats["samples"]["base_err"]),
+                },
+            }
+
+            # Per-0.1m sub-bin metrics inside each target bin
+            sub = stats["true_subbin"]
+            sub_rows = []
+            for i in range(len(sub["count"])):
+                c = int(sub["count"][i])
+                lo = stats["bin_min"] + i * stats["step"]
+                hi = lo + stats["step"]
+                if c == 0:
+                    continue
+                rmse_model = float(np.sqrt(sub["sum_model_sq_err"][i] / c))
+                rmse_base = float(np.sqrt(sub["sum_base_sq_err"][i] / c))
+                mae_model = float(sub["sum_model_abs_err"][i] / c)
+                mae_base = float(sub["sum_base_abs_err"][i] / c)
+                row = {
+                    "bin_name": bin_name,
+                    "true_subbin_label": f"{lo:.1f}-{hi:.1f}",
+                    "count": c,
+                    "model_rmse": rmse_model,
+                    "baseline_rmse": rmse_base,
+                    "rmse_improvement_pct": (
+                        (rmse_base - rmse_model) / rmse_base * 100.0
+                        if rmse_base > 0
+                        else None
+                    ),
+                    "model_mae": mae_model,
+                    "baseline_mae": mae_base,
+                    "mae_improvement_pct": (
+                        (mae_base - mae_model) / mae_base * 100.0 if mae_base > 0 else None
+                    ),
+                    "model_bias": float(sub["sum_model_err"][i] / c),
+                    "baseline_bias": float(sub["sum_base_err"][i] / c),
+                    "mean_true": float(sub["sum_true"][i] / c),
+                    "mean_pred": float(sub["sum_pred"][i] / c),
+                    "mean_raw": float(sub["sum_raw"][i] / c),
+                }
+                sub_rows.append(row)
+                rows.append(row)
+
+            overall["true_subbin_metrics"] = sub_rows
+            report[bin_name] = overall
+
+        if report:
+            with open(self.output_dir / "low_bin_diagnostics.json", "w") as f:
+                json.dump(report, f, indent=2)
+
+        if rows:
+            csv_path = self.output_dir / "low_bin_subbin_metrics.csv"
+            fieldnames = [
+                "bin_name",
+                "true_subbin_label",
+                "count",
+                "model_rmse",
+                "baseline_rmse",
+                "rmse_improvement_pct",
+                "model_mae",
+                "baseline_mae",
+                "mae_improvement_pct",
+                "model_bias",
+                "baseline_bias",
+                "mean_true",
+                "mean_pred",
+                "mean_raw",
+            ]
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
 
     def _configure_labels(self):
         """Configure dynamic labels based on target_column."""
@@ -705,6 +1055,116 @@ class ModelEvaluator:
         blended = trust * dnn_bias + (1 - trust) * static
         return torch.where(valid, blended, dnn_bias)
 
+    def _apply_edcdf_blend(
+        self,
+        dnn_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Blend DNN bias toward EDCDF-implied bias using Gaussian trust:
+            trust = exp(-|b_dnn - b_edcdf|^2 / (2*sigma^2))
+            b_blend = trust*b_dnn + (1-trust)*b_edcdf
+        """
+        if self.edcdf_corrector is None or raw_uncorrected is None:
+            return dnn_bias
+
+        use_soft_blend = self.edcdf_blend_sigma is not None
+        use_hard_fallback = len(self.edcdf_hard_fallback_bins) > 0
+        if not use_soft_blend and not use_hard_fallback:
+            return dnn_bias
+
+        var_name = self.target_column.replace("corrected_", "")
+        cdf_models = getattr(self.edcdf_corrector, "cdf_models", {})
+        if var_name not in cdf_models:
+            return dnn_bias
+
+        f_model_cdf, f_obs_quantile, p_min, p_max = cdf_models[var_name]
+
+        # Evaluate EDCDF map in numpy and convert back to tensor
+        raw_np = raw_uncorrected.detach().cpu().numpy().astype(float)
+        prob = np.clip(f_model_cdf(raw_np), p_min, p_max)
+        edcdf_corrected_np = f_obs_quantile(prob)
+        edcdf_corrected = torch.from_numpy(edcdf_corrected_np).to(
+            device=dnn_bias.device, dtype=dnn_bias.dtype
+        )
+
+        edcdf_bias = edcdf_corrected - raw_uncorrected
+        valid = torch.isfinite(edcdf_bias)
+        out_bias = dnn_bias
+
+        if use_soft_blend:
+            deviation = (out_bias - edcdf_bias).abs()
+            trust = torch.exp(-deviation ** 2 / (2 * self.edcdf_blend_sigma ** 2))
+            blended = trust * out_bias + (1 - trust) * edcdf_bias
+            out_bias = torch.where(valid, blended, out_bias)
+
+        if use_hard_fallback:
+            if self.edcdf_fallback_bin_source == "raw":
+                gate_values = raw_uncorrected
+            elif self.edcdf_fallback_bin_source == "edcdf":
+                gate_values = edcdf_corrected
+            elif self.edcdf_fallback_bin_source == "true":
+                if y_true_bias is None:
+                    logger.warning(
+                        "edcdf_fallback_bin_source='true' requires y_true_bias; falling back to raw."
+                    )
+                    gate_values = raw_uncorrected
+                else:
+                    gate_values = y_true_bias + raw_uncorrected
+            else:
+                gate_values = raw_uncorrected
+
+            fallback_mask = torch.zeros_like(raw_uncorrected, dtype=torch.bool)
+            for lo, hi in self.edcdf_hard_fallback_bins:
+                fallback_mask = fallback_mask | (
+                    (gate_values >= lo) & (gate_values < hi)
+                )
+            fallback_mask = fallback_mask & valid
+            self._edcdf_fallback_total_valid += int(valid.sum().item())
+            self._edcdf_fallback_total_applied += int(fallback_mask.sum().item())
+            for lo, hi in self.edcdf_hard_fallback_bins:
+                key = f"[{lo},{hi})"
+                bin_mask = ((gate_values >= lo) & (gate_values < hi) & valid)
+                self._edcdf_fallback_applied_per_bin[key] = (
+                    self._edcdf_fallback_applied_per_bin.get(key, 0)
+                    + int(bin_mask.sum().item())
+                )
+            out_bias = torch.where(fallback_mask, edcdf_bias, out_bias)
+
+        return out_bias
+
+    def _apply_low_bin_affine_calibration(
+        self,
+        dnn_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Apply piecewise affine calibration in selected low-wave bins:
+            b' = a * b + c
+        """
+        if not self.low_bin_affine_params or raw_uncorrected is None:
+            return dnn_bias
+
+        if self.low_bin_affine_source == "true":
+            if y_true_bias is None:
+                logger.warning(
+                    "low_bin_affine_source='true' requires y_true_bias; using 'raw' source."
+                )
+                gate_values = raw_uncorrected
+            else:
+                gate_values = y_true_bias + raw_uncorrected
+        else:
+            gate_values = raw_uncorrected
+
+        out = dnn_bias
+        for p in self.low_bin_affine_params:
+            mask = (gate_values >= p["min"]) & (gate_values < p["max"])
+            adjusted = p["a"] * out + p["c"]
+            out = torch.where(mask, adjusted, out)
+        return out
+
     def _recalibrate_domain_mean(
         self, dnn_bias: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
@@ -760,6 +1220,12 @@ class ModelEvaluator:
         if self.predict_bias:
             y_pred = self._recalibrate_domain_mean(y_pred, mask)
             y_pred = self._apply_static_blend(y_pred)
+            y_pred = self._apply_low_bin_affine_calibration(
+                y_pred, vhm0, y_true_bias=y
+            )
+            # Keep EDCDF blend/fallback last so configured hard-fallback bins
+            # are guaranteed to end up with EDCDF bias.
+            y_pred = self._apply_edcdf_blend(y_pred, vhm0, y_true_bias=y)
 
         # ========== COMPUTE SPATIAL ERROR MAPS FIRST (using full 4D tensors) ==========
         if self.predict_bias:
@@ -943,6 +1409,14 @@ class ModelEvaluator:
                         # Store all baseline error samples
                         self.sea_bin_error_samples[bin_name]["baseline_errors"].extend(
                             baseline_bin_errors.tolist()
+                        )
+
+                        # Extra diagnostics for first two bins (0-1m, 1-2m)
+                        self._update_low_bin_diagnostics(
+                            bin_name=bin_name,
+                            bin_y_true=bin_y_true,
+                            bin_y_pred=bin_y_pred,
+                            bin_y_uncorrected=bin_y_uncorrected,
                         )
 
                         # NEW: Track category breakdown (corrected vs not_corrected)
@@ -2233,6 +2707,17 @@ class ModelEvaluator:
         print("Computing final metrics...")
         overall_metrics = self.compute_overall_metrics()
         sea_bin_metrics = self.compute_sea_bin_metrics()
+        if self.edcdf_hard_fallback_bins:
+            valid = max(1, self._edcdf_fallback_total_valid)
+            pct = 100.0 * self._edcdf_fallback_total_applied / valid
+            logger.info(
+                "EDCDF hard fallback coverage: "
+                f"{self._edcdf_fallback_total_applied:,}/{self._edcdf_fallback_total_valid:,} "
+                f"valid pixels ({pct:.2f}%) using source='{self.edcdf_fallback_bin_source}'"
+            )
+            logger.info(
+                f"EDCDF hard fallback per-bin applied counts: {self._edcdf_fallback_applied_per_bin}"
+            )
 
         # NEW: Compute category breakdown
         print("Computing category breakdown (corrected vs not_corrected)...")
@@ -2254,6 +2739,8 @@ class ModelEvaluator:
         print("Saving category breakdown to CSV...")
         self.save_category_breakdown_csv(category_breakdown, self.output_dir)
         self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
+        print("Saving detailed low-bin diagnostics...")
+        self._save_low_bin_diagnostics(sea_bin_metrics)
 
         # Create plots using samples
         print("Creating plots...")
@@ -2619,6 +3106,12 @@ def main():
             static_bias_map_path=data_config.get("static_bias_map_path", None),
             blend_sigma=data_config.get("blend_sigma", None),
             domain_mean_recalibration=data_config.get("domain_mean_recalibration", False),
+            edcdf_model_path=data_config.get("edcdf_model_path", None),
+            edcdf_blend_sigma=data_config.get("edcdf_blend_sigma", None),
+            edcdf_hard_fallback_bins=data_config.get("edcdf_hard_fallback_bins", None),
+            edcdf_fallback_bin_source=data_config.get("edcdf_fallback_bin_source", "raw"),
+            low_bin_affine_params=data_config.get("low_bin_affine_params", None),
+            low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
         )
 
         evaluator.evaluate()

@@ -65,11 +65,18 @@ def main():
     parser.add_argument("--data_path", required=True)
     parser.add_argument("--file_pattern", default="WAVEAN*.pt")
     parser.add_argument("--output_dir", default="/mnt/blobstorage/diagnostics/bias_stationarity")
+    parser.add_argument(
+        "--region",
+        type=str,
+        default="all",
+        choices=["all", "atlantic", "mediterranean"],
+        help="Region filter (Gibraltar + Bay of Biscay logic)",
+    )
     parser.add_argument("--max_files_per_year", type=int, default=None,
                         help="Limit files per year for quick runs (None=all)")
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) / args.region
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover files and group by year
@@ -98,8 +105,36 @@ def main():
     corrected_vhm0_idx = feature_cols.index("corrected_VHM0")
     vtm02_idx = feature_cols.index("VTM02") if "VTM02" in feature_cols else None
     corrected_vtm02_idx = feature_cols.index("corrected_VTM02") if "corrected_VTM02" in feature_cols else None
+    lat_idx = feature_cols.index("latitude")
+    lon_idx = feature_cols.index("longitude")
 
     H, W = tensor_shape[1], tensor_shape[2]
+
+    # Region mask from first file coordinates (same logic as dataset/eval pipelines)
+    if args.region == "all":
+        region_mask = np.ones((H, W), dtype=bool)
+    else:
+        t0 = data0["tensor"][0]  # (H, W, C)
+        lat = t0[..., lat_idx].numpy()
+        lon = t0[..., lon_idx].numpy()
+
+        GIBRALTAR_LON = -5.5
+        BISCAY_LAT = 43.0
+        BISCAY_LON = 0.0
+        biscay = (lat > BISCAY_LAT) & (lon < BISCAY_LON)
+
+        if args.region == "atlantic":
+            region_mask = (lon < GIBRALTAR_LON) | biscay
+        else:  # mediterranean
+            region_mask = (lon >= GIBRALTAR_LON) & ~biscay
+
+        region_mask = region_mask & ~np.isnan(lat) & ~np.isnan(lon)
+
+    print(f"Region filter: {args.region}")
+    print(
+        f"Region pixels kept: {int(region_mask.sum()):,}/{region_mask.size:,} "
+        f"({100.0 * region_mask.mean():.1f}%)"
+    )
 
     # ================================================================
     # PASS 1: Accumulate per-year running statistics
@@ -167,7 +202,7 @@ def main():
             for hour in range(24):
                 bias_hw = vhm0_bias[hour]   # (H, W), NaN on land
                 raw_hw = raw_vhm0[hour]     # (H, W)
-                valid = ~np.isnan(bias_hw)
+                valid = ~np.isnan(bias_hw) & region_mask
 
                 # Overall per-year
                 bias_filled = np.where(valid, bias_hw, 0.0)

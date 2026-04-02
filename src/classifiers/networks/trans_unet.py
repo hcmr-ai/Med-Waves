@@ -299,6 +299,78 @@ class TransUNetGeo(nn.Module):
         return outputs
 
 
+class SimpleMLPGeo(nn.Module):
+    """
+    Lightweight per-pixel MLP baseline for geospatial fields.
+
+    Applies the same MLP to each pixel independently (shared weights across space),
+    preserving spatial resolution while keeping model complexity low.
+
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels (kept for compatibility)
+        auxiliary_tasks: Task names, e.g. ['vhm0', 'vtm02']
+        hidden_dim: Hidden width of MLP layers
+        num_layers: Number of Linear+ReLU blocks
+        dropout: Dropout probability applied after hidden activations
+        use_mdn: Whether to use MDN heads per task
+
+    Returns:
+        Single task: tensor [B, 1, H, W]
+        Multi-task: dict {'task_name': tensor [B, 1, H, W]}
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        auxiliary_tasks=None,
+        hidden_dim=128,
+        num_layers=3,
+        dropout=0.0,
+        use_mdn=False,
+    ):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+
+        self.auxiliary_tasks = auxiliary_tasks or ["vhm0"]
+        self.use_mdn = use_mdn
+
+        layers = []
+        in_dim = in_channels
+        for _ in range(num_layers):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden_dim
+        self.mlp = nn.Sequential(*layers)
+
+        # Task-specific heads over shared feature map
+        self.task_heads = nn.ModuleDict()
+        for task in self.auxiliary_tasks:
+            if use_mdn:
+                self.task_heads[task] = MDNHead(hidden_dim, K=3)
+            else:
+                self.task_heads[task] = nn.Conv2d(hidden_dim, 1, kernel_size=1)
+
+    def forward(self, x):
+        # x: [B, C, H, W] -> [B, H, W, C]
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = self.mlp(x)  # [B, H, W, hidden_dim]
+        x = x.permute(0, 3, 1, 2).contiguous()  # [B, hidden_dim, H, W]
+
+        outputs = {}
+        for task in self.auxiliary_tasks:
+            outputs[task] = self.task_heads[task](x)
+
+        if len(self.auxiliary_tasks) == 1:
+            return outputs[self.auxiliary_tasks[0]]
+
+        return outputs
+
+
 # -----------------------------
 # Sanity check on random sizes
 # -----------------------------

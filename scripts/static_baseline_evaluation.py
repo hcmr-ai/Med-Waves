@@ -14,7 +14,8 @@ Usage:
   PYTHONUNBUFFERED=1 poetry run python scripts/static_baseline_evaluation.py \
     --data_path /mnt/blobstorage/preprocessed_extended_subsampled_step_5/ \
     --train_years 2018 2019 2020 2021 \
-    --eval_years 2017 2018 2019 2020 2021 2022 2023
+    --eval_years 2017 2018 2019 2020 2021 2022 2023 \
+    --region mediterranean
 """
 
 import argparse
@@ -44,11 +45,25 @@ def main():
     parser.add_argument("--eval_years", nargs="+", type=int, default=[2017, 2018, 2019, 2020, 2021, 2022, 2023])
     parser.add_argument("--output_dir", default="/mnt/blobstorage/diagnostics/static_baseline")
     parser.add_argument("--max_files_per_year", type=int, default=None)
+    parser.add_argument(
+        "--region",
+        type=str,
+        default="all",
+        choices=["all", "atlantic", "mediterranean"],
+        help="Region filter to evaluate (Gibraltar + Bay of Biscay logic)",
+    )
     parser.add_argument("--bias_map", type=str, default=None,
                         help="Path to precomputed static_bias_map.npy (skips Step 1)")
+    parser.add_argument(
+        "--sea_bin_source",
+        type=str,
+        default="true",
+        choices=["true", "raw"],
+        help="Source used for sea-bin assignment: 'true' (corrected_VHM0) or 'raw' (VHM0).",
+    )
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) / args.region
     output_dir.mkdir(parents=True, exist_ok=True)
 
     all_files = sorted(glob.glob(f"{args.data_path}/{args.file_pattern}"))
@@ -73,7 +88,39 @@ def main():
 
     vhm0_idx = feature_cols.index("VHM0")
     corrected_vhm0_idx = feature_cols.index("corrected_VHM0")
+    lat_idx = feature_cols.index("latitude")
+    lon_idx = feature_cols.index("longitude")
     del data0
+
+    # Build static region mask from coordinates in the first file
+    # Match CachedWaveDataset logic:
+    # atlantic: lon < -5.5 OR (lat > 43 AND lon < 0)
+    # mediterranean: lon >= -5.5 AND NOT (lat > 43 AND lon < 0)
+    if args.region == "all":
+        region_mask = np.ones((H, W), dtype=bool)
+    else:
+        data_coords = torch.load(all_files[0], map_location="cpu")
+        t0 = data_coords["tensor"][0]  # (H, W, C)
+        lat = t0[..., lat_idx].numpy()
+        lon = t0[..., lon_idx].numpy()
+        del data_coords
+
+        GIBRALTAR_LON = -5.5
+        BISCAY_LAT = 43.0
+        BISCAY_LON = 0.0
+        biscay = (lat > BISCAY_LAT) & (lon < BISCAY_LON)
+
+        if args.region == "atlantic":
+            region_mask = (lon < GIBRALTAR_LON) | biscay
+        else:  # mediterranean
+            region_mask = (lon >= GIBRALTAR_LON) & ~biscay
+
+        # Keep only finite coordinate pixels
+        region_mask = region_mask & ~np.isnan(lat) & ~np.isnan(lon)
+
+    print(f"Region filter: {args.region}")
+    print(f"Region pixels kept: {int(region_mask.sum()):,}/{region_mask.size:,} ({100.0 * region_mask.mean():.1f}%)")
+    print(f"Sea-bin source: {args.sea_bin_source}")
 
     # ==================================================================
     # STEP 1: Compute or load static bias map
@@ -85,7 +132,7 @@ def main():
         static_bias_map = np.load(args.bias_map)
         assert static_bias_map.shape == (H, W), \
             f"Bias map shape {static_bias_map.shape} != grid {(H, W)}"
-        sea_mask = ~np.isnan(static_bias_map)
+        sea_mask = ~np.isnan(static_bias_map) & region_mask
     else:
         print(f"\n{'='*70}")
         print("STEP 1: Computing static bias map from training years")
@@ -120,11 +167,17 @@ def main():
         with np.errstate(divide="ignore", invalid="ignore"):
             static_bias_map = np.where(bias_count > 0, bias_sum / bias_count, np.nan)
 
-        sea_mask = bias_count > 0
+        sea_mask = (bias_count > 0) & region_mask
 
-        map_path = output_dir / "static_bias_map.npy"
+        map_path = output_dir / f"static_bias_map_{args.region}.npy"
         np.save(map_path, static_bias_map)
         print(f"  Saved static bias map to {map_path}")
+
+    # Always keep a region-masked map for plotting and region-specific reuse
+    static_bias_map_region = np.where(sea_mask, static_bias_map, np.nan)
+    masked_map_path = output_dir / f"static_bias_map_{args.region}.npy"
+    np.save(masked_map_path, static_bias_map_region)
+    print(f"  Saved region-masked static bias map to {masked_map_path}")
 
     print(f"\n  Static map stats (sea pixels only):")
     print(f"    Mean:   {np.nanmean(static_bias_map[sea_mask]):.4f} m")
@@ -210,9 +263,10 @@ def main():
                 total_pixels += valid.sum()
 
                 # Per-bin
+                bin_values = cor_v if args.sea_bin_source == "true" else raw_v
                 for bi in range(len(bin_names)):
                     lo, hi = bin_edges[bi], bin_edges[bi + 1]
-                    in_bin = (raw_v >= lo) & (raw_v < hi)
+                    in_bin = (bin_values >= lo) & (bin_values < hi)
                     if not in_bin.any():
                         continue
                     bname = bin_names[bi]
@@ -236,12 +290,15 @@ def main():
         results[year] = {
             "label": label,
             "n_pixels": total_pixels,
+            "sea_bin_source": args.sea_bin_source,
             "nc_rmse": np.sqrt(nc_sum_sq_err / n),
             "nc_mae": nc_sum_abs_err / n,
             "nc_bias": nc_sum_err / n,
             "sc_rmse": np.sqrt(sc_sum_sq_err / n),
             "sc_mae": sc_sum_abs_err / n,
             "sc_bias": sc_sum_err / n,
+            "rmse_improvement_pct": (1 - np.sqrt(sc_sum_sq_err / n) / np.sqrt(nc_sum_sq_err / n)) * 100,
+            "mae_improvement_pct": (1 - (sc_sum_abs_err / n) / (nc_sum_abs_err / n)) * 100,
             "bins": {},
         }
 
@@ -255,6 +312,12 @@ def main():
                 "sc_rmse": np.sqrt(sc_bin_sq[bname] / bn),
                 "sc_mae": sc_bin_abs[bname] / bn,
                 "sc_bias": sc_bin_err[bname] / bn,
+                "rmse_improvement_pct": (1 - (np.sqrt(sc_bin_sq[bname] / bn) / np.sqrt(nc_bin_sq[bname] / bn))) * 100
+                if nc_bin_sq[bname] > 0
+                else 0.0,
+                "mae_improvement_pct": (1 - ((sc_bin_abs[bname] / bn) / (nc_bin_abs[bname] / bn))) * 100
+                if nc_bin_abs[bname] > 0
+                else 0.0,
             }
 
     # ==================================================================
@@ -370,12 +433,84 @@ def main():
     plt.savefig(output_dir / "baseline_per_bin_rmse.png", dpi=150)
     plt.close()
 
+    # Plot: Per-bin RMSE improvement (%) heatmap across years
+    improvement_matrix = np.zeros((len(eval_years), len(bin_names)), dtype=float)
+    for yi, y in enumerate(eval_years):
+        for bi, bname in enumerate(bin_names):
+            improvement_matrix[yi, bi] = results[y]["bins"][bname]["rmse_improvement_pct"]
+
+    fig, ax = plt.subplots(figsize=(1.05 * len(bin_names) + 4, 0.6 * len(eval_years) + 3))
+    vmax_abs = max(1.0, np.nanpercentile(np.abs(improvement_matrix), 98))
+    im = ax.imshow(
+        improvement_matrix,
+        cmap="RdYlGn",
+        vmin=-vmax_abs,
+        vmax=vmax_abs,
+        aspect="auto",
+        origin="upper",
+    )
+    ax.set_title("Per-bin RMSE Improvement (%) - Static Map vs No Correction")
+    ax.set_xlabel("Wave-height bin")
+    ax.set_ylabel("Year")
+    ax.set_xticks(np.arange(len(bin_names)))
+    ax.set_xticklabels(bin_names, rotation=45, ha="right")
+    ax.set_yticks(np.arange(len(eval_years)))
+    ax.set_yticklabels([str(y) for y in eval_years])
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Improvement (%)")
+    plt.tight_layout()
+    plt.savefig(output_dir / "baseline_per_bin_rmse_improvement.png", dpi=150)
+    plt.close()
+
+    # Plot: Per-year improvement bars across bins (one panel per year)
+    n_years = len(eval_years)
+    ncols = 3
+    nrows = (n_years + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows))
+    axes = np.array(axes).reshape(-1)
+
+    for yi, year in enumerate(eval_years):
+        ax = axes[yi]
+        vals = [
+            results[year]["bins"][bname]["rmse_improvement_pct"] for bname in bin_names
+        ]
+        colors = ["#2ca02c" if v >= 0 else "#d62728" for v in vals]
+        x = np.arange(len(bin_names))
+        bars = ax.bar(x, vals, color=colors, alpha=0.85)
+        ax.axhline(0, color="black", linewidth=1.0, linestyle="--")
+        ax.set_title(
+            f"{year} ({'train' if year in args.train_years else 'test'})", fontsize=11
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(bin_names, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("RMSE improvement (%)")
+        ax.grid(True, axis="y", alpha=0.3)
+
+        # Add percentage labels on top of bars
+        for b, v in zip(bars, vals):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                v + (0.6 if v >= 0 else -0.6),
+                f"{v:.1f}%",
+                ha="center",
+                va="bottom" if v >= 0 else "top",
+                fontsize=7,
+            )
+
+    for j in range(n_years, len(axes)):
+        axes[j].axis("off")
+
+    plt.suptitle("Per-bin RMSE improvement by year", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_dir / "baseline_per_bin_rmse_improvement_bars.png", dpi=150)
+    plt.close()
+
     # Plot: Static bias map
     fig, ax = plt.subplots(1, 1, figsize=(12, 5))
-    vabs = np.nanpercentile(np.abs(static_bias_map[sea_mask]), 98)
-    im = ax.imshow(static_bias_map, cmap="RdBu_r", vmin=-vabs, vmax=vabs,
-                   aspect="auto", origin="upper")
-    ax.set_title(f"Static bias map (mean of training years {args.train_years})")
+    vabs = np.nanpercentile(np.abs(static_bias_map_region[sea_mask]), 98)
+    im = ax.imshow(static_bias_map_region, cmap="RdBu_r", vmin=-vabs, vmax=vabs,
+                   aspect="auto", origin="lower")
+    ax.set_title(f"Static bias map [{args.region}] (mean of training years {args.train_years})")
     plt.colorbar(im, ax=ax, shrink=0.7, label="Bias (m)")
     plt.tight_layout()
     plt.savefig(output_dir / "static_bias_map.png", dpi=150)

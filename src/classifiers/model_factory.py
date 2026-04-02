@@ -10,7 +10,7 @@ from src.classifiers.networks.bunet import (
     BU_Net_Geo_Nick_Enhanced,
 )
 from src.classifiers.networks.swin_unet import SwinUNetAgnostic
-from src.classifiers.networks.trans_unet import TransUNetGeo
+from src.classifiers.networks.trans_unet import SimpleMLPGeo, TransUNetGeo
 from src.classifiers.networks.trans_unet_gan import WaveTransUNetGAN
 
 
@@ -34,6 +34,7 @@ def create_model(
             - "nick": BU_Net_Geo_Nick (default)
             - "enhanced": BU_Net_Geo_Nick_Enhanced
             - "transunet": TransUNetGeo
+            - "mlp": SimpleMLPGeo (per-pixel MLP baseline)
             - "swinunet": SwinUNetAgnostic
             - "transunet_gan": WaveTransUNetGAN
         in_channels: Number of input channels
@@ -75,6 +76,7 @@ def create_model(
             vhm0_channel_index=vhm0_channel_index,
             upsample_mode=upsample_mode,
             use_mdn=use_mdn,
+            auxiliary_tasks=auxiliary_tasks or ["vhm0"],
         )
 
     elif model_type == "transunet":
@@ -86,6 +88,17 @@ def create_model(
             bottleneck_dim=1024,
             patch_size=16,
             num_layers=8,
+            use_mdn=use_mdn,
+        )
+
+    elif model_type == "mlp":
+        return SimpleMLPGeo(
+            in_channels=in_channels,
+            out_channels=1,
+            auxiliary_tasks=auxiliary_tasks or ["vhm0"],
+            hidden_dim=128,
+            num_layers=3,
+            dropout=0.0,
             use_mdn=use_mdn,
         )
 
@@ -125,5 +138,5 @@ def create_model(
     else:
         raise ValueError(
             f"Unsupported model_type: '{model_type}'. "
-            f"Supported types: 'geo', 'nick', 'enhanced', 'transunet', 'swinunet', 'transunet_gan'"
+            f"Supported types: 'geo', 'nick', 'enhanced', 'transunet', 'mlp', 'swinunet', 'transunet_gan'"
         )

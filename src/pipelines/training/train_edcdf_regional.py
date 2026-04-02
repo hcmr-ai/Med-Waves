@@ -44,12 +44,17 @@ BISCAY_LAT = 43.0
 BISCAY_LON = 0.0
 
 REGIONS = {
-    "atlantic": lambda df: df.filter(pl.col("longitude") < GIBRALTAR_LON),
-    "atlantic_biscay": lambda df: df.filter(
+    # Keep this aligned with CachedWaveDataset region filtering logic:
+    # atlantic: lon < -5.5 OR (lat > 43 AND lon < 0) [Bay of Biscay]
+    # mediterranean: lon >= -5.5 AND NOT (lat > 43 AND lon < 0)
+    "atlantic": lambda df: df.filter(
         (pl.col("longitude") < GIBRALTAR_LON)
         | ((pl.col("latitude") > BISCAY_LAT) & (pl.col("longitude") < BISCAY_LON))
     ),
-    "mediterranean": lambda df: df.filter(pl.col("longitude") >= GIBRALTAR_LON),
+    "mediterranean": lambda df: df.filter(
+        (pl.col("longitude") >= GIBRALTAR_LON)
+        & ~((pl.col("latitude") > BISCAY_LAT) & (pl.col("longitude") < BISCAY_LON))
+    ),
     "all": lambda df: df,
 }
 
