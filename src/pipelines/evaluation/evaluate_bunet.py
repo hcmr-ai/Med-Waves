@@ -2748,6 +2748,8 @@ class ModelEvaluator:
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
         # self.plot_vhm0_distributions()
+        # self.plot_vhm0_distributions(vhm0_range=(0, 1))
+        # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         self.plot_vhm0_distributions(vhm0_range=(11, 12))
         self.plot_vhm0_distributions(vhm0_range=(12, 13))
         self.plot_error_distribution_histograms()
@@ -2811,6 +2813,9 @@ def main():
         help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
     )
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
 
     config = DNNConfig(args.config)
 

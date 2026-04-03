@@ -81,11 +81,34 @@ def create_scheduler(
 
     # ========== CosineAnnealingLR ==========
     elif scheduler_type == "CosineAnnealingLR":
+        t_max_cfg = scheduler_config.get("T_max", 50)
+        if isinstance(t_max_cfg, str) and t_max_cfg.lower() == "auto":
+            if total_steps is not None and total_steps > 0:
+                t_max = int(total_steps)
+            elif max_epochs is not None and max_epochs > 0:
+                t_max = int(max_epochs)
+            else:
+                t_max = 50
+                print(
+                    "Warning: T_max set to 'auto' but total_steps/max_epochs unavailable. "
+                    "Falling back to T_max=50."
+                )
+        else:
+            t_max = int(t_max_cfg)
+
+        if t_max <= 0:
+            raise ValueError("CosineAnnealingLR requires T_max > 0")
+
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=int(scheduler_config.get("T_max", 50)),
+            T_max=t_max,
             eta_min=get_float("eta_min", 1e-6),
         )
+        scheduler_metadata = {
+            "scheduler_type": "CosineAnnealingLR",
+            "scheduler_T_max": t_max,
+            "scheduler_interval": "step",
+        }
         return {
             "scheduler": scheduler,
             "interval": "step",

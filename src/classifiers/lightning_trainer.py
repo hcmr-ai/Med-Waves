@@ -895,15 +895,34 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def on_train_start(self) -> None:
         """Log scheduler info and other hyperparameters when training starts."""
+        def _log_metadata_item(name: str, value):
+            # Lightning metric logger only accepts numeric scalars/tensors.
+            if isinstance(value, bool):
+                self.log(name, int(value))
+                return
+            if isinstance(value, (int, float, np.number)):
+                self.log(name, float(value))
+                return
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                self.log(name, value)
+                return
+
+            # Fallback for non-numeric metadata (e.g. scheduler_type strings).
+            if hasattr(self.logger, "experiment"):
+                experiment = self.logger.experiment
+                # Comet's API supports key/value metadata via log_other.
+                if hasattr(experiment, "log_other"):
+                    experiment.log_other(name, str(value))
+
         # Log optimizer info
         if hasattr(self, "optimizer_info"):
             for key, value in self.optimizer_info.items():
-                self.log(key, value)
+                _log_metadata_item(key, value)
 
         # Log scheduler info
         if hasattr(self, "scheduler_info"):
             for key, value in self.scheduler_info.items():
-                self.log(key, value)
+                _log_metadata_item(key, value)
 
     def on_train_epoch_end(self) -> None:
         if self.model_type == "transunet_gan":
