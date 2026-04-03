@@ -55,6 +55,10 @@ class CachedWaveDataset(Dataset):
         max_cache_size=20,
         region_filter=None,
         add_sea_mask_channel=False,
+        predict_residual_to_prior=False,
+        prior_source="none",
+        static_bias_map_path=None,
+        residual_prior_task=None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -73,6 +77,10 @@ class CachedWaveDataset(Dataset):
         self.patch_size = patch_size
         self.subsample_step = subsample_step
         self.predict_bias = predict_bias
+        self.predict_residual_to_prior = predict_residual_to_prior
+        self.prior_source = prior_source
+        self.static_bias_map_path = static_bias_map_path
+        self.residual_prior_task = residual_prior_task
         self.enable_profiler = enable_profiler
         # self.index_map = [
         #     (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
@@ -95,6 +103,48 @@ class CachedWaveDataset(Dataset):
             region_filter  # Region filter: "atlantic", "mediterranean", or None
         )
         self.add_sea_mask_channel = add_sea_mask_channel
+        if self.predict_residual_to_prior:
+            if self.residual_prior_task is None:
+                if len(self.target_columns) == 1:
+                    self.residual_prior_task = list(self.target_columns.keys())[0]
+                elif "vhm0" in self.target_columns:
+                    self.residual_prior_task = "vhm0"
+                else:
+                    raise ValueError(
+                        "residual_prior_task must be set for multi-task residual training."
+                    )
+            if self.residual_prior_task not in self.target_columns:
+                raise ValueError(
+                    f"residual_prior_task '{self.residual_prior_task}' not in target_columns: {list(self.target_columns.keys())}"
+                )
+            if self.residual_prior_task != "vhm0":
+                raise ValueError(
+                    "predict_residual_to_prior currently supports residual_prior_task='vhm0' only."
+                )
+        self.static_prior_bias = None
+        if self.predict_residual_to_prior:
+            if self.prior_source != "static":
+                raise ValueError(
+                    f"Unsupported prior_source '{self.prior_source}'. Use 'static'."
+                )
+            if not self.static_bias_map_path:
+                raise ValueError(
+                    "static_bias_map_path is required when predict_residual_to_prior=true"
+                )
+            static_map = np.load(self.static_bias_map_path)
+            static_map = np.squeeze(static_map)
+            if static_map.ndim != 2:
+                raise ValueError(
+                    f"Static bias map must be 2D after squeeze, got shape {static_map.shape}"
+                )
+            if static_map.shape != (self.H, self.W):
+                if static_map.shape == (self.W, self.H):
+                    static_map = static_map.T
+                else:
+                    raise ValueError(
+                        f"Static bias map shape {static_map.shape} incompatible with expected {(self.H, self.W)}"
+                    )
+            self.static_prior_bias = torch.from_numpy(static_map.astype(np.float32))
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
 
@@ -377,6 +427,16 @@ class CachedWaveDataset(Dataset):
             hour_data = hour_data.clone()
             hour_data[self.pixel_exclusion_mask] = float("nan")
 
+        prior_bias = None
+        if self.predict_residual_to_prior and self.static_prior_bias is not None:
+            prior_bias = self.static_prior_bias
+            if self.crop_h_indices is not None and self.crop_w_indices is not None:
+                prior_bias = prior_bias[self.crop_h_indices, :][:, self.crop_w_indices]
+            if self.pixel_exclusion_mask is not None:
+                prior_bias = prior_bias.clone()
+                prior_bias[self.pixel_exclusion_mask] = float("nan")
+            prior_bias = prior_bias.unsqueeze(-1)
+
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X
         # Exclude ALL target columns from input
@@ -409,7 +469,19 @@ class CachedWaveDataset(Dataset):
         # Extract targets for each task
         targets = {}
         for task_name, target_col in self.target_columns.items():
-            if self.predict_bias:
+            if self.predict_residual_to_prior and task_name == self.residual_prior_task:
+                # Residual-to-prior always predicts bias residual for the selected task.
+                corrected = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
+                uncorr_col = target_col.replace("corrected_", "")
+                uncorr = hour_data[
+                    ...,
+                    feature_cols.index(uncorr_col) : feature_cols.index(uncorr_col) + 1,
+                ]
+                targets[task_name] = corrected - uncorr
+            elif self.predict_bias:
                 # Predict bias: corrected - uncorrected
                 corrected = hour_data[
                     ...,
@@ -437,6 +509,10 @@ class CachedWaveDataset(Dataset):
         if self.subsample_step is not None:
             X = X[:: self.subsample_step, :: self.subsample_step, :]
             vhm0 = vhm0[:: self.subsample_step, :: self.subsample_step, :]
+            if prior_bias is not None:
+                prior_bias = prior_bias[
+                    :: self.subsample_step, :: self.subsample_step, :
+                ]
             for task_name in targets:
                 targets[task_name] = targets[task_name][
                     :: self.subsample_step, :: self.subsample_step, :
@@ -452,8 +528,15 @@ class CachedWaveDataset(Dataset):
                 X = X[i : i + ph, j : j + pw, :]
                 vhm0 = vhm0[i : i + ph, j : j + pw, :]
                 mask = mask[i : i + ph, j : j + pw, :]
+                if prior_bias is not None:
+                    prior_bias = prior_bias[i : i + ph, j : j + pw, :]
                 for task_name in targets:
                     targets[task_name] = targets[task_name][i : i + ph, j : j + pw, :]
+
+        if self.predict_residual_to_prior and prior_bias is not None:
+            for task_name in targets:
+                if task_name == self.residual_prior_task:
+                    targets[task_name] = targets[task_name] - prior_bias
 
         if self.normalizer is not None:
             if self.normalize_target:
@@ -492,6 +575,10 @@ class CachedWaveDataset(Dataset):
         mask = mask.permute(2, 0, 1).contiguous()  # Convert mask to (C, H, W)
         X = torch.nan_to_num(X, nan=0.0)
         vhm0_for_batch = torch.nan_to_num(vhm0_for_batch, nan=0.0)
+        prior_bias_for_batch = None
+        if prior_bias is not None:
+            prior_bias_for_batch = prior_bias.permute(2, 0, 1).contiguous()
+            prior_bias_for_batch = torch.nan_to_num(prior_bias_for_batch, nan=0.0)
 
         # Convert all targets to (C, H, W)
         for task_name in targets:
@@ -502,8 +589,12 @@ class CachedWaveDataset(Dataset):
             # Extract single target using actual task name
             task_name = list(self.target_columns.keys())[0]
             y = targets[task_name]
+            if prior_bias_for_batch is not None:
+                return X, y, mask, vhm0_for_batch, prior_bias_for_batch
             return X, y, mask, vhm0_for_batch
         else:
+            if prior_bias_for_batch is not None:
+                return X, targets, mask, vhm0_for_batch, prior_bias_for_batch
             return X, targets, mask, vhm0_for_batch
 
     def __len__(self):

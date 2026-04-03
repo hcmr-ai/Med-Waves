@@ -55,6 +55,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     )
     target_columns = data_config.get("target_columns", {"vhm0": "corrected_VHM0"})
     predict_bias = data_config.get("predict_bias", False)
+    predict_residual_to_prior = data_config.get("predict_residual_to_prior", False)
+    prior_source = data_config.get("prior_source", "none")
+    static_bias_map_path = data_config.get("static_bias_map_path", None)
+    residual_prior_task = data_config.get("residual_prior_task", None)
     subsample_step = data_config.get("subsample_step", None)
     region_filter = data_config.get(
         "region_filter", None
@@ -69,6 +73,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
     logger.info(f"Normalizer stats: {normalizer.stats_}")
     logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
     if data_config.get("use_patch_sampling"):
+        if predict_residual_to_prior:
+            raise ValueError(
+                "predict_residual_to_prior is not implemented for use_patch_sampling=true yet."
+            )
         # Create patch sampling configuration
         patch_cfg = PatchSamplingConfig(
             patch_size=tuple(patch_size) if patch_size else (32, 96),
@@ -115,6 +123,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             max_cache_size=data_config.get("max_cache_size", 20),
             region_filter=region_filter,
             add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
+            predict_residual_to_prior=predict_residual_to_prior,
+            prior_source=prior_source,
+            static_bias_map_path=static_bias_map_path,
+            residual_prior_task=residual_prior_task,
         )
 
     # if data_config.get("patch_size_deactivate", None) is not None:
@@ -163,6 +175,10 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         max_cache_size=data_config.get("max_cache_size", 20),
         region_filter=region_filter,
         add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
+        predict_residual_to_prior=predict_residual_to_prior,
+        prior_source=prior_source,
+        static_bias_map_path=static_bias_map_path,
+        residual_prior_task=residual_prior_task,
     )
 
     # # Pre-compute wave bins and filter patches (if using patched dataset)

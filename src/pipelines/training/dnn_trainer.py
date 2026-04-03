@@ -256,6 +256,60 @@ def create_callbacks(config: DNNConfig) -> list:
     return callbacks
 
 
+def _validate_training_mode_config(config: DNNConfig) -> None:
+    """Validate mutually-exclusive training target modes early."""
+    data_cfg = config.config["data"]
+    target_columns = data_cfg.get("target_columns", {"vhm0": "corrected_VHM0"})
+
+    predict_bias = bool(data_cfg.get("predict_bias", False))
+    predict_residual_to_prior = bool(data_cfg.get("predict_residual_to_prior", False))
+    normalize_target = bool(data_cfg.get("normalize_target", False))
+
+    active_modes = [
+        name
+        for name, enabled in [
+            ("predict_bias", predict_bias),
+            ("predict_residual_to_prior", predict_residual_to_prior),
+            ("normalize_target", normalize_target),
+        ]
+        if enabled
+    ]
+
+    if len(active_modes) > 1:
+        raise ValueError(
+            "Only one of data.predict_bias, data.predict_residual_to_prior, "
+            f"and data.normalize_target can be enabled. Active: {active_modes}"
+        )
+
+    if predict_residual_to_prior:
+        residual_prior_task = data_cfg.get("residual_prior_task", None)
+        if residual_prior_task is None:
+            if len(target_columns) == 1:
+                residual_prior_task = list(target_columns.keys())[0]
+                data_cfg["residual_prior_task"] = residual_prior_task
+                logger.info(
+                    "Auto-inferred residual_prior_task='%s' from target_columns",
+                    residual_prior_task,
+                )
+            elif "vhm0" in target_columns:
+                data_cfg["residual_prior_task"] = "vhm0"
+                logger.info(
+                    "Auto-inferred residual_prior_task='vhm0' from target_columns",
+                )
+            else:
+                raise ValueError(
+                    "data.residual_prior_task must be set when using multi-task residual-to-prior training."
+                )
+        elif residual_prior_task not in target_columns:
+            raise ValueError(
+                f"data.residual_prior_task='{residual_prior_task}' not found in data.target_columns={list(target_columns.keys())}"
+            )
+        if data_cfg.get("residual_prior_task") != "vhm0":
+            raise ValueError(
+                "Residual-to-prior training currently supports only residual_prior_task='vhm0'."
+            )
+
+
 def main():
     # Optimize for Tensor Cores with compatibility across torch versions.
     _configure_torch_precision()
@@ -306,6 +360,8 @@ def main():
     if args.resume:
         config.config["checkpoint"]["resume_from_checkpoint"] = args.resume
 
+    _validate_training_mode_config(config)
+
     # Create directories
     os.makedirs(config.config["checkpoint"]["checkpoint_dir"], exist_ok=True)
     os.makedirs(config.config["logging"]["log_dir"], exist_ok=True)
@@ -349,6 +405,12 @@ def main():
         logger.info("LR Scheduler: None")
 
     local_predict_bias = config.config.get("data", {}).get("predict_bias", False)
+    local_predict_residual_to_prior = config.config.get("data", {}).get(
+        "predict_residual_to_prior", False
+    )
+    local_residual_prior_task = config.config.get("data", {}).get(
+        "residual_prior_task", None
+    )
 
     # Handle checkpoint resuming (local or S3)
     resume_path = config.config["checkpoint"]["resume_from_checkpoint"]
@@ -394,6 +456,12 @@ def main():
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
             use_patch_sampling=data_config.get("use_patch_sampling", False),
+            predict_bias=local_predict_bias,
+            predict_residual_to_prior=local_predict_residual_to_prior,
+            residual_prior_task=local_residual_prior_task,
+            residual_penalty_lambda=float(
+                model_config.get("residual_penalty_lambda", 0.0)
+            ),
         )
     else:
         logger.info("Training new model")
@@ -435,6 +503,11 @@ def main():
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
             use_patch_sampling=data_config.get("use_patch_sampling", False),
+            predict_residual_to_prior=local_predict_residual_to_prior,
+            residual_prior_task=local_residual_prior_task,
+            residual_penalty_lambda=float(
+                model_config.get("residual_penalty_lambda", 0.0)
+            ),
         )
 
     # Create callbacks
@@ -512,6 +585,7 @@ def main():
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
         benchmark=training_config["benchmark"],
         val_check_interval=training_config["val_check_interval"],
+        accumulate_grad_batches=training_config.get("accumulate_grad_batches", 1),
     )
 
     # Train model
