@@ -59,6 +59,13 @@ class WaveBiasCorrector(pl.LightningModule):
         lambda_adv=0.01,
         n_discriminator_updates=3,
         discriminator_lr_multiplier=1.0,
+        transunet_base_channels=32,
+        transunet_bottleneck_dim=512,
+        transunet_patch_size=8,
+        transunet_num_layers=4,
+        transunet_num_heads=8,
+        transformer_use_coord_pos_enc=True,
+        transformer_sea_mask_channel_index=None,
         normalizer=None,
         normalize_target=False,
         use_patch_sampling=False,
@@ -119,6 +126,13 @@ class WaveBiasCorrector(pl.LightningModule):
             upsample_mode=upsample_mode,
             use_mdn=use_mdn,
             auxiliary_tasks=self.auxiliary_tasks,
+            transunet_base_channels=transunet_base_channels,
+            transunet_bottleneck_dim=transunet_bottleneck_dim,
+            transunet_patch_size=transunet_patch_size,
+            transunet_num_layers=transunet_num_layers,
+            transunet_num_heads=transunet_num_heads,
+            transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
+            transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
 
         self.lr_scheduler_config = lr_scheduler_config or {}
@@ -134,10 +148,12 @@ class WaveBiasCorrector(pl.LightningModule):
         ckpt = torch.load(checkpoint_path, map_location="cpu")
         state_dict = ckpt.get("state_dict", ckpt)
 
-        # Backward compat: rename model.final → model.task_heads.vhm0
+        # Backward compat: rename legacy single-task heads to model.task_heads.vhm0
         remap = {
             "model.final.weight": "model.task_heads.vhm0.weight",
             "model.final.bias":   "model.task_heads.vhm0.bias",
+            "model.correction_conv.weight": "model.task_heads.vhm0.weight",
+            "model.correction_conv.bias": "model.task_heads.vhm0.bias",
         }
         for old_key, new_key in remap.items():
             if old_key in state_dict:

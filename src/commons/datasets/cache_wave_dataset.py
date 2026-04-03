@@ -54,6 +54,7 @@ class CachedWaveDataset(Dataset):
         fs=None,
         max_cache_size=20,
         region_filter=None,
+        add_sea_mask_channel=False,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -93,6 +94,7 @@ class CachedWaveDataset(Dataset):
         self.region_filter = (
             region_filter  # Region filter: "atlantic", "mediterranean", or None
         )
+        self.add_sea_mask_channel = add_sea_mask_channel
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
 
@@ -477,6 +479,12 @@ class CachedWaveDataset(Dataset):
                     targets[task_name] = normalized_target
             else:
                 X = self.normalizer.transform_torch(X, normalize_target=False)
+
+        # Optional sea mask channel (1=sea, 0=land), appended last.
+        # Append after normalization so normalizer channel stats remain valid.
+        if self.add_sea_mask_channel:
+            sea_mask = (~torch.isnan(vhm0)).float()
+            X = torch.cat([X, sea_mask], dim=-1)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()

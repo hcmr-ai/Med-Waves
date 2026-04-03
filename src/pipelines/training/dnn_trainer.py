@@ -5,11 +5,33 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Redirect temp files to /mnt (1.3TB) instead of /tmp on root (29GB)
-_mnt_tmp = "/mnt/blobfuse-cache/tmp"
-os.makedirs(_mnt_tmp, exist_ok=True)
-tempfile.tempdir = _mnt_tmp
-os.environ["TMPDIR"] = _mnt_tmp
+# Prefer large mounted storage for temp files, but fall back safely.
+def _set_temp_dir() -> str:
+    candidates = [
+        "/mnt/blobfuse2-cache/tmp",
+        "/mnt/blobfuse-cache/tmp",
+        "/mnt/blobstorage/.tmp",
+        str(Path.home() / ".cache" / "medwav" / "tmp"),
+    ]
+
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            tempfile.tempdir = candidate
+            os.environ["TMPDIR"] = candidate
+            return candidate
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+
+    fallback = tempfile.gettempdir()
+    tempfile.tempdir = fallback
+    os.environ["TMPDIR"] = fallback
+    return fallback
+
+
+_mnt_tmp = _set_temp_dir()
 
 # Add src to Python path
 project_root = Path(__file__).parent.parent.parent
@@ -58,6 +80,42 @@ from lightning.pytorch.callbacks import (
     StochasticWeightAveraging,
 )
 from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
+
+
+def _configure_torch_precision() -> None:
+    """
+    Configure Tensor Core/TF32 behavior across PyTorch versions.
+
+    Newer versions expose:
+      - torch.backends.cudnn.conv.fp32_precision
+      - torch.backends.cuda.matmul.fp32_precision
+    Older versions use:
+      - torch.backends.cuda.matmul.allow_tf32
+      - torch.backends.cudnn.allow_tf32
+    """
+    torch.set_float32_matmul_precision("medium")
+
+    # Prefer new API when available.
+    try:
+        if hasattr(torch.backends.cudnn, "conv") and hasattr(
+            torch.backends.cuda, "matmul"
+        ):
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
+            # Keep matmul IEEE unless explicitly changed by config later.
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+            logger.info("Configured precision using new PyTorch fp32_precision API")
+            return
+    except Exception as e:
+        logger.warning(f"Failed new precision API setup, falling back: {e}")
+
+    # Backward-compatible fallback.
+    if hasattr(torch.backends.cuda, "matmul") and hasattr(
+        torch.backends.cuda.matmul, "allow_tf32"
+    ):
+        torch.backends.cuda.matmul.allow_tf32 = True
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
+        torch.backends.cudnn.allow_tf32 = True
+    logger.info("Configured precision using legacy TF32 flags")
 
 
 def _log_training_artifacts(comet_logger, config_file):
@@ -199,12 +257,8 @@ def create_callbacks(config: DNNConfig) -> list:
 
 
 def main():
-    # Optimize for Tensor Cores on modern GPUs (fixes the warning)
-    torch.set_float32_matmul_precision("medium")
-
-    # Use new API to avoid deprecation warnings
-    torch.backends.cudnn.conv.fp32_precision = "tf32"
-    torch.backends.cuda.matmul.fp32_precision = "ieee"
+    # Optimize for Tensor Cores with compatibility across torch versions.
+    _configure_torch_precision()
 
     parser = argparse.ArgumentParser(description="Train DNN for wave height correction")
     parser.add_argument("--config", type=str, help="Path to configuration YAML file")
@@ -325,6 +379,17 @@ def main():
             discriminator_lr_multiplier=model_config.get(
                 "discriminator_lr_multiplier", 1.0
             ),
+            transunet_base_channels=model_config.get("transunet_base_channels", 32),
+            transunet_bottleneck_dim=model_config.get("transunet_bottleneck_dim", 512),
+            transunet_patch_size=model_config.get("transunet_patch_size", 8),
+            transunet_num_layers=model_config.get("transunet_num_layers", 4),
+            transunet_num_heads=model_config.get("transunet_num_heads", 8),
+            transformer_use_coord_pos_enc=model_config.get(
+                "transformer_use_coord_pos_enc", True
+            ),
+            transformer_sea_mask_channel_index=model_config.get(
+                "transformer_sea_mask_channel_index", None
+            ),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
@@ -354,6 +419,17 @@ def main():
             n_discriminator_updates=model_config.get("n_discriminator_updates", 3),
             discriminator_lr_multiplier=model_config.get(
                 "discriminator_lr_multiplier", 1.0
+            ),
+            transunet_base_channels=model_config.get("transunet_base_channels", 32),
+            transunet_bottleneck_dim=model_config.get("transunet_bottleneck_dim", 512),
+            transunet_patch_size=model_config.get("transunet_patch_size", 8),
+            transunet_num_layers=model_config.get("transunet_num_layers", 4),
+            transunet_num_heads=model_config.get("transunet_num_heads", 8),
+            transformer_use_coord_pos_enc=model_config.get(
+                "transformer_use_coord_pos_enc", True
+            ),
+            transformer_sea_mask_channel_index=model_config.get(
+                "transformer_sea_mask_channel_index", None
             ),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,

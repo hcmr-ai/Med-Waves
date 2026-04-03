@@ -114,6 +114,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             fs=fs,
             max_cache_size=data_config.get("max_cache_size", 20),
             region_filter=region_filter,
+            add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
         )
 
     # if data_config.get("patch_size_deactivate", None) is not None:
@@ -161,6 +162,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         fs=fs,
         max_cache_size=data_config.get("max_cache_size", 20),
         region_filter=region_filter,
+        add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
     )
 
     # # Pre-compute wave bins and filter patches (if using patched dataset)

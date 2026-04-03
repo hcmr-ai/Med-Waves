@@ -24,6 +24,13 @@ def create_model(
     upsample_mode: str = "nearest",
     use_mdn: bool = False,
     auxiliary_tasks: list = None,  # ['vhm0', 'vtm02']
+    transunet_base_channels: int = 32,
+    transunet_bottleneck_dim: int = 512,
+    transunet_patch_size: int = 8,
+    transunet_num_layers: int = 4,
+    transunet_num_heads: int = 8,
+    transformer_use_coord_pos_enc: bool = True,
+    transformer_sea_mask_channel_index: int | None = None,
 ):
     """
     Factory function to create wave bias correction models.
@@ -84,11 +91,14 @@ def create_model(
             in_channels=in_channels,
             out_channels=1,
             auxiliary_tasks=auxiliary_tasks or ["vhm0"],
-            base_channels=64,
-            bottleneck_dim=1024,
-            patch_size=16,
-            num_layers=8,
+            base_channels=transunet_base_channels,
+            bottleneck_dim=transunet_bottleneck_dim,
+            patch_size=transunet_patch_size,
+            num_layers=transunet_num_layers,
+            num_heads=transunet_num_heads,
             use_mdn=use_mdn,
+            transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
+            transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
 
     elif model_type == "mlp":
@@ -133,6 +143,8 @@ def create_model(
             dropout=dropout,
             add_vhm0_residual=add_vhm0_residual,
             vhm0_channel_index=vhm0_channel_index,
+            use_mdn=use_mdn,
+            auxiliary_tasks=auxiliary_tasks or ["vhm0"],
         )
 
     else:
