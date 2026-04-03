@@ -56,9 +56,8 @@ pre-commit = "^4.2.0"
 pytest = "^8.0"
 pytest-cov = "^6.0"
 
-
 [[tool.poetry.source]]
 name = "torch-stable"
-url = "https://download.pytorch.org/whl/torch_stable.html"
+url = "https://download.pytorch.org/whl/cu128"
 priority = "explicit"
 

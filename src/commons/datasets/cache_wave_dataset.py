@@ -85,7 +85,7 @@ class CachedWaveDataset(Dataset):
         # self.index_map = [
         #     (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
         # ]
-        self.H, self.W = 380, 1307
+        self.H, self.W = None, None
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
         # worker-local cache with LRU eviction
         from collections import OrderedDict
@@ -122,6 +122,7 @@ class CachedWaveDataset(Dataset):
                     "predict_residual_to_prior currently supports residual_prior_task='vhm0' only."
                 )
         self.static_prior_bias = None
+        self.static_prior_is_cropped = False
         if self.predict_residual_to_prior:
             if self.prior_source != "static":
                 raise ValueError(
@@ -137,13 +138,6 @@ class CachedWaveDataset(Dataset):
                 raise ValueError(
                     f"Static bias map must be 2D after squeeze, got shape {static_map.shape}"
                 )
-            if static_map.shape != (self.H, self.W):
-                if static_map.shape == (self.W, self.H):
-                    static_map = static_map.T
-                else:
-                    raise ValueError(
-                        f"Static bias map shape {static_map.shape} incompatible with expected {(self.H, self.W)}"
-                    )
             self.static_prior_bias = torch.from_numpy(static_map.astype(np.float32))
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
@@ -156,6 +150,11 @@ class CachedWaveDataset(Dataset):
             self.is_hourly = sample_tensor.ndim == 3  # 3D=hourly, 4D=daily
             print(f"  Tensor shape: {sample_tensor.shape}")
             print(f"  File type: {'HOURLY' if self.is_hourly else 'DAILY'}")
+            if self.is_hourly:
+                self.H, self.W = sample_tensor.shape[0], sample_tensor.shape[1]
+            else:
+                self.H, self.W = sample_tensor.shape[1], sample_tensor.shape[2]
+            print(f"  Spatial size inferred from data: ({self.H}, {self.W})")
 
             # Precompute spatial crop indices for region filtering
             self.crop_h_indices = None
@@ -234,6 +233,43 @@ class CachedWaveDataset(Dataset):
                     f"  Removed {original_size - cropped_size} pixels ({(1 - cropped_size / original_size) * 100:.1f}% reduction)"
                 )
                 print(f"  Keeping only {self.region_filter} region")
+
+            if self.predict_residual_to_prior and self.static_prior_bias is not None:
+                full_shape = (self.H, self.W)
+                cropped_shape = None
+                if self.crop_h_indices is not None and self.crop_w_indices is not None:
+                    cropped_shape = (len(self.crop_h_indices), len(self.crop_w_indices))
+
+                prior_shape = tuple(self.static_prior_bias.shape)
+                if prior_shape == full_shape:
+                    self.static_prior_is_cropped = False
+                elif prior_shape == (full_shape[1], full_shape[0]):
+                    self.static_prior_bias = self.static_prior_bias.T.contiguous()
+                    self.static_prior_is_cropped = False
+                elif cropped_shape is not None and prior_shape == cropped_shape:
+                    self.static_prior_is_cropped = True
+                elif (
+                    cropped_shape is not None
+                    and prior_shape == (cropped_shape[1], cropped_shape[0])
+                ):
+                    self.static_prior_bias = self.static_prior_bias.T.contiguous()
+                    self.static_prior_is_cropped = True
+                else:
+                    raise ValueError(
+                        "Static bias map shape "
+                        f"{prior_shape} incompatible with expected full {full_shape}"
+                        + (
+                            f" or cropped {cropped_shape}"
+                            if cropped_shape is not None
+                            else ""
+                        )
+                    )
+
+                print(
+                    "  Static prior map shape accepted: "
+                    f"{tuple(self.static_prior_bias.shape)} "
+                    f"({'cropped' if self.static_prior_is_cropped else 'full-grid'})"
+                )
 
             self._fs = None  # Reset after sample load
             self._cache.clear()
@@ -430,7 +466,11 @@ class CachedWaveDataset(Dataset):
         prior_bias = None
         if self.predict_residual_to_prior and self.static_prior_bias is not None:
             prior_bias = self.static_prior_bias
-            if self.crop_h_indices is not None and self.crop_w_indices is not None:
+            if (
+                self.crop_h_indices is not None
+                and self.crop_w_indices is not None
+                and not self.static_prior_is_cropped
+            ):
                 prior_bias = prior_bias[self.crop_h_indices, :][:, self.crop_w_indices]
             if self.pixel_exclusion_mask is not None:
                 prior_bias = prior_bias.clone()
