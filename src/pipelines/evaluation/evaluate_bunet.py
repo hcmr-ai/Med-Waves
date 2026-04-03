@@ -2936,6 +2936,7 @@ def main():
             use_cache=False,  # Use cache for evaluation
             normalize_target=data_config.get("normalize_target", False),
             region_filter=data_config.get("region_filter", None),
+            add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
         )
     # Create test loader (use training batch size)
     # Note: num_workers=0 for reproducible evaluation
@@ -2992,6 +2993,7 @@ def main():
                 use_cache=False,
                 normalize_target=data_config.get("normalize_target", False),
                 region_filter=data_config.get("region_filter", None),
+                add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
             )
         train_loader = DataLoader(
             train_dataset,
