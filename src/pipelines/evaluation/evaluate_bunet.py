@@ -83,6 +83,8 @@ class ModelEvaluator:
         test_loader: DataLoader,
         output_dir: Path,
         predict_bias: bool = False,
+        predict_residual_to_prior: bool = False,
+        residual_prior_task: str = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         normalizer: WaveNormalizer = None,
         normalize_target: bool = False,
@@ -270,6 +272,7 @@ class ModelEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
         self.predict_bias = predict_bias
+        self.predict_residual_to_prior = predict_residual_to_prior
         self.normalizer = normalizer
         self.normalize_target = normalize_target
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
@@ -281,6 +284,13 @@ class ModelEvaluator:
         # For backward compatibility and single-task evaluation, use first target
         self.target_column = list(self.target_columns.values())[0]
         self.task_name = list(self.target_columns.keys())[0]
+        if residual_prior_task is None:
+            if "vhm0" in self.target_columns:
+                residual_prior_task = "vhm0"
+            else:
+                residual_prior_task = self.task_name
+        self.residual_prior_task = residual_prior_task
+        self.eval_in_bias_mode = self.predict_bias or self.predict_residual_to_prior
         print(self.target_column, self.task_name)
         print(self.target_columns)
 
@@ -1181,7 +1191,7 @@ class ModelEvaluator:
         return dnn_bias - offset
 
     def _process_batch(
-        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None
+        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None
     ):
         """Process a single batch and update accumulators.
 
@@ -1193,6 +1203,7 @@ class ModelEvaluator:
             y_pred: Model predictions (B, 1, H, W)
             timestamps: Batch timestamps for season extraction (optional)
             confidence: Model confidence values (B, H, W) (optional)
+            prior_bias: Static prior bias used in residual-to-prior mode (optional)
         """
         # Apply geographic mask if available
         if self.geo_mask is not None:
@@ -1217,7 +1228,16 @@ class ModelEvaluator:
         #     y_pred = self.normalizer.inverse_transform_torch(y_pred)
         #     y = self.normalizer.inverse_transform_torch(y)
 
-        if self.predict_bias:
+        if (
+            self.predict_residual_to_prior
+            and prior_bias is not None
+            and self.task_name == self.residual_prior_task
+        ):
+            # Dataset yields residuals (bias - prior); reconstruct bias first.
+            y = y + prior_bias
+            y_pred = y_pred + prior_bias
+
+        if self.eval_in_bias_mode:
             y_pred = self._recalibrate_domain_mean(y_pred, mask)
             y_pred = self._apply_static_blend(y_pred)
             y_pred = self._apply_low_bin_affine_calibration(
@@ -1228,7 +1248,7 @@ class ModelEvaluator:
             y_pred = self._apply_edcdf_blend(y_pred, vhm0, y_true_bias=y)
 
         # ========== COMPUTE SPATIAL ERROR MAPS FIRST (using full 4D tensors) ==========
-        if self.predict_bias:
+        if self.eval_in_bias_mode:
             # Reconstruct full wave heights (4D tensors)
             y_pred_full = self._reconstruct_wave_heights(y_pred, vhm0)
             y_true_full = self._reconstruct_wave_heights(y, vhm0)
@@ -1298,7 +1318,7 @@ class ModelEvaluator:
         y_pred_flat = y_pred.flatten()[mask_flat]
 
         # Reconstruct wave heights if predicting bias
-        if self.predict_bias and vhm0 is not None:
+        if self.eval_in_bias_mode and vhm0 is not None:
             vhm0_flat = vhm0.flatten()[mask_flat]
             y_true_wave_heights = self._reconstruct_wave_heights(y_true_flat, vhm0_flat)
             y_pred_wave_heights = self._reconstruct_wave_heights(y_pred_flat, vhm0_flat)
@@ -1631,7 +1651,11 @@ class ModelEvaluator:
                 tqdm(self.test_loader, desc="Processing batches")
             ):
                 # Unpack batch
-                X, y, mask, vhm0_batch = batch
+                prior_bias_batch = None
+                if len(batch) == 5:
+                    X, y, mask, vhm0_batch, prior_bias_batch = batch
+                else:
+                    X, y, mask, vhm0_batch = batch
                 vhm0 = vhm0_batch.to(self.device) if vhm0_batch is not None else None
 
                 # Handle multi-task vs single-task format
@@ -1650,6 +1674,9 @@ class ModelEvaluator:
 
                 if vhm0 is not None:
                     vhm0, _ = pad_to_multiple(vhm0, multiple=16)
+                if prior_bias_batch is not None:
+                    prior_bias_batch = prior_bias_batch.to(self.device)
+                    prior_bias_batch, _ = pad_to_multiple(prior_bias_batch, multiple=16)
 
                 # Load timestamps from test files for seasonal analysis
                 timestamps = None
@@ -1729,10 +1756,21 @@ class ModelEvaluator:
                         self.low_wave_model is not None
                         or self.high_wave_model is not None
                     ) and vhm0 is not None:
+                        y_for_wave_mask = y
+                        if (
+                            self.predict_residual_to_prior
+                            and prior_bias_batch is not None
+                            and self.task_name == self.residual_prior_task
+                        ):
+                            y_for_wave_mask = y + prior_bias_batch
                         # Create masks for different wave height ranges
-                        low_wave_mask = ((vhm0+y) >= 0.0) & ((vhm0+y) <= 3.0)
+                        low_wave_mask = ((vhm0 + y_for_wave_mask) >= 0.0) & (
+                            (vhm0 + y_for_wave_mask) <= 3.0
+                        )
                         # high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
-                        high_wave_mask = ((vhm0+y) >= 5.0) & ((vhm0+y) <= 11.0)
+                        high_wave_mask = ((vhm0 + y_for_wave_mask) >= 5.0) & (
+                            (vhm0 + y_for_wave_mask) <= 11.0
+                        )
                         mid_wave_mask = ~(low_wave_mask | high_wave_mask)
 
                         # Get predictions from all models
@@ -1801,9 +1839,9 @@ class ModelEvaluator:
                             # --- Alternative A: outlier ratio clamping ---
                             max_bias_ratio = 1.5
                             delta = 0.035
-                            if self.predict_bias:
+                            if self.eval_in_bias_mode:
                                 corrected = vhm0 + y_pred
-                                true_wave = vhm0 + y  # ground truth
+                                true_wave = vhm0 + y_for_wave_mask  # ground truth
                                 outlier_mask = (corrected.abs() > (max_bias_ratio * vhm0.abs().clamp(min=0.1))) & (true_wave >= 11.0)
                                 outlier_mask = (true_wave >= 11.0)
                                 if outlier_mask.any():
@@ -1922,6 +1960,8 @@ class ModelEvaluator:
 
                 if vhm0 is not None:
                     vhm0 = vhm0[:, :, :min_h, :min_w]
+                if prior_bias_batch is not None:
+                    prior_bias_batch = prior_bias_batch[:, :, :min_h, :min_w]
 
                 if confidence is not None:
                     confidence = confidence[:, :min_h, :min_w]
@@ -1949,7 +1989,14 @@ class ModelEvaluator:
                     y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
                 # Process batch and update accumulators
                 self._process_batch(
-                    X_cropped, y, mask, vhm0, y_pred, timestamps, confidence
+                    X_cropped,
+                    y,
+                    mask,
+                    vhm0,
+                    y_pred,
+                    timestamps,
+                    confidence,
+                    prior_bias_batch,
                 )
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
@@ -1979,7 +2026,7 @@ class ModelEvaluator:
             data_loader=self.bias_loader,
             device=self.device,
             bins=self.bins,
-            predict_bias=self.predict_bias,
+            predict_bias=self.eval_in_bias_mode,
             normalize_target=self.normalize_target,
             normalizer=self.normalizer,
             unit=self.unit,
@@ -2035,7 +2082,7 @@ class ModelEvaluator:
             sum_y_pred=self.sum_y_pred,
             sum_y_pred_sq=self.sum_y_pred_sq,
             sum_y_true_y_pred=self.sum_y_true_y_pred,
-            predict_bias=self.predict_bias,
+            predict_bias=self.eval_in_bias_mode,
         )
 
     def compute_sea_bin_metrics(self) -> Dict[str, Dict]:
@@ -2822,6 +2869,13 @@ def main():
     training_config = config.config["training"]
     data_config = config.config["data"]
     predict_bias = data_config.get("predict_bias", False)
+    predict_residual_to_prior = data_config.get("predict_residual_to_prior", False)
+    residual_prior_task = data_config.get("residual_prior_task", None)
+    prior_source = data_config.get("prior_source", "none")
+    if predict_bias and predict_residual_to_prior:
+        raise ValueError(
+            "Only one of data.predict_bias or data.predict_residual_to_prior can be enabled for evaluation."
+        )
 
     # Support both old target_column (str) and new target_columns (dict)
     target_columns = data_config.get("target_columns", None)
@@ -2935,6 +2989,10 @@ def main():
             excluded_columns=excluded_columns,
             target_columns=target_columns,
             predict_bias=predict_bias,
+            predict_residual_to_prior=predict_residual_to_prior,
+            prior_source=prior_source,
+            static_bias_map_path=data_config.get("static_bias_map_path", None),
+            residual_prior_task=residual_prior_task,
             subsample_step=subsample_step,
             normalizer=normalizer,
             enable_profiler=False,
@@ -2992,6 +3050,10 @@ def main():
                 excluded_columns=excluded_columns,
                 target_columns=target_columns,
                 predict_bias=predict_bias,
+                predict_residual_to_prior=predict_residual_to_prior,
+                prior_source=prior_source,
+                static_bias_map_path=data_config.get("static_bias_map_path", None),
+                residual_prior_task=residual_prior_task,
                 subsample_step=subsample_step,
                 normalizer=normalizer,
                 enable_profiler=False,
@@ -3048,7 +3110,11 @@ def main():
 
         logger.info(f"Loading model from {checkpoint}...")
         model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
-        logger.info(f"Model loaded. predict_bias={predict_bias}")
+        logger.info(
+            "Model loaded. predict_bias=%s, predict_residual_to_prior=%s",
+            predict_bias,
+            predict_residual_to_prior,
+        )
 
         if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
             logger.info("Applying EMA weights for evaluation...")
@@ -3093,6 +3159,8 @@ def main():
             / config.config["logging"]["experiment_name"]
             / str(test_year) /checkpoint.stem,  # Use checkpoint filename without extension
             predict_bias=predict_bias,
+            predict_residual_to_prior=predict_residual_to_prior,
+            residual_prior_task=residual_prior_task,
             device="cuda",
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),

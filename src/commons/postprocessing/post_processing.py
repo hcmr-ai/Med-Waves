@@ -132,7 +132,10 @@ def compute_global_bin_biases(
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Computing biases from train/val"):
             # Unpack batch
-            X, y, mask, vhm0_batch = batch
+            if len(batch) == 5:
+                X, y, mask, vhm0_batch, _prior_bias_batch = batch
+            else:
+                X, y, mask, vhm0_batch = batch
             vhm0 = vhm0_batch.to(device) if vhm0_batch is not None else None
 
             # Handle multi-task vs single-task format
