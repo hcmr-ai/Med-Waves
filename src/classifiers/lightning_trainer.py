@@ -72,6 +72,7 @@ class WaveBiasCorrector(pl.LightningModule):
         predict_residual_to_prior=False,
         residual_prior_task="vhm0",
         residual_penalty_lambda=0.0,
+        huber_delta=1.0,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["normalizer"])
@@ -145,6 +146,7 @@ class WaveBiasCorrector(pl.LightningModule):
         self.predict_residual_to_prior = predict_residual_to_prior
         self.residual_prior_task = residual_prior_task
         self.residual_penalty_lambda = residual_penalty_lambda
+        self.huber_delta = float(huber_delta)
         self.normalizer = normalizer
         self.normalize_target = normalize_target
     
@@ -274,6 +276,7 @@ class WaveBiasCorrector(pl.LightningModule):
             ssim_loss=self.ssim_loss if hasattr(self, "ssim_loss") else None,
             residual_pred=residual_pred,
             residual_penalty_lambda=self.residual_penalty_lambda,
+            huber_delta=self.huber_delta,
         )
 
     def _reconstruct_with_prior(self, predictions, targets, prior_bias):
@@ -360,6 +363,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 ssim_loss=self.ssim_loss if hasattr(self, "ssim_loss") else None,
                 residual_pred=residual_pred,
                 residual_penalty_lambda=self.residual_penalty_lambda,
+                huber_delta=self.huber_delta,
             )
 
             total_loss += weight * task_loss

@@ -38,6 +38,46 @@ def masked_huber_loss(y_pred, y_true, mask, delta=1.0):
     return huber_loss.mean()
 
 
+def masked_classical_huber_loss(y_pred, y_true, mask, delta=1.0):
+    """
+    Classical (delta-scaled) Huber loss, masked version.
+
+    Piecewise form:
+      0.5 * e^2                  if |e| <= delta
+      delta * (|e| - 0.5*delta)  otherwise
+
+    This differs from SmoothL1-style Huber where the quadratic branch is divided by delta.
+    """
+    min_h = min(y_pred.shape[2], y_true.shape[2])
+    min_w = min(y_pred.shape[3], y_true.shape[3])
+
+    # Crop to common size
+    y_pred = y_pred[:, :, :min_h, :min_w]
+    y_true = y_true[:, :, :min_h, :min_w]
+    mask = mask[:, :, :min_h, :min_w]
+
+    if not mask.any():
+        return torch.tensor(0.0, device=y_true.device)
+
+    if delta <= 0:
+        raise ValueError(f"delta must be > 0 for classical Huber, got {delta}")
+
+    # Clean NaNs
+    y_clean = torch.nan_to_num(y_true, nan=0.0)
+    y_pred_clean = torch.nan_to_num(y_pred, nan=0.0)
+
+    # Apply mask
+    error = torch.abs(y_pred_clean[mask] - y_clean[mask])
+    less_than_delta = error < delta
+
+    classical_huber = torch.where(
+        less_than_delta,
+        0.5 * (error**2),  # Quadratic regime
+        delta * (error - 0.5 * delta),  # Linear regime with slope=delta
+    )
+    return classical_huber.mean()
+
+
 def _huber_per_pixel(error, delta):
     """Element-wise Huber: quadratic for |e|<delta, linear beyond."""
     return torch.where(

@@ -42,6 +42,9 @@ from src.commons.postprocessing.post_processing import (
 )
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.evaluation.evaluation_plots import (
+    plot_coastal_distance_improvement as plot_coastal_distance_improvement_fn,
+)
+from src.evaluation.evaluation_plots import (
     plot_error_boxplots as plot_error_boxplots_fn,
 )
 from src.evaluation.evaluation_plots import (
@@ -55,6 +58,12 @@ from src.evaluation.evaluation_plots import (
 )
 from src.evaluation.evaluation_plots import (
     plot_model_better_percentage as plot_model_better_percentage_fn,
+)
+from src.evaluation.evaluation_plots import (
+    plot_low_bin_advanced_diagnostics as plot_low_bin_advanced_diagnostics_fn,
+)
+from src.evaluation.evaluation_plots import (
+    plot_low_bin_spatial_maps as plot_low_bin_spatial_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
     plot_rmse_maps as plot_rmse_maps_fn,
@@ -72,6 +81,11 @@ from src.evaluation.metrics import (
 from src.evaluation.visuals import load_coordinates_from_parquet
 
 logger = logging.getLogger(__name__)
+
+try:
+    from scipy.ndimage import distance_transform_edt
+except Exception:
+    distance_transform_edt = None
 
 
 class ModelEvaluator:
@@ -107,6 +121,9 @@ class ModelEvaluator:
         edcdf_blend_sigma: float = None,
         edcdf_hard_fallback_bins: List[List[float]] = None,
         edcdf_fallback_bin_source: str = "raw",
+        prior_hard_fallback_bins: List[List[float]] = None,
+        prior_fallback_bin_source: str = "raw",
+        prior_fallback_target: str = "prior",
         low_bin_affine_params: List[dict] = None,
         low_bin_affine_source: str = "raw",
     ):
@@ -301,6 +318,15 @@ class ModelEvaluator:
             logger.info("Applying DeltaCorrector to predictions for bins >= 11m")
         self._configure_sea_bins()
         self._configure_labels()
+        self.low_bin_spatial_subbins = [(0.0, 0.1), (0.1, 0.2)]
+        self.coastal_distance_bins_km = [
+            (0.0, 10.0),
+            (10.0, 25.0),
+            (25.0, 50.0),
+            (50.0, float("inf")),
+        ]
+        self.coastal_distance_km_map = None
+        self.coastal_distance_bin_idx_map = None
 
         self.test_files = test_files
         self.subsample_step = subsample_step
@@ -320,6 +346,7 @@ class ModelEvaluator:
 
         # Initialize accumulators for incremental computation
         self._reset_accumulators()
+        self._init_coastal_distance_diagnostics()
 
         # Sample storage for plots (optional, limited size)
         self.plot_samples = {
@@ -370,6 +397,40 @@ class ModelEvaluator:
             logger.info(
                 "EDCDF hard fallback gating is not using true bins "
                 f"(source='{self.edcdf_fallback_bin_source}'). "
+                "Sea-bin plots use true bins, so fallback coverage may differ from plotted bins."
+            )
+        self.prior_hard_fallback_bins = self._parse_wave_bin_ranges(
+            prior_hard_fallback_bins
+        )
+        self.prior_fallback_bin_source = (
+            str(prior_fallback_bin_source).strip().lower()
+            if prior_fallback_bin_source is not None
+            else "raw"
+        )
+        if self.prior_fallback_bin_source not in {"raw", "true"}:
+            logger.warning(
+                f"Unknown prior_fallback_bin_source='{prior_fallback_bin_source}', using 'raw'"
+            )
+            self.prior_fallback_bin_source = "raw"
+        self.prior_fallback_target = (
+            str(prior_fallback_target).strip().lower()
+            if prior_fallback_target is not None
+            else "prior"
+        )
+        if self.prior_fallback_target not in {"prior", "raw"}:
+            logger.warning(
+                f"Unknown prior_fallback_target='{prior_fallback_target}', using 'prior'"
+            )
+            self.prior_fallback_target = "prior"
+        self._prior_fallback_total_valid = 0
+        self._prior_fallback_total_applied = 0
+        self._prior_fallback_applied_per_bin = {
+            f"[{lo},{hi})": 0 for lo, hi in self.prior_hard_fallback_bins
+        }
+        if self.prior_hard_fallback_bins and self.prior_fallback_bin_source != "true":
+            logger.info(
+                "Prior hard fallback gating is not using true bins "
+                f"(source='{self.prior_fallback_bin_source}'). "
                 "Sea-bin plots use true bins, so fallback coverage may differ from plotted bins."
             )
 
@@ -484,6 +545,87 @@ class ModelEvaluator:
             logger.warning(f"Could not load EDCDF model from {path}: {e}")
             self.edcdf_corrector = None
 
+    def _format_distance_bin_label(self, lo: float, hi: float) -> str:
+        if np.isinf(hi):
+            return f">={int(lo)}km"
+        return f"{int(lo)}-{int(hi)}km"
+
+    def _init_coastal_distance_diagnostics(self):
+        """Build distance-to-coast map (km) and per-pixel distance-bin map."""
+        if distance_transform_edt is None:
+            logger.warning(
+                "scipy.ndimage.distance_transform_edt unavailable; coastal diagnostics disabled."
+            )
+            return
+        try:
+            dataset = self.test_loader.dataset
+            if not hasattr(dataset, "get_coordinates"):
+                logger.warning("Dataset has no get_coordinates; coastal diagnostics disabled.")
+                return
+
+            lat_grid, lon_grid = dataset.get_coordinates()
+            lat_grid = np.asarray(lat_grid, dtype=np.float64)
+            lon_grid = np.asarray(lon_grid, dtype=np.float64)
+            if lat_grid.ndim != 2 or lon_grid.ndim != 2:
+                logger.warning("Invalid coordinate grids for coastal diagnostics.")
+                return
+
+            # Use first sample mask as static sea/land proxy.
+            sample = dataset[0]
+            if not isinstance(sample, (tuple, list)) or len(sample) < 3:
+                logger.warning("Could not read sample mask for coastal diagnostics.")
+                return
+            sample_mask = sample[2]
+            if isinstance(sample_mask, torch.Tensor):
+                sample_mask_np = sample_mask.detach().cpu().numpy()
+            else:
+                sample_mask_np = np.asarray(sample_mask)
+            if sample_mask_np.ndim == 3:
+                sea_mask = sample_mask_np[0].astype(bool)
+            elif sample_mask_np.ndim == 2:
+                sea_mask = sample_mask_np.astype(bool)
+            else:
+                logger.warning("Unexpected sample mask shape for coastal diagnostics.")
+                return
+
+            # Estimate km spacing per pixel from coordinate grid.
+            lat_diffs = np.abs(np.diff(lat_grid, axis=0))
+            lon_diffs = np.abs(np.diff(lon_grid, axis=1))
+            lat_step_deg = np.nanmedian(lat_diffs[np.isfinite(lat_diffs)])
+            lon_step_deg = np.nanmedian(lon_diffs[np.isfinite(lon_diffs)])
+            mean_lat = np.nanmean(lat_grid[np.isfinite(lat_grid)])
+            lat_km = max(1e-6, 111.32 * lat_step_deg)
+            lon_km = max(1e-6, 111.32 * np.cos(np.deg2rad(mean_lat)) * lon_step_deg)
+
+            if not np.isfinite(lat_km) or not np.isfinite(lon_km):
+                logger.warning("Invalid coordinate spacing; coastal diagnostics disabled.")
+                return
+
+            # Distance to nearest land for sea pixels.
+            dist_km = distance_transform_edt(sea_mask, sampling=(lat_km, lon_km)).astype(
+                np.float64
+            )
+            dist_km[~sea_mask] = np.nan
+
+            bin_idx = np.full(dist_km.shape, -1, dtype=np.int16)
+            for i, (lo, hi) in enumerate(self.coastal_distance_bins_km):
+                if np.isinf(hi):
+                    m = sea_mask & (dist_km >= lo)
+                else:
+                    m = sea_mask & (dist_km >= lo) & (dist_km < hi)
+                bin_idx[m] = i
+
+            self.coastal_distance_km_map = dist_km
+            self.coastal_distance_bin_idx_map = bin_idx
+            logger.info(
+                "Initialized coastal diagnostics with bins: %s",
+                [self._format_distance_bin_label(lo, hi) for lo, hi in self.coastal_distance_bins_km],
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize coastal diagnostics: {e}")
+            self.coastal_distance_km_map = None
+            self.coastal_distance_bin_idx_map = None
+
     def _reset_accumulators(self):
         """Reset all metric accumulators."""
         # Overall metrics - using Welford's algorithm for stable variance
@@ -528,6 +670,41 @@ class ModelEvaluator:
         }
 
         self.spatial_rmse_accumulators = {}
+        self.low_bin_spatial_accumulators = {
+            f"{lo:.1f}_{hi:.1f}": {
+                "sum_delta_abs_err": None,
+                "sum_model_err": None,
+                "sum_base_err": None,
+                "count": None,
+                "count_worse": None,
+            }
+            for lo, hi in self.low_bin_spatial_subbins
+        }
+        self.low_bin_plot_sample_limit_per_subbin = 250000
+        self.low_bin_plot_samples = {
+            f"{lo:.1f}_{hi:.1f}": {
+                "true_wave": [],
+                "pred_wave": [],
+                "raw_wave": [],
+                "true_bias": [],
+                "pred_bias": [],
+                "prior_bias": [],
+            }
+            for lo, hi in self.low_bin_spatial_subbins
+        }
+        self.coastal_distance_accumulators = {
+            i: {
+                "label": self._format_distance_bin_label(lo, hi),
+                "count": 0,
+                "sum_mae": 0.0,
+                "sum_mse": 0.0,
+                "sum_bias": 0.0,
+                "sum_baseline_mae": 0.0,
+                "sum_baseline_mse": 0.0,
+                "sum_baseline_bias": 0.0,
+            }
+            for i, (lo, hi) in enumerate(self.coastal_distance_bins_km)
+        }
 
         # Category breakdown accumulators: corrected vs not_corrected
         self.category_breakdown = {}
@@ -681,10 +858,57 @@ class ModelEvaluator:
             samples["model_err"].extend(model_err[:take].tolist())
             samples["base_err"].extend(base_err[:take].tolist())
 
+    def _update_low_bin_spatial_accumulators(
+        self,
+        y_true_4d: torch.Tensor,
+        y_pred_4d: torch.Tensor,
+        y_base_4d: torch.Tensor,
+        valid_mask_4d: torch.Tensor,
+    ) -> None:
+        """Accumulate spatial diagnostics for ultra-calm true-wave sub-bins."""
+        if y_base_4d is None:
+            return
+
+        y_true_np = y_true_4d.detach().cpu().numpy()
+        y_pred_np = y_pred_4d.detach().cpu().numpy()
+        y_base_np = y_base_4d.detach().cpu().numpy()
+        valid_np = valid_mask_4d.detach().cpu().numpy().astype(bool)
+
+        abs_err_model = np.abs(y_pred_np - y_true_np)
+        abs_err_base = np.abs(y_base_np - y_true_np)
+        delta_abs_err = abs_err_model - abs_err_base
+        model_err = y_pred_np - y_true_np
+        base_err = y_base_np - y_true_np
+
+        spatial_shape = y_true_np.shape[-2:]
+        for lo, hi in self.low_bin_spatial_subbins:
+            key = f"{lo:.1f}_{hi:.1f}"
+            stats = self.low_bin_spatial_accumulators[key]
+            if stats["count"] is None:
+                stats["sum_delta_abs_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["sum_model_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["sum_base_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["count"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["count_worse"] = np.zeros(spatial_shape, dtype=np.float64)
+
+            submask = valid_np & (y_true_np >= lo) & (y_true_np < hi)
+            if not np.any(submask):
+                continue
+
+            stats["sum_delta_abs_err"] += (delta_abs_err * submask).sum(axis=(0, 1))
+            stats["sum_model_err"] += (model_err * submask).sum(axis=(0, 1))
+            stats["sum_base_err"] += (base_err * submask).sum(axis=(0, 1))
+            stats["count"] += submask.sum(axis=(0, 1))
+            stats["count_worse"] += (
+                ((abs_err_model > abs_err_base) & submask).sum(axis=(0, 1))
+            )
+
     def _save_low_bin_diagnostics(self, sea_bin_metrics: Dict[str, dict]) -> None:
         """Write detailed low-bin diagnostics (JSON + CSV)."""
         if not self.low_bin_diagnostics:
             return
+        low_bin_dir = self.output_dir / "low_bin_spatial_maps"
+        low_bin_dir.mkdir(parents=True, exist_ok=True)
 
         report = {}
         rows = []
@@ -774,11 +998,11 @@ class ModelEvaluator:
             report[bin_name] = overall
 
         if report:
-            with open(self.output_dir / "low_bin_diagnostics.json", "w") as f:
+            with open(low_bin_dir / "low_bin_diagnostics.json", "w") as f:
                 json.dump(report, f, indent=2)
 
         if rows:
-            csv_path = self.output_dir / "low_bin_subbin_metrics.csv"
+            csv_path = low_bin_dir / "low_bin_subbin_metrics.csv"
             fieldnames = [
                 "bin_name",
                 "true_subbin_label",
@@ -799,6 +1023,165 @@ class ModelEvaluator:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows)
+
+    def _update_low_bin_plot_samples(
+        self,
+        y_true_wave: np.ndarray,
+        y_pred_wave: np.ndarray,
+        raw_wave: np.ndarray,
+        y_true_bias: np.ndarray,
+        y_pred_bias: np.ndarray,
+        prior_bias: np.ndarray = None,
+    ) -> None:
+        """Collect bounded sample sets for low-bin advanced diagnostics."""
+        if raw_wave is None:
+            return
+        if y_true_wave is None or y_pred_wave is None:
+            return
+
+        for lo, hi in self.low_bin_spatial_subbins:
+            key = f"{lo:.1f}_{hi:.1f}"
+            buf = self.low_bin_plot_samples.get(key)
+            if buf is None:
+                continue
+
+            mask = (
+                np.isfinite(y_true_wave)
+                & np.isfinite(y_pred_wave)
+                & np.isfinite(raw_wave)
+                & (y_true_wave >= lo)
+                & (y_true_wave < hi)
+            )
+            idx = np.where(mask)[0]
+            if len(idx) == 0:
+                continue
+
+            remaining = self.low_bin_plot_sample_limit_per_subbin - len(buf["true_wave"])
+            if remaining <= 0:
+                continue
+
+            if len(idx) > remaining:
+                idx = np.random.choice(idx, size=remaining, replace=False)
+
+            buf["true_wave"].extend(y_true_wave[idx].tolist())
+            buf["pred_wave"].extend(y_pred_wave[idx].tolist())
+            buf["raw_wave"].extend(raw_wave[idx].tolist())
+            if y_true_bias is not None:
+                buf["true_bias"].extend(y_true_bias[idx].tolist())
+            if y_pred_bias is not None:
+                buf["pred_bias"].extend(y_pred_bias[idx].tolist())
+            if prior_bias is not None:
+                pb = prior_bias[idx]
+                pb = np.where(np.isfinite(pb), pb, np.nan)
+                buf["prior_bias"].extend(pb.tolist())
+
+    def _update_coastal_distance_accumulators(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        y_base: np.ndarray,
+        coastal_bin_ids: np.ndarray,
+    ) -> None:
+        """Update per-distance-to-coast error accumulators."""
+        if y_base is None or self.coastal_distance_bin_idx_map is None:
+            return
+        if len(y_true) == 0:
+            return
+
+        valid = (
+            np.isfinite(y_true)
+            & np.isfinite(y_pred)
+            & np.isfinite(y_base)
+            & np.isfinite(coastal_bin_ids)
+            & (coastal_bin_ids >= 0)
+        )
+        if not np.any(valid):
+            return
+
+        yt = y_true[valid]
+        yp = y_pred[valid]
+        yb = y_base[valid]
+        ids = coastal_bin_ids[valid].astype(np.int64)
+
+        err = yp - yt
+        berr = yb - yt
+
+        for i in np.unique(ids):
+            m = ids == i
+            if not np.any(m):
+                continue
+            stats = self.coastal_distance_accumulators.get(int(i))
+            if stats is None:
+                continue
+            stats["count"] += int(np.sum(m))
+            stats["sum_mae"] += float(np.sum(np.abs(err[m])))
+            stats["sum_mse"] += float(np.sum(err[m] ** 2))
+            stats["sum_bias"] += float(np.sum(err[m]))
+            stats["sum_baseline_mae"] += float(np.sum(np.abs(berr[m])))
+            stats["sum_baseline_mse"] += float(np.sum(berr[m] ** 2))
+            stats["sum_baseline_bias"] += float(np.sum(berr[m]))
+
+    def _save_coastal_distance_diagnostics(self) -> None:
+        """Save coastal-distance metrics to CSV and plot."""
+        if not self.coastal_distance_accumulators:
+            return
+
+        rows = []
+        for i in sorted(self.coastal_distance_accumulators.keys()):
+            s = self.coastal_distance_accumulators[i]
+            c = int(s["count"])
+            if c > 0:
+                rmse = float(np.sqrt(s["sum_mse"] / c))
+                mae = float(s["sum_mae"] / c)
+                bias = float(s["sum_bias"] / c)
+                brmse = float(np.sqrt(s["sum_baseline_mse"] / c))
+                bmae = float(s["sum_baseline_mae"] / c)
+                bbias = float(s["sum_baseline_bias"] / c)
+                rmse_imp = (brmse - rmse) / brmse * 100.0 if brmse > 0 else None
+                mae_imp = (bmae - mae) / bmae * 100.0 if bmae > 0 else None
+            else:
+                rmse = None
+                mae = None
+                bias = None
+                brmse = None
+                bmae = None
+                bbias = None
+                rmse_imp = None
+                mae_imp = None
+            rows.append(
+                {
+                    "distance_bin_km": s["label"],
+                    "count": c,
+                    "model_rmse": rmse,
+                    "baseline_rmse": brmse,
+                    "rmse_improvement_pct": rmse_imp,
+                    "model_mae": mae,
+                    "baseline_mae": bmae,
+                    "mae_improvement_pct": mae_imp,
+                    "model_bias": bias,
+                    "baseline_bias": bbias,
+                }
+            )
+
+        csv_path = self.output_dir / "coastal_distance_metrics.csv"
+        fieldnames = [
+            "distance_bin_km",
+            "count",
+            "model_rmse",
+            "baseline_rmse",
+            "rmse_improvement_pct",
+            "model_mae",
+            "baseline_mae",
+            "mae_improvement_pct",
+            "model_bias",
+            "baseline_bias",
+        ]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        plot_coastal_distance_improvement_fn(rows, self.output_dir)
 
     def _configure_labels(self):
         """Configure dynamic labels based on target_column."""
@@ -1175,6 +1558,59 @@ class ModelEvaluator:
             out = torch.where(mask, adjusted, out)
         return out
 
+    def _apply_prior_hard_fallback(
+        self,
+        dnn_bias: torch.Tensor,
+        prior_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """Replace DNN bias with configured fallback target in selected bins.
+
+        prior_fallback_target:
+          - "prior": replace with static prior bias
+          - "raw": replace with raw baseline in wave space (bias=0)
+        """
+        if not self.prior_hard_fallback_bins or raw_uncorrected is None:
+            return dnn_bias
+
+        if self.prior_fallback_bin_source == "true":
+            if y_true_bias is None:
+                logger.warning(
+                    "prior_fallback_bin_source='true' requires y_true_bias; using 'raw' source."
+                )
+                gate_values = raw_uncorrected
+            else:
+                gate_values = y_true_bias + raw_uncorrected
+        else:
+            gate_values = raw_uncorrected
+
+        if self.prior_fallback_target == "raw":
+            replacement_bias = torch.zeros_like(dnn_bias)
+            valid = torch.isfinite(raw_uncorrected)
+        else:
+            if prior_bias is None:
+                return dnn_bias
+            replacement_bias = prior_bias
+            valid = torch.isfinite(prior_bias)
+
+        fallback_mask = torch.zeros_like(raw_uncorrected, dtype=torch.bool)
+        for lo, hi in self.prior_hard_fallback_bins:
+            fallback_mask = fallback_mask | ((gate_values >= lo) & (gate_values < hi))
+        fallback_mask = fallback_mask & valid
+
+        self._prior_fallback_total_valid += int(valid.sum().item())
+        self._prior_fallback_total_applied += int(fallback_mask.sum().item())
+        for lo, hi in self.prior_hard_fallback_bins:
+            key = f"[{lo},{hi})"
+            bin_mask = ((gate_values >= lo) & (gate_values < hi) & valid)
+            self._prior_fallback_applied_per_bin[key] = (
+                self._prior_fallback_applied_per_bin.get(key, 0)
+                + int(bin_mask.sum().item())
+            )
+
+        return torch.where(fallback_mask, replacement_bias, dnn_bias)
+
     def _recalibrate_domain_mean(
         self, dnn_bias: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
@@ -1243,6 +1679,9 @@ class ModelEvaluator:
             y_pred = self._apply_low_bin_affine_calibration(
                 y_pred, vhm0, y_true_bias=y
             )
+            y_pred = self._apply_prior_hard_fallback(
+                y_pred, prior_bias, vhm0, y_true_bias=y
+            )
             # Keep EDCDF blend/fallback last so configured hard-fallback bins
             # are guaranteed to end up with EDCDF bias.
             y_pred = self._apply_edcdf_blend(y_pred, vhm0, y_true_bias=y)
@@ -1264,6 +1703,9 @@ class ModelEvaluator:
             error_map_baseline_mae = (
                 (y_baseline_full - y_true_full).abs().cpu().numpy()
             )  # (N, C, H, W)
+            y_true_wave_4d = y_true_full
+            y_pred_wave_4d = y_pred_full
+            y_base_wave_4d = y_baseline_full
         else:
             # Not predicting bias
             error_map = ((y_pred - y) ** 2).cpu().numpy()  # (N, C, H, W)
@@ -1271,9 +1713,13 @@ class ModelEvaluator:
             if vhm0 is not None:
                 error_map_baseline = ((vhm0 - y) ** 2).cpu().numpy()  # (N, C, H, W)
                 error_map_baseline_mae = (vhm0 - y).abs().cpu().numpy()  # (N, C, H, W)
+                y_base_wave_4d = vhm0
             else:
                 error_map_baseline = None
                 error_map_baseline_mae = None
+                y_base_wave_4d = None
+            y_true_wave_4d = y
+            y_pred_wave_4d = y_pred
 
         combined_mask = mask.float()
         if self.atlantic_exclusion_mask is not None:
@@ -1281,6 +1727,13 @@ class ModelEvaluator:
             h, w = combined_mask.shape[2], combined_mask.shape[3]
             exc = self.atlantic_exclusion_mask[:h, :w].float()
             combined_mask = combined_mask * exc.unsqueeze(0).unsqueeze(0)
+
+        self._update_low_bin_spatial_accumulators(
+            y_true_4d=y_true_wave_4d,
+            y_pred_4d=y_pred_wave_4d,
+            y_base_4d=y_base_wave_4d,
+            valid_mask_4d=combined_mask,
+        )
         count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
@@ -1332,6 +1785,10 @@ class ModelEvaluator:
             y_uncorrected = vhm0_flat
         else:
             y_uncorrected = None
+        if prior_bias is not None:
+            prior_bias_flat = prior_bias.flatten()[mask_flat]
+        else:
+            prior_bias_flat = None
 
         # Filter out extreme wave heights (true VHM0 >= 11m)
         # valid_range_mask = y_true_wave_heights < 11.0
@@ -1344,6 +1801,38 @@ class ModelEvaluator:
         # Convert to numpy for binning
         y_true_np = y_true_wave_heights.cpu().numpy()
         y_pred_np = y_pred_wave_heights.cpu().numpy()
+        y_true_bias_np = y_true_flat.cpu().numpy() if self.eval_in_bias_mode else None
+        y_pred_bias_np = y_pred_flat.cpu().numpy() if self.eval_in_bias_mode else None
+        y_uncorrected_np = y_uncorrected.cpu().numpy() if y_uncorrected is not None else None
+        prior_bias_np = (
+            prior_bias_flat.cpu().numpy() if prior_bias_flat is not None else None
+        )
+        coastal_bin_ids = None
+        if self.coastal_distance_bin_idx_map is not None:
+            h, w = mask_combined.shape[2], mask_combined.shape[3]
+            idx2d = self.coastal_distance_bin_idx_map[:h, :w]
+            idx_t = torch.from_numpy(idx2d).to(mask_combined.device)
+            idx4d = idx_t.unsqueeze(0).unsqueeze(0).expand(
+                mask_combined.shape[0], mask_combined.shape[1], h, w
+            )
+            coastal_bin_ids = idx4d.flatten()[mask_flat].cpu().numpy()
+
+        if self.eval_in_bias_mode and y_uncorrected_np is not None:
+            self._update_low_bin_plot_samples(
+                y_true_wave=y_true_np,
+                y_pred_wave=y_pred_np,
+                raw_wave=y_uncorrected_np,
+                y_true_bias=y_true_bias_np,
+                y_pred_bias=y_pred_bias_np,
+                prior_bias=prior_bias_np,
+            )
+        if y_uncorrected_np is not None and coastal_bin_ids is not None:
+            self._update_coastal_distance_accumulators(
+                y_true=y_true_np,
+                y_pred=y_pred_np,
+                y_base=y_uncorrected_np,
+                coastal_bin_ids=coastal_bin_ids,
+            )
 
         # Update overall metrics
         n = len(y_true_np)
@@ -1358,7 +1847,6 @@ class ModelEvaluator:
 
             # Baseline metrics
             if y_uncorrected is not None:
-                y_uncorrected_np = y_uncorrected.cpu().numpy()
                 baseline_errors = y_uncorrected_np - y_true_np
                 self.sum_baseline_mae += np.sum(np.abs(baseline_errors))
                 self.sum_baseline_mse += np.sum(baseline_errors**2)
@@ -2600,6 +3088,35 @@ class ModelEvaluator:
             dataset_coords=dataset_coords,
         )
 
+    def plot_low_bin_spatial_maps(self):
+        """Plot spatial diagnostics for ultra-calm true-wave sub-bins."""
+        dataset_coords = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                dataset_coords = (lat_grid, lon_grid)
+        except Exception as e:
+            logger.warning(f"Could not get dataset coordinates for low-bin maps: {e}")
+
+        plot_low_bin_spatial_maps_fn(
+            low_bin_spatial_accumulators=self.low_bin_spatial_accumulators,
+            low_bin_spatial_subbins=self.low_bin_spatial_subbins,
+            test_files=self.test_files,
+            subsample_step=self.subsample_step,
+            geo_bounds=self.geo_bounds,
+            output_dir=self.output_dir,
+            dataset_coords=dataset_coords,
+        )
+
+    def plot_low_bin_advanced_diagnostics(self):
+        """Create low-bin CDF/hist/hexbin diagnostics from sampled points."""
+        plot_low_bin_advanced_diagnostics_fn(
+            low_bin_plot_samples=self.low_bin_plot_samples,
+            low_bin_spatial_subbins=self.low_bin_spatial_subbins,
+            output_dir=self.output_dir,
+        )
+
     def plot_model_better_percentage(self, sea_bin_metrics: Dict[str, Dict]):
         """Plot percentage of samples where model is better than reference for each bin."""
         plot_model_better_percentage_fn(
@@ -2765,6 +3282,17 @@ class ModelEvaluator:
             logger.info(
                 f"EDCDF hard fallback per-bin applied counts: {self._edcdf_fallback_applied_per_bin}"
             )
+        if self.prior_hard_fallback_bins:
+            valid = max(1, self._prior_fallback_total_valid)
+            pct = 100.0 * self._prior_fallback_total_applied / valid
+            logger.info(
+                "Prior hard fallback coverage: "
+                f"{self._prior_fallback_total_applied:,}/{self._prior_fallback_total_valid:,} "
+                f"valid pixels ({pct:.2f}%) using source='{self.prior_fallback_bin_source}'"
+            )
+            logger.info(
+                f"Prior hard fallback per-bin applied counts: {self._prior_fallback_applied_per_bin}"
+            )
 
         # NEW: Compute category breakdown
         print("Computing category breakdown (corrected vs not_corrected)...")
@@ -2788,12 +3316,16 @@ class ModelEvaluator:
         self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
         print("Saving detailed low-bin diagnostics...")
         self._save_low_bin_diagnostics(sea_bin_metrics)
+        print("Saving coastal-distance diagnostics...")
+        self._save_coastal_distance_diagnostics()
 
         # Create plots using samples
         print("Creating plots...")
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_low_bin_spatial_maps()
+        # self.plot_low_bin_advanced_diagnostics()
         # self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
@@ -3185,6 +3717,9 @@ def main():
             edcdf_blend_sigma=data_config.get("edcdf_blend_sigma", None),
             edcdf_hard_fallback_bins=data_config.get("edcdf_hard_fallback_bins", None),
             edcdf_fallback_bin_source=data_config.get("edcdf_fallback_bin_source", "raw"),
+            prior_hard_fallback_bins=data_config.get("prior_hard_fallback_bins", None),
+            prior_fallback_bin_source=data_config.get("prior_fallback_bin_source", "raw"),
+            prior_fallback_target=data_config.get("prior_fallback_target", "prior"),
             low_bin_affine_params=data_config.get("low_bin_affine_params", None),
             low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
         )

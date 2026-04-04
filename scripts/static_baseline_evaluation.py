@@ -22,10 +22,23 @@ import argparse
 import glob
 from collections import defaultdict
 from pathlib import Path
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+
+# Add project root to path for src imports (same pattern as evaluation pipeline scripts)
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
+from src.evaluation.evaluation_plots import (
+    plot_rmse_maps as plot_rmse_maps_fn,
+)
+from src.evaluation.evaluation_plots import (
+    plot_sea_bin_metrics as plot_sea_bin_metrics_fn,
+)
+from src.evaluation.metrics import compute_sea_bin_metrics_from_accumulators
 
 
 def parse_year_month(filename):
@@ -35,6 +48,27 @@ def parse_year_month(filename):
     if idx != -1 and len(name) >= idx + 12:
         return int(name[idx + 6 : idx + 10]), int(name[idx + 10 : idx + 12])
     return None, None
+
+
+def get_vhm0_sea_bins():
+    """Match corrected_VHM0 sea bins used in evaluate_bunet.py."""
+    return [
+        {"name": "calm", "min": 0.0, "max": 1.0, "label": "0.0-1.0m"},
+        {"name": "light", "min": 1.0, "max": 2.0, "label": "1.0-2.0m"},
+        {"name": "moderate", "min": 2.0, "max": 3.0, "label": "2.0-3.0m"},
+        {"name": "rough", "min": 3.0, "max": 4.0, "label": "3.0-4.0m"},
+        {"name": "very_rough", "min": 4.0, "max": 5.0, "label": "4.0-5.0m"},
+        {"name": "extreme_5_6", "min": 5.0, "max": 6.0, "label": "5.0-6.0m"},
+        {"name": "extreme_6_7", "min": 6.0, "max": 7.0, "label": "6.0-7.0m"},
+        {"name": "extreme_7_8", "min": 7.0, "max": 8.0, "label": "7.0-8.0m"},
+        {"name": "extreme_8_9", "min": 8.0, "max": 9.0, "label": "8.0-9.0m"},
+        {"name": "extreme_9_10", "min": 9.0, "max": 10.0, "label": "9.0-10.0m"},
+        {"name": "extreme_10_11", "min": 10.0, "max": 11.0, "label": "10.0-11.0m"},
+        {"name": "extreme_11_12", "min": 11.0, "max": 12.0, "label": "11.0-12.0m"},
+        {"name": "extreme_12_13", "min": 12.0, "max": 13.0, "label": "12.0-13.0m"},
+        {"name": "extreme_13_14", "min": 13.0, "max": 14.0, "label": "13.0-14.0m"},
+        {"name": "extreme_14_15", "min": 14.0, "max": 15.0, "label": "14.0-15.0m"},
+    ]
 
 
 def main():
@@ -90,6 +124,8 @@ def main():
     corrected_vhm0_idx = feature_cols.index("corrected_VHM0")
     lat_idx = feature_cols.index("latitude")
     lon_idx = feature_cols.index("longitude")
+    lat_grid = data0["tensor"][0, ..., lat_idx].numpy()
+    lon_grid = data0["tensor"][0, ..., lon_idx].numpy()
     del data0
 
     # Build static region mask from coordinates in the first file
@@ -193,13 +229,30 @@ def main():
     print("STEP 2: Evaluating static baseline on every hourly timestep")
     print(f"{'='*70}")
 
-    bin_edges = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, float("inf")]
-    bin_names = [
-        "0-1m", "1-2m", "2-3m", "3-4m", "4-5m", "5-6m", "6-7m",
-        "7-8m", "8-9m", "9-10m", "10-11m", "11-12m", "12m+",
-    ]
+    sea_bins = get_vhm0_sea_bins()
+    bin_names = [b["name"] for b in sea_bins]
+    bin_labels = {b["name"]: b["label"] for b in sea_bins}
 
     results = {}
+    sea_bin_accumulators = {
+        bin_config["name"]: {
+            "count": np.int64(0),
+            "sum_mae": np.float64(0.0),
+            "sum_mse": np.float64(0.0),
+            "sum_bias": np.float64(0.0),
+            "sum_baseline_mae": np.float64(0.0),
+            "sum_baseline_mse": np.float64(0.0),
+            "sum_baseline_bias": np.float64(0.0),
+            "count_model_better": np.int64(0),
+            "count_model_worse": np.int64(0),
+        }
+        for bin_config in sea_bins
+    }
+    spatial_error_sq_model = np.zeros((H, W), dtype=np.float64)
+    spatial_error_abs_model = np.zeros((H, W), dtype=np.float64)
+    spatial_error_sq_baseline = np.zeros((H, W), dtype=np.float64)
+    spatial_error_abs_baseline = np.zeros((H, W), dtype=np.float64)
+    spatial_count = np.zeros((H, W), dtype=np.float64)
 
     for year in args.eval_years:
         if year not in files_by_year:
@@ -264,12 +317,13 @@ def main():
 
                 # Per-bin
                 bin_values = cor_v if args.sea_bin_source == "true" else raw_v
-                for bi in range(len(bin_names)):
-                    lo, hi = bin_edges[bi], bin_edges[bi + 1]
+                for bin_config in sea_bins:
+                    lo = bin_config["min"]
+                    hi = bin_config["max"]
+                    bname = bin_config["name"]
                     in_bin = (bin_values >= lo) & (bin_values < hi)
                     if not in_bin.any():
                         continue
-                    bname = bin_names[bi]
                     nc_e = nc_err[in_bin]
                     sc_e = sc_err[in_bin]
                     nc_bin_sq[bname] += np.sum(nc_e ** 2)
@@ -279,6 +333,37 @@ def main():
                     sc_bin_abs[bname] += np.sum(np.abs(sc_e))
                     sc_bin_err[bname] += np.sum(sc_e)
                     bin_count[bname] += in_bin.sum()
+
+                    sea_bin_accumulators[bname]["count"] += in_bin.sum()
+                    sea_bin_accumulators[bname]["sum_mae"] += np.sum(np.abs(sc_e))
+                    sea_bin_accumulators[bname]["sum_mse"] += np.sum(sc_e ** 2)
+                    sea_bin_accumulators[bname]["sum_bias"] += np.sum(sc_e)
+                    sea_bin_accumulators[bname]["sum_baseline_mae"] += np.sum(
+                        np.abs(nc_e)
+                    )
+                    sea_bin_accumulators[bname]["sum_baseline_mse"] += np.sum(nc_e ** 2)
+                    sea_bin_accumulators[bname]["sum_baseline_bias"] += np.sum(nc_e)
+                    sea_bin_accumulators[bname]["count_model_better"] += np.sum(
+                        np.abs(sc_e) < np.abs(nc_e)
+                    )
+                    sea_bin_accumulators[bname]["count_model_worse"] += np.sum(
+                        np.abs(sc_e) > np.abs(nc_e)
+                    )
+
+                valid_count = valid.astype(np.float64)
+                spatial_count += valid_count
+                spatial_model_sq_h = np.zeros((H, W), dtype=np.float64)
+                spatial_model_abs_h = np.zeros((H, W), dtype=np.float64)
+                spatial_baseline_sq_h = np.zeros((H, W), dtype=np.float64)
+                spatial_baseline_abs_h = np.zeros((H, W), dtype=np.float64)
+                spatial_model_sq_h[valid] = sc_err ** 2
+                spatial_model_abs_h[valid] = np.abs(sc_err)
+                spatial_baseline_sq_h[valid] = nc_err ** 2
+                spatial_baseline_abs_h[valid] = np.abs(nc_err)
+                spatial_error_sq_model += spatial_model_sq_h
+                spatial_error_abs_model += spatial_model_abs_h
+                spatial_error_sq_baseline += spatial_baseline_sq_h
+                spatial_error_abs_baseline += spatial_baseline_abs_h
 
             if (fi + 1) % 20 == 0 or fi == len(file_list) - 1:
                 print(f"  {year}: {fi+1}/{len(file_list)} files", flush=True)
@@ -305,6 +390,7 @@ def main():
         for bname in bin_names:
             bn = float(bin_count[bname]) if bin_count[bname] > 0 else 1.0
             results[year]["bins"][bname] = {
+                "label": bin_labels[bname],
                 "count": int(bin_count[bname]),
                 "nc_rmse": np.sqrt(nc_bin_sq[bname] / bn),
                 "nc_mae": nc_bin_abs[bname] / bn,
@@ -381,6 +467,13 @@ def main():
         }
     with open(output_dir / "baseline_results.json", "w") as f:
         json.dump(results_serializable, f, indent=2, default=str)
+
+    sea_bin_metrics = compute_sea_bin_metrics_from_accumulators(
+        sea_bins=sea_bins,
+        sea_bin_accumulators=sea_bin_accumulators,
+    )
+    with open(output_dir / "sea_bin_metrics_overall.json", "w") as f:
+        json.dump(sea_bin_metrics, f, indent=2)
 
     # Plot: RMSE comparison bar chart
     eval_years = sorted(results.keys())
@@ -504,6 +597,41 @@ def main():
     plt.tight_layout()
     plt.savefig(output_dir / "baseline_per_bin_rmse_improvement_bars.png", dpi=150)
     plt.close()
+
+    # Export the same sea-bin performance figure as evaluate_bunet.py
+    plot_sea_bin_metrics_fn(
+        sea_bin_metrics=sea_bin_metrics,
+        sea_bins=sea_bins,
+        target_column="corrected_VHM0",
+        unit="m",
+        output_dir=output_dir,
+    )
+
+    # Export the same RMSE/MAE spatial maps as evaluate_bunet.py
+    spatial_errors_model = [
+        {
+            "error_sq": spatial_error_sq_model,
+            "error_sq_mae": spatial_error_abs_model,
+            "count": spatial_count,
+        }
+    ]
+    spatial_errors_baseline = [
+        {
+            "error_sq": spatial_error_sq_baseline,
+            "error_sq_mae": spatial_error_abs_baseline,
+            "count": spatial_count,
+        }
+    ]
+    plot_rmse_maps_fn(
+        spatial_errors_model=spatial_errors_model,
+        spatial_errors_baseline=spatial_errors_baseline,
+        test_files=all_files,
+        subsample_step=1,
+        geo_bounds=None,
+        unit="m",
+        output_dir=output_dir,
+        dataset_coords=(lat_grid, lon_grid),
+    )
 
     # Plot: Static bias map
     fig, ax = plt.subplots(1, 1, figsize=(12, 5))

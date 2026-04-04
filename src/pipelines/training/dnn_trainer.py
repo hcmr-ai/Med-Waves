@@ -462,6 +462,7 @@ def main():
             residual_penalty_lambda=float(
                 model_config.get("residual_penalty_lambda", 0.0)
             ),
+            huber_delta=float(model_config.get("huber_delta", 1.0)),
         )
     else:
         logger.info("Training new model")
@@ -508,6 +509,7 @@ def main():
             residual_penalty_lambda=float(
                 model_config.get("residual_penalty_lambda", 0.0)
             ),
+            huber_delta=float(model_config.get("huber_delta", 1.0)),
         )
 
     # Create callbacks

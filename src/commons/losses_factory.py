@@ -1,4 +1,5 @@
 from src.commons.loss_functions.huber_loss import (
+    masked_classical_huber_loss,
     masked_huber_loss,
     masked_mse_huber_tail_loss,
 )
@@ -35,6 +36,7 @@ def compute_loss(
     ssim_loss=None,
     residual_pred=None,
     residual_penalty_lambda=0.0,
+    huber_delta=1.0,
 ):
     """
     Unified loss computation wrapper that selects and applies the appropriate loss function.
@@ -155,7 +157,14 @@ def compute_loss(
         return _with_residual_penalty(masked_mse_loss(y_pred, y_true, mask))
 
     elif loss_type == "huber":
-        return _with_residual_penalty(masked_huber_loss(y_pred, y_true, mask))
+        return _with_residual_penalty(
+            masked_huber_loss(y_pred, y_true, mask, delta=huber_delta)
+        )
+
+    elif loss_type == "huber_classical":
+        return _with_residual_penalty(
+            masked_classical_huber_loss(y_pred, y_true, mask, delta=huber_delta)
+        )
 
     elif loss_type == "mse_huber_tail":
         if vhm0_for_reconstruction is None:
