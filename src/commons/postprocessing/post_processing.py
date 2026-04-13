@@ -153,7 +153,9 @@ def compute_global_bin_biases(
             # Handle multi-task predictions
             # If y_pred is a dict (multi-task model), extract the prediction for the task
             if isinstance(y_pred, dict):
-                y_pred = y_pred[task_name]
+                y_pred = (
+                    y_pred["prediction"] if "prediction" in y_pred else y_pred[task_name]
+                )
 
             # Align dimensions
             min_h = min(y_pred.shape[2], y.shape[2])

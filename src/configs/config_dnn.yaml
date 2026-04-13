@@ -89,7 +89,7 @@ data:
 
 # Model configuration
 model:
-  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "mlp" (per-pixel MLP baseline), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
+  model_type: "transunet" # Options: "nick" (simple), "geo" (geophysical), "enhanced" (nick+geo features), "transunet" (transformer-based), "moe_transunet" (TransUNet with spatial expert gate), "mlp" (per-pixel MLP baseline), "swinunet" (swin transformer-based), "transunet_gan" (transformer-based GAN)
   in_channels: 16 # Number of input channels (all features except excluded)
   learning_rate: 1e-4 # 1e-3
   loss_type: "mse" # Options: "mse", "mse_huber_tail", "weighted_mse", "smooth_l1", "multi_bin_weighted_mse", "multi_bin_weighted_smooth_l1", "pixel_switch_mse", "mse_perceptual", "mse_ssim", "mse_ssim_perceptual", "mse_mdn", "mdn", "mse_gan"
@@ -114,6 +114,16 @@ model:
   transformer_use_coord_pos_enc: true
   # Set this to sea-mask channel index only when add_sea_mask_channel=true and in_channels includes it.
   transformer_sea_mask_channel_index: 15
+  # MoE TransUNet knobs (used only when model_type: "moe_transunet")
+  num_experts: 3
+  gate_temperature: 1.0
+  gate_input_mode: "features" # "features" or "vhm0_only"
+  gate_entropy_weight: 0.0
+  gate_balance_weight: 0.0
+  gate_prior_weight: 0.0
+  gate_bin_edges: [1.0, 3.0]
+  expert_dropout: 0.0
+  return_gate_maps: true
   # Learning rate scheduler configuration
   lr_scheduler:
     type: CosineAnnealingLR # Options: "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR", "ExponentialLR", "none", "CosineAnnealingWarmupRestarts", "LambdaLR"

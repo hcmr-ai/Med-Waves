@@ -66,6 +66,15 @@ class WaveBiasCorrector(pl.LightningModule):
         transunet_num_heads=8,
         transformer_use_coord_pos_enc=True,
         transformer_sea_mask_channel_index=None,
+        num_experts=3,
+        gate_temperature=1.0,
+        gate_entropy_weight=0.0,
+        gate_balance_weight=0.0,
+        gate_prior_weight=0.0,
+        gate_bin_edges=None,
+        gate_input_mode="features",
+        expert_dropout=0.0,
+        return_gate_maps=True,
         normalizer=None,
         normalize_target=False,
         use_patch_sampling=False,
@@ -106,6 +115,10 @@ class WaveBiasCorrector(pl.LightningModule):
         self.lambda_adv = lambda_adv
         self.model_type = model_type
         self.use_patch_sampling = use_patch_sampling
+        self.gate_entropy_weight = float(gate_entropy_weight)
+        self.gate_balance_weight = float(gate_balance_weight)
+        self.gate_prior_weight = float(gate_prior_weight)
+        self.gate_bin_edges = gate_bin_edges or [1.0, 3.0]
         # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
         # Use provided tasks_config and ensure each task has a loss_type
         self.tasks_config = tasks_config or [{'name': 'vhm0', 'loss_type': self.loss_type, 'weight': 1.0}]
@@ -141,6 +154,11 @@ class WaveBiasCorrector(pl.LightningModule):
             transunet_num_heads=transunet_num_heads,
             transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
             transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
+            num_experts=num_experts,
+            gate_temperature=gate_temperature,
+            gate_input_mode=gate_input_mode,
+            expert_dropout=expert_dropout,
+            return_gate_maps=return_gate_maps,
         )
 
         self.lr_scheduler_config = lr_scheduler_config or {}
@@ -151,7 +169,7 @@ class WaveBiasCorrector(pl.LightningModule):
         self.huber_delta = float(huber_delta)
         self.normalizer = normalizer
         self.normalize_target = normalize_target
-    
+
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
         # Let Lightning do the initial load
@@ -173,7 +191,8 @@ class WaveBiasCorrector(pl.LightningModule):
         ckpt["state_dict"] = state_dict
 
         # Re-save to a temp buffer and let Lightning load normally
-        import io, torch
+        import io
+        import torch
         buf = io.BytesIO()
         torch.save(ckpt, buf)
         buf.seek(0)
@@ -183,6 +202,131 @@ class WaveBiasCorrector(pl.LightningModule):
         # Handle NaN values in input by replacing with zeros
         x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         return self.model(x_clean)
+
+    def _extract_prediction_and_aux(self, model_output):
+        if isinstance(model_output, dict) and "prediction" in model_output:
+            return model_output["prediction"], model_output
+        return model_output, None
+
+    def _masked_gate_values(self, gate_weights, mask):
+        min_h = min(gate_weights.shape[-2], mask.shape[-2])
+        min_w = min(gate_weights.shape[-1], mask.shape[-1])
+        gates = gate_weights[:, :, :min_h, :min_w]
+        valid = mask[:, :, :min_h, :min_w].bool()
+        valid = valid.expand(-1, gates.shape[1], -1, -1)
+        return gates, valid
+
+    def _compute_gate_auxiliary_loss(
+        self, moe_aux, mask, vhm0_for_reconstruction, prefix="moe", on_step=True
+    ):
+        if moe_aux is None or "gate_weights" not in moe_aux:
+            return None
+
+        gate_weights = moe_aux["gate_weights"]
+        gates, valid = self._masked_gate_values(gate_weights, mask)
+        if not valid.any():
+            return gate_weights.sum() * 0.0
+
+        total = gate_weights.sum() * 0.0
+        eps = 1e-8
+
+        if self.gate_entropy_weight > 0:
+            entropy = -(gates * torch.log(gates.clamp_min(eps))).sum(dim=1, keepdim=True)
+            entropy_valid = entropy[valid[:, :1]]
+            entropy_loss = entropy_valid.mean()
+            self.log(
+                f"{prefix}/gate_entropy",
+                entropy_loss.detach(),
+                on_step=on_step,
+                on_epoch=True,
+            )
+            total = total + self.gate_entropy_weight * entropy_loss
+
+        if self.gate_balance_weight > 0:
+            pixel_valid = valid[:, :1].float()
+            usage = (gates * pixel_valid).sum(dim=(0, 2, 3)) / (
+                pixel_valid.sum() + eps
+            )
+            target = torch.full_like(usage, 1.0 / gate_weights.shape[1])
+            balance_loss = torch.mean((usage - target) ** 2)
+            self.log(
+                f"{prefix}/gate_balance_loss",
+                balance_loss.detach(),
+                on_step=on_step,
+                on_epoch=True,
+            )
+            total = total + self.gate_balance_weight * balance_loss
+
+        if (
+            self.gate_prior_weight > 0
+            and vhm0_for_reconstruction is not None
+            and len(self.gate_bin_edges) > 0
+        ):
+            prior_loss = self._compute_gate_prior_loss(
+                gate_weights, vhm0_for_reconstruction, mask
+            )
+            self.log(
+                f"{prefix}/gate_prior_loss",
+                prior_loss.detach(),
+                on_step=on_step,
+                on_epoch=True,
+            )
+            total = total + self.gate_prior_weight * prior_loss
+
+        return total
+
+    def _compute_gate_prior_loss(self, gate_weights, raw_vhm0, mask):
+        min_h = min(gate_weights.shape[-2], raw_vhm0.shape[-2], mask.shape[-2])
+        min_w = min(gate_weights.shape[-1], raw_vhm0.shape[-1], mask.shape[-1])
+        gates = gate_weights[:, :, :min_h, :min_w]
+        raw = raw_vhm0[:, :1, :min_h, :min_w]
+        valid = mask[:, :1, :min_h, :min_w].bool()
+        if not valid.any():
+            return gate_weights.sum() * 0.0
+
+        edges = torch.tensor(self.gate_bin_edges, device=raw.device, dtype=raw.dtype)
+        labels = torch.bucketize(raw[:, 0], edges)
+        labels = labels.clamp_max(gates.shape[1] - 1)
+
+        log_probs = torch.log(gates.clamp_min(1e-8))
+        selected = log_probs.gather(1, labels.unsqueeze(1))
+        return -selected[valid].mean()
+
+    def _log_gate_usage_by_raw_bin(self, moe_aux, raw_vhm0, mask, prefix):
+        if moe_aux is None or raw_vhm0 is None or "gate_weights" not in moe_aux:
+            return
+
+        gate_weights = moe_aux["gate_weights"]
+        min_h = min(gate_weights.shape[-2], raw_vhm0.shape[-2], mask.shape[-2])
+        min_w = min(gate_weights.shape[-1], raw_vhm0.shape[-1], mask.shape[-1])
+        gates = gate_weights[:, :, :min_h, :min_w]
+        raw = raw_vhm0[:, 0, :min_h, :min_w]
+        valid = mask[:, 0, :min_h, :min_w].bool()
+        if not valid.any():
+            return
+
+        usage = gates.permute(0, 2, 3, 1)[valid].mean(dim=0)
+        for expert_idx, value in enumerate(usage):
+            self.log(
+                f"{prefix}/gate_usage_expert_{expert_idx}",
+                value.detach(),
+                on_step=False,
+                on_epoch=True,
+            )
+
+        edges = [-float("inf")] + list(self.gate_bin_edges) + [float("inf")]
+        for bin_idx in range(len(edges) - 1):
+            bin_mask = (raw >= edges[bin_idx]) & (raw < edges[bin_idx + 1]) & valid
+            if not bin_mask.any():
+                continue
+            bin_usage = gates.permute(0, 2, 3, 1)[bin_mask].mean(dim=0)
+            for expert_idx, value in enumerate(bin_usage):
+                self.log(
+                    f"{prefix}/raw_bin_{bin_idx}_expert_{expert_idx}",
+                    value.detach(),
+                    on_step=False,
+                    on_epoch=True,
+                )
 
     def _denormalize_bias_prediction(self, prediction, task_name):
         """
@@ -445,6 +589,7 @@ class WaveBiasCorrector(pl.LightningModule):
         # Forward pass (returns dict for multi-task or tensor for single-task)
         # For MDN: returns (pi, mu, sigma) tuples per task
         model_output = self(X)
+        model_output, moe_aux = self._extract_prediction_and_aux(model_output)
 
         # Handle MDN vs non-MDN
         if self.use_mdn:
@@ -480,6 +625,16 @@ class WaveBiasCorrector(pl.LightningModule):
             predictions = model_output
             loss, task_losses = self.compute_multi_task_loss(
                 predictions, targets, mask, vhm0_for_reconstruction
+            )
+
+        gate_aux_loss = self._compute_gate_auxiliary_loss(
+            moe_aux, mask, vhm0_for_reconstruction, prefix="train_moe", on_step=True
+        )
+        if gate_aux_loss is not None:
+            loss = loss + gate_aux_loss
+            self.log("moe/gate_aux_loss", gate_aux_loss.detach(), on_step=True, on_epoch=True)
+            self._log_gate_usage_by_raw_bin(
+                moe_aux, vhm0_for_reconstruction, mask, prefix="train_moe"
             )
 
         # Log total loss
@@ -775,6 +930,7 @@ class WaveBiasCorrector(pl.LightningModule):
             # Forward pass (returns dict for multi-task or tensor for single-task)
             # For MDN: returns (pi, mu, sigma) tuples per task
             model_output = self(X)
+            model_output, moe_aux = self._extract_prediction_and_aux(model_output)
 
             # Handle MDN vs non-MDN
             if self.use_mdn:
@@ -811,6 +967,25 @@ class WaveBiasCorrector(pl.LightningModule):
                 predictions = model_output
                 loss, task_losses = self.compute_multi_task_loss(
                     predictions, targets, mask, vhm0_for_reconstruction
+                )
+
+            gate_aux_loss = self._compute_gate_auxiliary_loss(
+                moe_aux,
+                mask,
+                vhm0_for_reconstruction,
+                prefix="val_moe",
+                on_step=False,
+            )
+            if gate_aux_loss is not None:
+                loss = loss + gate_aux_loss
+                self.log(
+                    "val_moe/gate_aux_loss",
+                    gate_aux_loss.detach(),
+                    on_step=False,
+                    on_epoch=True,
+                )
+                self._log_gate_usage_by_raw_bin(
+                    moe_aux, vhm0_for_reconstruction, mask, prefix="val_moe"
                 )
 
             # GAN-specific validation: log discriminator metrics

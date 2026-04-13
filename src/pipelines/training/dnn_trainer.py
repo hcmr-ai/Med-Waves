@@ -459,6 +459,15 @@ def main():
             transformer_sea_mask_channel_index=model_config.get(
                 "transformer_sea_mask_channel_index", None
             ),
+            num_experts=model_config.get("num_experts", 3),
+            gate_temperature=model_config.get("gate_temperature", 1.0),
+            gate_entropy_weight=model_config.get("gate_entropy_weight", 0.0),
+            gate_balance_weight=model_config.get("gate_balance_weight", 0.0),
+            gate_prior_weight=model_config.get("gate_prior_weight", 0.0),
+            gate_bin_edges=model_config.get("gate_bin_edges", [1.0, 3.0]),
+            gate_input_mode=model_config.get("gate_input_mode", "features"),
+            expert_dropout=model_config.get("expert_dropout", 0.0),
+            return_gate_maps=model_config.get("return_gate_maps", True),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
@@ -508,6 +517,15 @@ def main():
             transformer_sea_mask_channel_index=model_config.get(
                 "transformer_sea_mask_channel_index", None
             ),
+            num_experts=model_config.get("num_experts", 3),
+            gate_temperature=model_config.get("gate_temperature", 1.0),
+            gate_entropy_weight=model_config.get("gate_entropy_weight", 0.0),
+            gate_balance_weight=model_config.get("gate_balance_weight", 0.0),
+            gate_prior_weight=model_config.get("gate_prior_weight", 0.0),
+            gate_bin_edges=model_config.get("gate_bin_edges", [1.0, 3.0]),
+            gate_input_mode=model_config.get("gate_input_mode", "features"),
+            expert_dropout=model_config.get("expert_dropout", 0.0),
+            return_gate_maps=model_config.get("return_gate_maps", True),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),

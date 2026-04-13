@@ -1383,7 +1383,7 @@ class ModelEvaluator:
                 geo_mask = geo_mask & (lon_grid >= GIBRALTAR_LON) & ~biscay
             elif self.region_filter == "atlantic":
                 geo_mask = geo_mask & ((lon_grid < GIBRALTAR_LON) | biscay)
-            
+
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
 
@@ -2264,9 +2264,13 @@ class ModelEvaluator:
                         # Get predictions from all models
                         y_pred_default = self.model(X)
 
-                        # Handle multi-task: extract task before combining
+                        # Handle MoE diagnostic dicts and multi-task outputs.
                         if isinstance(y_pred_default, dict):
-                            y_pred_default = y_pred_default[self.task_name]
+                            y_pred_default = (
+                                y_pred_default["prediction"]
+                                if "prediction" in y_pred_default
+                                else y_pred_default[self.task_name]
+                            )
 
                         # Start with default predictions
                         y_pred = y_pred_default.clone()
@@ -2296,7 +2300,11 @@ class ModelEvaluator:
                         if self.low_wave_model is not None and low_wave_mask.any():
                             y_pred_low = self.low_wave_model(X)
                             if isinstance(y_pred_low, dict):
-                                y_pred_low = y_pred_low[self.task_name]
+                                y_pred_low = (
+                                    y_pred_low["prediction"]
+                                    if "prediction" in y_pred_low
+                                    else y_pred_low[self.task_name]
+                                )
 
                             # Debug: Check if shapes match
                             if batch_idx == 0:
@@ -2370,7 +2378,11 @@ class ModelEvaluator:
                         if self.high_wave_model is not None and high_wave_mask.any():
                             y_pred_high = self.high_wave_model(X)
                             if isinstance(y_pred_high, dict):
-                                y_pred_high = y_pred_high[self.task_name]
+                                y_pred_high = (
+                                    y_pred_high["prediction"]
+                                    if "prediction" in y_pred_high
+                                    else y_pred_high[self.task_name]
+                                )
 
                             if batch_idx == 0:
                                 print(
@@ -2433,7 +2445,11 @@ class ModelEvaluator:
                 # Handle multi-task predictions (for non-bin-routed case)
                 # If y_pred is a dict (multi-task model), extract the prediction for the task we're evaluating
                 if isinstance(y_pred, dict):
-                    y_pred = y_pred[self.task_name]
+                    y_pred = (
+                        y_pred["prediction"]
+                        if "prediction" in y_pred
+                        else y_pred[self.task_name]
+                    )
 
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])

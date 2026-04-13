@@ -297,7 +297,7 @@ class TransUNetGeo(nn.Module):
                 # Efficient for related tasks like VHM0 and VTM02
                 self.task_heads[task] = nn.Conv2d(c1, 1, kernel_size=1)
 
-    def forward(self, x):
+    def extract_features(self, x):
         # Encoder
         x1d, x1 = self.d1(x)  # H/2
         x2d, x2 = self.d2(x1d)  # H/4
@@ -325,7 +325,10 @@ class TransUNetGeo(nn.Module):
         u3 = self.u3(u4, x3)
         u2 = self.u2(u3, x2)
         u1 = self.u1(u2, x1)  # Shared features: [B, c1, H, W]
+        return u1
 
+    def forward(self, x):
+        u1 = self.extract_features(x)
         # Multi-task predictions
         outputs = {}
         for task in self.auxiliary_tasks:
@@ -336,6 +339,126 @@ class TransUNetGeo(nn.Module):
             return outputs[self.auxiliary_tasks[0]]
 
         return outputs
+
+
+class MoETransUNetGeo(nn.Module):
+    """
+    Sea-state-aware Mixture-of-Experts wrapper around a shared TransUNet backbone.
+
+    The model predicts multiple candidate bias fields and a spatial gate, then returns
+    one mixed prediction:
+        prediction = sum_k gate_weight_k * expert_output_k
+
+    Auxiliary gate tensors are returned for diagnostics and optional regularization.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels=1,
+        auxiliary_tasks=None,
+        base_channels=64,
+        bottleneck_dim=1024,
+        patch_size=16,
+        num_layers=8,
+        num_heads=8,
+        num_experts=3,
+        gate_temperature=1.0,
+        gate_input_mode="features",
+        vhm0_channel_index=0,
+        expert_dropout=0.0,
+        return_gate_maps=True,
+        transformer_use_coord_pos_enc=True,
+        transformer_sea_mask_channel_index=None,
+    ):
+        super().__init__()
+        self.auxiliary_tasks = auxiliary_tasks or ["vhm0"]
+        if len(self.auxiliary_tasks) != 1:
+            raise ValueError("MoETransUNetGeo currently supports single-task training only.")
+        if num_experts < 2:
+            raise ValueError("num_experts must be >= 2 for MoETransUNetGeo.")
+        if gate_temperature <= 0:
+            raise ValueError("gate_temperature must be > 0.")
+        if gate_input_mode not in {"features", "vhm0_only"}:
+            raise ValueError("gate_input_mode must be 'features' or 'vhm0_only'.")
+
+        self.num_experts = int(num_experts)
+        self.gate_temperature = float(gate_temperature)
+        self.gate_input_mode = gate_input_mode
+        self.return_gate_maps = return_gate_maps
+        self.vhm0_channel_index = int(vhm0_channel_index)
+
+        self.backbone = TransUNetGeo(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            auxiliary_tasks=self.auxiliary_tasks,
+            base_channels=base_channels,
+            bottleneck_dim=bottleneck_dim,
+            patch_size=patch_size,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            use_mdn=False,
+            transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
+            transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
+        )
+        feature_channels = base_channels
+
+        expert_layers = []
+        for _ in range(self.num_experts):
+            if expert_dropout > 0:
+                expert_layers.append(
+                    nn.Sequential(
+                        nn.Dropout2d(expert_dropout),
+                        nn.Conv2d(feature_channels, out_channels, kernel_size=1),
+                    )
+                )
+            else:
+                expert_layers.append(nn.Conv2d(feature_channels, out_channels, kernel_size=1))
+        self.expert_heads = nn.ModuleList(expert_layers)
+
+        if self.gate_input_mode == "features":
+            self.gate_head = nn.Sequential(
+                nn.Conv2d(feature_channels, feature_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(feature_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(feature_channels, self.num_experts, kernel_size=1),
+            )
+        else:
+            self.gate_head = nn.Sequential(
+                nn.Conv2d(1, 16, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(16, self.num_experts, kernel_size=1),
+            )
+
+    def forward(self, x):
+        features = self.backbone.extract_features(x)
+        expert_outputs = torch.stack(
+            [head(features) for head in self.expert_heads], dim=1
+        )  # [B, K, 1, H, W]
+
+        if self.gate_input_mode == "vhm0_only":
+            gate_input = x[:, self.vhm0_channel_index : self.vhm0_channel_index + 1]
+            gate_input = torch.nan_to_num(gate_input, nan=0.0, posinf=0.0, neginf=0.0)
+            if gate_input.shape[-2:] != features.shape[-2:]:
+                gate_input = F.interpolate(
+                    gate_input, size=features.shape[-2:], mode="bilinear", align_corners=False
+                )
+            gate_logits = self.gate_head(gate_input)
+        else:
+            gate_logits = self.gate_head(features)
+
+        gate_weights = torch.softmax(gate_logits / self.gate_temperature, dim=1)
+        prediction = (expert_outputs * gate_weights.unsqueeze(2)).sum(dim=1)
+
+        if not self.return_gate_maps:
+            return prediction
+
+        return {
+            "prediction": prediction,
+            "expert_outputs": expert_outputs,
+            "gate_logits": gate_logits,
+            "gate_weights": gate_weights,
+        }
 
 
 class SimpleMLPGeo(nn.Module):
