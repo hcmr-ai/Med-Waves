@@ -172,8 +172,7 @@ class WaveBiasCorrector(pl.LightningModule):
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
-        # Let Lightning do the initial load
-        import torch
+        import io
 
         ckpt = torch.load(checkpoint_path, map_location="cpu")
         state_dict = ckpt.get("state_dict", ckpt)
@@ -181,7 +180,7 @@ class WaveBiasCorrector(pl.LightningModule):
         # Backward compat: rename legacy single-task heads to model.task_heads.vhm0
         remap = {
             "model.final.weight": "model.task_heads.vhm0.weight",
-            "model.final.bias":   "model.task_heads.vhm0.bias",
+            "model.final.bias": "model.task_heads.vhm0.bias",
             "model.correction_conv.weight": "model.task_heads.vhm0.weight",
             "model.correction_conv.bias": "model.task_heads.vhm0.bias",
         }
@@ -191,8 +190,6 @@ class WaveBiasCorrector(pl.LightningModule):
         ckpt["state_dict"] = state_dict
 
         # Re-save to a temp buffer and let Lightning load normally
-        import io
-        import torch
         buf = io.BytesIO()
         torch.save(ckpt, buf)
         buf.seek(0)
