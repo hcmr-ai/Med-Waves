@@ -222,8 +222,8 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         else:
             # Random/stratified: use BalancedBinBatchSampler for bin-balanced batches
             n_bins = len(train_dataset.patch_cfg.bin_edges_m) + 1
-            n_hours = len(train_files) * 24  # or compute from len(file_paths)*24
-            steps_per_epoch = int(n_hours / training_config["batch_size"])
+            n_hours = len(train_dataset)
+            steps_per_epoch = max(1, int(n_hours / training_config["batch_size"]))
 
             # Get bin sampling distribution from config or use default
             bin_sampling_weights = data_config.get("bin_sampling_weights", None)
