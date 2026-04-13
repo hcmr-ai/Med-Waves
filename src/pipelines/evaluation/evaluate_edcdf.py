@@ -77,9 +77,19 @@ VAR_CONFIG = {
 }
 
 
-def load_predictions(predictions_dir: Path) -> pl.DataFrame:
-    """Load all WAVEAN*.parquet prediction files from a directory."""
-    files = sorted(predictions_dir.glob("WAVEAN*.parquet"))
+def load_predictions(predictions_dir: Path, years: List[int] = None) -> pl.DataFrame:
+    """Load WAVEAN*.parquet prediction files from a directory.
+
+    If years is provided, only files matching those years are loaded.
+    """
+    if years:
+        files = []
+        for year in years:
+            files.extend(sorted(predictions_dir.glob(f"WAVEAN{int(year)}*.parquet")))
+        # Deduplicate in case patterns overlap
+        files = sorted(set(files))
+    else:
+        files = sorted(predictions_dir.glob("WAVEAN*.parquet"))
     if not files:
         raise FileNotFoundError(f"No WAVEAN*.parquet files in {predictions_dir}")
 
@@ -100,6 +110,7 @@ def build_sea_bin_data(
     var: str,
     sea_bins: List[Dict],
     corrected_suffix: str = "corrected_",
+    sea_bin_source: str = "true",
 ) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
     """Build sea_bin_metrics and sea_bin_error_samples from prediction DataFrame.
 
@@ -116,9 +127,12 @@ def build_sea_bin_data(
         if col not in df.columns:
             raise ValueError(f"Missing column '{col}' in predictions DataFrame")
 
-    pred = df[pred_col].to_numpy()
-    target = df[target_col].to_numpy()
-    uncorrected = df[uncorrected_col].to_numpy()
+    pred = df[pred_col].to_numpy().astype(float)
+    target = df[target_col].to_numpy().astype(float)
+    uncorrected = df[uncorrected_col].to_numpy().astype(float)
+
+    finite = np.isfinite(pred) & np.isfinite(target) & np.isfinite(uncorrected)
+    pred, target, uncorrected = pred[finite], target[finite], uncorrected[finite]
 
     model_errors = pred - target
     baseline_errors = uncorrected - target
@@ -126,9 +140,20 @@ def build_sea_bin_data(
     sea_bin_metrics = {}
     sea_bin_error_samples = {}
 
+    if sea_bin_source == "true":
+        bin_values = target
+    elif sea_bin_source == "raw":
+        bin_values = uncorrected
+    elif sea_bin_source == "pred":
+        bin_values = pred
+    else:
+        raise ValueError(
+            f"Unsupported sea_bin_source='{sea_bin_source}'. Use one of: true, raw, pred"
+        )
+
     for b in sea_bins:
         bin_name = b["name"]
-        mask = (uncorrected >= b["min"]) & (uncorrected < b["max"])
+        mask = (bin_values >= b["min"]) & (bin_values < b["max"])
         count = int(mask.sum())
 
         sea_bin_error_samples[bin_name] = {
@@ -191,14 +216,20 @@ def build_plot_samples(
     pred_col = f"predicted_{var}"
     target_col = f"{corrected_suffix}{var}"
 
-    if len(df) > max_samples:
-        df = df.sample(n=max_samples, seed=42)
+    nan_cols = [pred_col, target_col, var]
+    df_clean = df.with_columns([
+        pl.when(pl.col(c).is_nan()).then(None).otherwise(pl.col(c)).alias(c)
+        for c in nan_cols
+    ]).drop_nulls(subset=nan_cols)
+
+    if len(df_clean) > max_samples:
+        df_clean = df_clean.sample(n=max_samples, seed=42)
 
     return {
-        "y_true": df[target_col].to_numpy().tolist(),
-        "y_pred": df[pred_col].to_numpy().tolist(),
-        "y_uncorrected": df[var].to_numpy().tolist(),
-        "vhm0": df[var].to_numpy().tolist(),
+        "y_true": df_clean[target_col].to_numpy().tolist(),
+        "y_pred": df_clean[pred_col].to_numpy().tolist(),
+        "y_uncorrected": df_clean[var].to_numpy().tolist(),
+        "vhm0": df_clean[var].to_numpy().tolist(),
     }
 
 
@@ -208,9 +239,12 @@ def compute_overall_metrics(
     corrected_suffix: str = "corrected_",
 ) -> Dict[str, float]:
     """Compute overall metrics for a variable."""
-    pred = df[f"predicted_{var}"].to_numpy()
-    target = df[f"{corrected_suffix}{var}"].to_numpy()
-    uncorrected = df[var].to_numpy()
+    pred = df[f"predicted_{var}"].to_numpy().astype(float)
+    target = df[f"{corrected_suffix}{var}"].to_numpy().astype(float)
+    uncorrected = df[var].to_numpy().astype(float)
+
+    finite = np.isfinite(pred) & np.isfinite(target) & np.isfinite(uncorrected)
+    pred, target, uncorrected = pred[finite], target[finite], uncorrected[finite]
 
     residuals = pred - target
     baseline_residuals = uncorrected - target
@@ -340,6 +374,7 @@ def evaluate_variable(
     var: str,
     output_dir: Path,
     corrected_suffix: str = "corrected_",
+    sea_bin_source: str = "true",
 ):
     """Run full evaluation for one variable."""
     cfg = VAR_CONFIG[var]
@@ -351,7 +386,7 @@ def evaluate_variable(
 
     overall = compute_overall_metrics(df, var, corrected_suffix)
     sea_bin_metrics, sea_bin_error_samples = build_sea_bin_data(
-        df, var, sea_bins, corrected_suffix
+        df, var, sea_bins, corrected_suffix, sea_bin_source=sea_bin_source
     )
     plot_samples = build_plot_samples(df, var, corrected_suffix)
 
@@ -463,6 +498,21 @@ def main():
         "--output-dir", type=str, default=None,
         help="Output directory for plots and metrics (default: <predictions-dir>/../evaluation)",
     )
+    parser.add_argument(
+        "--years", type=int, nargs="+", default=None,
+        help="Optional year(s) to evaluate, e.g. --years 2023 or --years 2022 2023",
+    )
+    parser.add_argument(
+        "--sea-bin-source",
+        type=str,
+        default="true",
+        choices=["true", "raw", "pred"],
+        help=(
+            "Values used to assign sea bins: "
+            "'true' (reference corrected variable, recommended for apples-to-apples), "
+            "'raw' (uncorrected input), or 'pred' (EDCDF prediction)."
+        ),
+    )
     args = parser.parse_args()
 
     predictions_dir = Path(args.predictions_dir)
@@ -476,8 +526,10 @@ def main():
     print("=" * 80)
     print(f"  Predictions: {predictions_dir}")
     print(f"  Output:      {output_dir}")
+    print(f"  Years:       {args.years if args.years else 'all found in folder'}")
+    print(f"  Bin source:  {args.sea_bin_source}")
 
-    df = load_predictions(predictions_dir)
+    df = load_predictions(predictions_dir, years=args.years)
 
     # Auto-detect available variables if not specified
     if args.variables is None:
@@ -500,7 +552,9 @@ def main():
         if var not in VAR_CONFIG:
             print(f"  Warning: no config for variable '{var}', skipping")
             continue
-        overall, sea_bin_metrics = evaluate_variable(df, var, output_dir)
+        overall, sea_bin_metrics = evaluate_variable(
+            df, var, output_dir, sea_bin_source=args.sea_bin_source
+        )
         all_overall[var] = overall
         all_sea_bin[var] = sea_bin_metrics
 

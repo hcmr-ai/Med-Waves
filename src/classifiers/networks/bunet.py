@@ -272,6 +272,8 @@ class BU_Net_Geo_Nick(nn.Module):
         dropout=0.2,
         add_vhm0_residual=False,
         vhm0_channel_index=0,
+        use_mdn=False,
+        auxiliary_tasks=None,
     ):
         """
         BU-Net matching notebook architecture exactly.
@@ -284,6 +286,14 @@ class BU_Net_Geo_Nick(nn.Module):
         self.vhm0_channel_index = vhm0_channel_index
         self.filters = filters
         self.dropout = dropout
+        self.use_mdn = use_mdn
+        self.out_channels = out_channels
+        if auxiliary_tasks is None:
+            self.auxiliary_tasks = ["vhm0"]
+        elif isinstance(auxiliary_tasks, str):
+            self.auxiliary_tasks = [auxiliary_tasks]
+        else:
+            self.auxiliary_tasks = list(auxiliary_tasks)
 
         # Reflection padding: ((2, 2), (1, 1)) -> (left, right, top, bottom)
         self.reflection_pad = nn.ReflectionPad2d((1, 1, 2, 2))
@@ -333,10 +343,14 @@ class BU_Net_Geo_Nick(nn.Module):
             )
             current_channels = skip_channels
 
-        # Output correction: 1 channel, 3x3 conv, linear activation
-        self.correction_conv = nn.Conv2d(
-            filters[0], out_channels, kernel_size=3, padding=1
-        )
+        # Task-specific output heads over shared decoder features.
+        # Match latest trainer contract: one output map per task for non-MDN mode.
+        self.task_heads = nn.ModuleDict()
+        for task in self.auxiliary_tasks:
+            if use_mdn:
+                self.task_heads[task] = MDNHead(filters[0], K=3)
+            else:
+                self.task_heads[task] = nn.Conv2d(filters[0], 1, kernel_size=1)
 
         # Crop padding: removes (2, 2) from height, (1, 1) from width) handled in forward
 
@@ -373,27 +387,46 @@ class BU_Net_Geo_Nick(nn.Module):
             out = torch.cat([out, skip], dim=1)
             out = dec(out)
 
-        # Output correction
-        correction = self.correction_conv(out)  # Linear activation (no ReLU)
+        # Align residual input once (if enabled) to shared feature map shape.
+        if self.add_vhm0_residual and vhm0_raw.shape[2:] != out.shape[2:]:
+            vhm0_raw = F.interpolate(
+                vhm0_raw, size=out.shape[2:], mode="bilinear", align_corners=False
+            )
 
-        # Residual connection
-        if self.add_vhm0_residual:
-            if vhm0_raw.shape[2:] != correction.shape[2:]:
-                vhm0_raw = F.interpolate(
-                    vhm0_raw,
-                    size=correction.shape[2:],
-                    mode="bilinear",
-                    align_corners=False,
+        outputs = {}
+        for task in self.auxiliary_tasks:
+            if self.use_mdn:
+                pi, mu, sigma = self.task_heads[task](out)
+                if self.add_vhm0_residual and (
+                    task == "vhm0" or len(self.auxiliary_tasks) == 1
+                ):
+                    mu = mu + vhm0_raw
+                output_padded = (pi, mu, sigma)
+            else:
+                y = self.task_heads[task](out)
+                if self.add_vhm0_residual and (
+                    task == "vhm0" or len(self.auxiliary_tasks) == 1
+                ):
+                    y = y + vhm0_raw
+                output_padded = y
+
+            # Crop padding: remove (2, 2) from height, (1, 1) from width
+            if self.use_mdn:
+                pi, mu, sigma = output_padded
+                _, _, h, w = mu.shape
+                outputs[task] = (
+                    pi[:, :, 2 : h - 2, 1 : w - 1],
+                    mu[:, :, 2 : h - 2, 1 : w - 1],
+                    sigma[:, :, 2 : h - 2, 1 : w - 1],
                 )
-            output_padded = correction + vhm0_raw
-        else:
-            output_padded = correction
+            else:
+                _, _, h, w = output_padded.shape
+                outputs[task] = output_padded[:, :, 2 : h - 2, 1 : w - 1]
 
-        # Crop padding: remove (2, 2) from height, (1, 1) from width
-        _, _, h, w = output_padded.shape
-        output = output_padded[:, :, 2 : h - 2, 1 : w - 1]
+        if len(self.auxiliary_tasks) == 1:
+            return outputs[self.auxiliary_tasks[0]]
 
-        return output
+        return outputs
 
 
 class BU_Net_Geo_Nick_Enhanced(nn.Module):
@@ -407,6 +440,7 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
         vhm0_channel_index=0,
         upsample_mode="nearest",
         use_mdn=False,
+        auxiliary_tasks=None,
     ):
         """
         Enhanced BU-Net with geophysical padding and deeper architecture.
@@ -429,6 +463,15 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
         self.vhm0_channel_index = vhm0_channel_index
         self.filters = filters
         self.use_mdn = use_mdn
+        # Keep out_channels for backward compatibility with old configs.
+        # Latest training logic is task-based and expects 1 channel per task head.
+        self.out_channels = out_channels
+        if auxiliary_tasks is None:
+            self.auxiliary_tasks = ["vhm0"]
+        elif isinstance(auxiliary_tasks, str):
+            self.auxiliary_tasks = [auxiliary_tasks]
+        else:
+            self.auxiliary_tasks = list(auxiliary_tasks)
         # Encoder with GeoConv
         self.encoders = nn.ModuleList()
         self.pools = nn.ModuleList()
@@ -472,10 +515,14 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
             self.decoder_dropouts.append(nn.Dropout2d(dropout))
             prev_c = f
 
-        if use_mdn:
-            self.mdn_head = MDNHead(filters[-1], K=3)
-        else:
-            self.final_conv = nn.Conv2d(filters[0], out_channels, kernel_size=1)
+        # Task-specific output heads from shared decoder features (filters[0] channels)
+        self.task_heads = nn.ModuleDict()
+        for task in self.auxiliary_tasks:
+            if use_mdn:
+                self.task_heads[task] = MDNHead(filters[0], K=3)
+            else:
+                # Match TransUNetGeo / latest trainer contract: one output map per task.
+                self.task_heads[task] = nn.Conv2d(filters[0], 1, kernel_size=1)
 
     def forward(self, x):
         # Store VHM0 for residual connection
@@ -515,18 +562,33 @@ class BU_Net_Geo_Nick_Enhanced(nn.Module):
             x = dec(x)
             x = dropout(x)
 
-        # Final output
-        x = self.final_conv(x)
+        # Align residual input once (if enabled)
+        if self.add_vhm0_residual and vhm0_input.shape[2:] != x.shape[2:]:
+            vhm0_input = F.interpolate(
+                vhm0_input, size=x.shape[2:], mode="bilinear", align_corners=False
+            )
 
-        # Add residual connection
-        if self.add_vhm0_residual:
-            if vhm0_input.shape[2:] != x.shape[2:]:
-                vhm0_input = F.interpolate(
-                    vhm0_input, size=x.shape[2:], mode="bilinear", align_corners=False
-                )
-            x = x + vhm0_input
+        # Task-specific outputs
+        outputs = {}
+        for task in self.auxiliary_tasks:
+            if self.use_mdn:
+                pi, mu, sigma = self.task_heads[task](x)
+                # Residual shift on means only for VHM0 (or legacy single-task mode)
+                if self.add_vhm0_residual and (
+                    task == "vhm0" or len(self.auxiliary_tasks) == 1
+                ):
+                    mu = mu + vhm0_input
+                outputs[task] = (pi, mu, sigma)
+            else:
+                y = self.task_heads[task](x)
+                if self.add_vhm0_residual and (
+                    task == "vhm0" or len(self.auxiliary_tasks) == 1
+                ):
+                    y = y + vhm0_input
+                outputs[task] = y
 
-        if self.use_mdn:
-            return self.mdn_head(x)
-        else:
-            return x
+        # Backward compatibility: single-task returns tensor/tuple, not dict
+        if len(self.auxiliary_tasks) == 1:
+            return outputs[self.auxiliary_tasks[0]]
+
+        return outputs

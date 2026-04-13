@@ -2,7 +2,36 @@ import argparse
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
+
+# Prefer large mounted storage for temp files, but fall back safely.
+def _set_temp_dir() -> str:
+    candidates = [
+        "/mnt/blobfuse2-cache/tmp",
+        "/mnt/blobfuse-cache/tmp",
+        "/mnt/blobstorage/.tmp",
+        str(Path.home() / ".cache" / "medwav" / "tmp"),
+    ]
+
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            tempfile.tempdir = candidate
+            os.environ["TMPDIR"] = candidate
+            return candidate
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+
+    fallback = tempfile.gettempdir()
+    tempfile.tempdir = fallback
+    os.environ["TMPDIR"] = fallback
+    return fallback
+
+
+_mnt_tmp = _set_temp_dir()
 
 # Add src to Python path
 project_root = Path(__file__).parent.parent.parent
@@ -51,6 +80,42 @@ from lightning.pytorch.callbacks import (
     StochasticWeightAveraging,
 )
 from lightning.pytorch.loggers import CometLogger, TensorBoardLogger
+
+
+def _configure_torch_precision() -> None:
+    """
+    Configure Tensor Core/TF32 behavior across PyTorch versions.
+
+    Newer versions expose:
+      - torch.backends.cudnn.conv.fp32_precision
+      - torch.backends.cuda.matmul.fp32_precision
+    Older versions use:
+      - torch.backends.cuda.matmul.allow_tf32
+      - torch.backends.cudnn.allow_tf32
+    """
+    torch.set_float32_matmul_precision("medium")
+
+    # Prefer new API when available.
+    try:
+        if hasattr(torch.backends.cudnn, "conv") and hasattr(
+            torch.backends.cuda, "matmul"
+        ):
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
+            # Keep matmul IEEE unless explicitly changed by config later.
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+            logger.info("Configured precision using new PyTorch fp32_precision API")
+            return
+    except Exception as e:
+        logger.warning(f"Failed new precision API setup, falling back: {e}")
+
+    # Backward-compatible fallback.
+    if hasattr(torch.backends.cuda, "matmul") and hasattr(
+        torch.backends.cuda.matmul, "allow_tf32"
+    ):
+        torch.backends.cuda.matmul.allow_tf32 = True
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
+        torch.backends.cudnn.allow_tf32 = True
+    logger.info("Configured precision using legacy TF32 flags")
 
 
 def _log_training_artifacts(comet_logger, config_file):
@@ -156,7 +221,10 @@ def create_callbacks(config: DNNConfig) -> list:
     # Add Comet visualization callback if using Comet
     if config.config["logging"]["use_comet"]:
         logger.info("Adding Comet visualization callback")
-        comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
+        comet_callback = CometVisualizationCallback(
+            log_every_n_epochs=1,
+            log_param_grad_norms=training_config.get("log_param_grad_norms", False),
+        )
         callbacks.append(comet_callback)
 
     if config.config["training"]["use_swa"]:
@@ -191,13 +259,63 @@ def create_callbacks(config: DNNConfig) -> list:
     return callbacks
 
 
-def main():
-    # Optimize for Tensor Cores on modern GPUs (fixes the warning)
-    torch.set_float32_matmul_precision("medium")
+def _validate_training_mode_config(config: DNNConfig) -> None:
+    """Validate mutually-exclusive training target modes early."""
+    data_cfg = config.config["data"]
+    target_columns = data_cfg.get("target_columns", {"vhm0": "corrected_VHM0"})
 
-    # Use new API to avoid deprecation warnings
-    torch.backends.cudnn.conv.fp32_precision = "tf32"
-    torch.backends.cuda.matmul.fp32_precision = "ieee"
+    predict_bias = bool(data_cfg.get("predict_bias", False))
+    predict_residual_to_prior = bool(data_cfg.get("predict_residual_to_prior", False))
+    normalize_target = bool(data_cfg.get("normalize_target", False))
+
+    active_modes = [
+        name
+        for name, enabled in [
+            ("predict_bias", predict_bias),
+            ("predict_residual_to_prior", predict_residual_to_prior),
+            ("normalize_target", normalize_target),
+        ]
+        if enabled
+    ]
+
+    if len(active_modes) > 1:
+        raise ValueError(
+            "Only one of data.predict_bias, data.predict_residual_to_prior, "
+            f"and data.normalize_target can be enabled. Active: {active_modes}"
+        )
+
+    if predict_residual_to_prior:
+        residual_prior_task = data_cfg.get("residual_prior_task", None)
+        if residual_prior_task is None:
+            if len(target_columns) == 1:
+                residual_prior_task = list(target_columns.keys())[0]
+                data_cfg["residual_prior_task"] = residual_prior_task
+                logger.info(
+                    "Auto-inferred residual_prior_task='%s' from target_columns",
+                    residual_prior_task,
+                )
+            elif "vhm0" in target_columns:
+                data_cfg["residual_prior_task"] = "vhm0"
+                logger.info(
+                    "Auto-inferred residual_prior_task='vhm0' from target_columns",
+                )
+            else:
+                raise ValueError(
+                    "data.residual_prior_task must be set when using multi-task residual-to-prior training."
+                )
+        elif residual_prior_task not in target_columns:
+            raise ValueError(
+                f"data.residual_prior_task='{residual_prior_task}' not found in data.target_columns={list(target_columns.keys())}"
+            )
+        if data_cfg.get("residual_prior_task") != "vhm0":
+            raise ValueError(
+                "Residual-to-prior training currently supports only residual_prior_task='vhm0'."
+            )
+
+
+def main():
+    # Optimize for Tensor Cores with compatibility across torch versions.
+    _configure_torch_precision()
 
     parser = argparse.ArgumentParser(description="Train DNN for wave height correction")
     parser.add_argument("--config", type=str, help="Path to configuration YAML file")
@@ -245,12 +363,15 @@ def main():
     if args.resume:
         config.config["checkpoint"]["resume_from_checkpoint"] = args.resume
 
+    _validate_training_mode_config(config)
+
     # Create directories
     os.makedirs(config.config["checkpoint"]["checkpoint_dir"], exist_ok=True)
     os.makedirs(config.config["logging"]["log_dir"], exist_ok=True)
 
-    # Initialize S3 filesystem
-    fs = s3fs.S3FileSystem()
+    # Initialize S3 filesystem only when data is on S3
+    data_path = config.config["data"]["data_path"]
+    fs = s3fs.S3FileSystem() if data_path.startswith("s3://") else None
 
     # Create data loaders
     logger.info("Creating data loaders...")
@@ -287,6 +408,12 @@ def main():
         logger.info("LR Scheduler: None")
 
     local_predict_bias = config.config.get("data", {}).get("predict_bias", False)
+    local_predict_residual_to_prior = config.config.get("data", {}).get(
+        "predict_residual_to_prior", False
+    )
+    local_residual_prior_task = config.config.get("data", {}).get(
+        "residual_prior_task", None
+    )
 
     # Handle checkpoint resuming (local or S3)
     resume_path = config.config["checkpoint"]["resume_from_checkpoint"]
@@ -296,6 +423,10 @@ def main():
             resume_path, config.config["checkpoint"]["checkpoint_dir"]
         )
     logger.info(f"Resume path: {resume_path}")
+
+    local_log_train_sea_bin_metrics = config.config["training"].get(
+        "log_train_sea_bin_metrics", False
+    )
 
     finetune_model = config.config["training"]["finetune_model"]
     if finetune_model:
@@ -317,10 +448,29 @@ def main():
             discriminator_lr_multiplier=model_config.get(
                 "discriminator_lr_multiplier", 1.0
             ),
+            transunet_base_channels=model_config.get("transunet_base_channels", 32),
+            transunet_bottleneck_dim=model_config.get("transunet_bottleneck_dim", 512),
+            transunet_patch_size=model_config.get("transunet_patch_size", 8),
+            transunet_num_layers=model_config.get("transunet_num_layers", 4),
+            transunet_num_heads=model_config.get("transunet_num_heads", 8),
+            transformer_use_coord_pos_enc=model_config.get(
+                "transformer_use_coord_pos_enc", True
+            ),
+            transformer_sea_mask_channel_index=model_config.get(
+                "transformer_sea_mask_channel_index", None
+            ),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
             use_patch_sampling=data_config.get("use_patch_sampling", False),
+            predict_bias=local_predict_bias,
+            predict_residual_to_prior=local_predict_residual_to_prior,
+            residual_prior_task=local_residual_prior_task,
+            residual_penalty_lambda=float(
+                model_config.get("residual_penalty_lambda", 0.0)
+            ),
+            huber_delta=float(model_config.get("huber_delta", 1.0)),
+            log_train_sea_bin_metrics=local_log_train_sea_bin_metrics,
         )
     else:
         logger.info("Training new model")
@@ -347,10 +497,28 @@ def main():
             discriminator_lr_multiplier=model_config.get(
                 "discriminator_lr_multiplier", 1.0
             ),
+            transunet_base_channels=model_config.get("transunet_base_channels", 32),
+            transunet_bottleneck_dim=model_config.get("transunet_bottleneck_dim", 512),
+            transunet_patch_size=model_config.get("transunet_patch_size", 8),
+            transunet_num_layers=model_config.get("transunet_num_layers", 4),
+            transunet_num_heads=model_config.get("transunet_num_heads", 8),
+            transformer_use_coord_pos_enc=model_config.get(
+                "transformer_use_coord_pos_enc", True
+            ),
+            transformer_sea_mask_channel_index=model_config.get(
+                "transformer_sea_mask_channel_index", None
+            ),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
             use_patch_sampling=data_config.get("use_patch_sampling", False),
+            predict_residual_to_prior=local_predict_residual_to_prior,
+            residual_prior_task=local_residual_prior_task,
+            residual_penalty_lambda=float(
+                model_config.get("residual_penalty_lambda", 0.0)
+            ),
+            huber_delta=float(model_config.get("huber_delta", 1.0)),
+            log_train_sea_bin_metrics=local_log_train_sea_bin_metrics,
         )
 
     # Create callbacks
@@ -428,6 +596,7 @@ def main():
         num_sanity_val_steps=training_config["num_sanity_val_steps"],
         benchmark=training_config["benchmark"],
         val_check_interval=training_config["val_check_interval"],
+        accumulate_grad_batches=training_config.get("accumulate_grad_batches", 1),
     )
 
     # Train model

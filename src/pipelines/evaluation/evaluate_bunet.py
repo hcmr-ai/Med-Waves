@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+import joblib
 import lightning as pl
 import numpy as np
 import torch
@@ -41,6 +42,9 @@ from src.commons.postprocessing.post_processing import (
 )
 from src.commons.preprocessing.bu_net_preprocessing import WaveNormalizer
 from src.evaluation.evaluation_plots import (
+    plot_coastal_distance_improvement as plot_coastal_distance_improvement_fn,
+)
+from src.evaluation.evaluation_plots import (
     plot_error_boxplots as plot_error_boxplots_fn,
 )
 from src.evaluation.evaluation_plots import (
@@ -54,6 +58,12 @@ from src.evaluation.evaluation_plots import (
 )
 from src.evaluation.evaluation_plots import (
     plot_model_better_percentage as plot_model_better_percentage_fn,
+)
+from src.evaluation.evaluation_plots import (
+    plot_low_bin_advanced_diagnostics as plot_low_bin_advanced_diagnostics_fn,
+)
+from src.evaluation.evaluation_plots import (
+    plot_low_bin_spatial_maps as plot_low_bin_spatial_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
     plot_rmse_maps as plot_rmse_maps_fn,
@@ -72,6 +82,11 @@ from src.evaluation.visuals import load_coordinates_from_parquet
 
 logger = logging.getLogger(__name__)
 
+try:
+    from scipy.ndimage import distance_transform_edt
+except Exception:
+    distance_transform_edt = None
+
 
 class ModelEvaluator:
     """Comprehensive model evaluation with metrics and visualizations."""
@@ -82,6 +97,8 @@ class ModelEvaluator:
         test_loader: DataLoader,
         output_dir: Path,
         predict_bias: bool = False,
+        predict_residual_to_prior: bool = False,
+        residual_prior_task: str = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         normalizer: WaveNormalizer = None,
         normalize_target: bool = False,
@@ -94,20 +111,38 @@ class ModelEvaluator:
         target_columns: dict = None,
         apply_bilateral_filter: bool = False,
         apply_delta_corrector_flag: bool = False,
+        region_filter: str = None,
+        low_wave_ckpt: str = None,
+        high_wave_ckpt: str = None,
+        static_bias_map_path: str = None,
+        blend_sigma: float = None,
+        domain_mean_recalibration: bool = False,
+        edcdf_model_path: str = None,
+        edcdf_blend_sigma: float = None,
+        edcdf_hard_fallback_bins: List[List[float]] = None,
+        edcdf_fallback_bin_source: str = "raw",
+        prior_hard_fallback_bins: List[List[float]] = None,
+        prior_fallback_bin_source: str = "raw",
+        prior_fallback_target: str = "prior",
+        low_bin_affine_params: List[dict] = None,
+        low_bin_affine_source: str = "raw",
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
+        self.region_filter = region_filter
         self.model = model.to(device)
         self.model.eval()
 
         # Load bin-specific model for 0-2m waves (HARDCODED FOR TESTING)
         self.low_wave_model = None
         try:
-            low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
-            low_wave_ckpt = ""
+            # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_17-21_mse_64_lambda_lr/epoch=36-val_loss=0.02.ckpt"
+            # low_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta/epoch=16-val_loss=0.02.ckpt"
+            # low_wave_ckpt = ""
+            low_wave_ckpt = low_wave_ckpt
             # low_wave_ckpt = "s3://medwav-dev-data/checkpoints/dnn_training_subsample_step_5_100_val_test_23_nick_17-22_light_mse_64_enhanced_no_residual_patch_bin_balanced/epoch=19-val_loss=0.01.ckpt"
             logger.info(
-                f"Loading specialized model for 0-2m waves from {low_wave_ckpt}"
+                f"[LOW-WAVE] Loading specialized model for 0-2m waves from {low_wave_ckpt}"
             )
 
             # Load checkpoint manually to extract hyperparameters
@@ -122,7 +157,7 @@ class ModelEvaluator:
 
             # Extract hyperparameters from checkpoint
             hparams = ckpt.get("hyper_parameters", {})
-            logger.info(f"Checkpoint hyperparameters: {list(hparams.keys())}")
+            logger.info(f"[LOW-WAVE] Checkpoint hyperparameters: {list(hparams.keys())}")
 
             # Create model instance with checkpoint hyperparameters
             from src.classifiers.lightning_trainer import WaveBiasCorrector
@@ -151,7 +186,7 @@ class ModelEvaluator:
                 "model.final.weight" in state_dict
                 and "model.task_heads.vhm0.weight" not in state_dict
             ):
-                logger.info("Remapping single-task checkpoint to multi-task format")
+                logger.info("[LOW-WAVE] Remapping single-task checkpoint to multi-task format")
                 # Rename final layer keys: model.final.* → model.task_heads.vhm0.*
                 new_state_dict = {}
                 for key, value in state_dict.items():
@@ -165,10 +200,10 @@ class ModelEvaluator:
             self.low_wave_model.load_state_dict(state_dict, strict=False)
             self.low_wave_model.to(device)
             self.low_wave_model.eval()
-            logger.info("✓ Successfully loaded 0-2m specialized model from state_dict")
+            logger.info("[LOW-WAVE] ✓ Successfully loaded 0-2m specialized model from state_dict")
         except Exception as e:
             logger.warning(
-                f"Failed to load specialized 0-2m model: {e}. Using default model for all predictions."
+                f"[LOW-WAVE] Failed to load specialized 0-2m model: {e}. Using default model for all predictions."
             )
             self.low_wave_model = None
             import traceback
@@ -178,9 +213,10 @@ class ModelEvaluator:
         # Load bin-specific model for >=9m waves (HARDCODED FOR TESTING)
         self.high_wave_model = None
         try:
-            high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
-            high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
-            high_wave_ckpt = ""
+            # high_wave_ckpt = "s3://medwav-dev-data/checkpoints/checkpoints_full_20-21_huber_64_lambda_lr_256/last-v1.ckpt"  # TODO: Replace with actual checkpoint path
+            # high_wave_ckpt = "/opt/dlami/nvme/checkpoints_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_huber_tail_64_lambda_lr_bias_correction_mediterranean_filtered/epoch=14-val_loss=0.03.ckpt"
+            # high_wave_ckpt = "/opt/dlami/nvme/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean/epoch=10-val_loss=0.01.ckpt"
+            high_wave_ckpt = high_wave_ckpt
             print(
                 f"[HIGH-WAVE] Loading specialized model for 8-9m waves from {high_wave_ckpt}"
             )
@@ -253,6 +289,7 @@ class ModelEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device
         self.predict_bias = predict_bias
+        self.predict_residual_to_prior = predict_residual_to_prior
         self.normalizer = normalizer
         self.normalize_target = normalize_target
         self.apply_binwise_correction_flag = apply_binwise_correction_flag
@@ -264,6 +301,13 @@ class ModelEvaluator:
         # For backward compatibility and single-task evaluation, use first target
         self.target_column = list(self.target_columns.values())[0]
         self.task_name = list(self.target_columns.keys())[0]
+        if residual_prior_task is None:
+            if "vhm0" in self.target_columns:
+                residual_prior_task = "vhm0"
+            else:
+                residual_prior_task = self.task_name
+        self.residual_prior_task = residual_prior_task
+        self.eval_in_bias_mode = self.predict_bias or self.predict_residual_to_prior
         print(self.target_column, self.task_name)
         print(self.target_columns)
 
@@ -274,6 +318,15 @@ class ModelEvaluator:
             logger.info("Applying DeltaCorrector to predictions for bins >= 11m")
         self._configure_sea_bins()
         self._configure_labels()
+        self.low_bin_spatial_subbins = [(0.0, 0.1), (0.1, 0.2)]
+        self.coastal_distance_bins_km = [
+            (0.0, 10.0),
+            (10.0, 25.0),
+            (25.0, 50.0),
+            (50.0, float("inf")),
+        ]
+        self.coastal_distance_km_map = None
+        self.coastal_distance_bin_idx_map = None
 
         self.test_files = test_files
         self.subsample_step = subsample_step
@@ -283,12 +336,17 @@ class ModelEvaluator:
         if self.geo_bounds and self.test_files:
             self._load_geographic_mask()
 
+        # Build static spatial exclusion mask (Bay of Biscay: Atlantic water above Gibraltar)
+        self.atlantic_exclusion_mask = None
+        # self._build_atlantic_exclusion_mask()
+
         # Add spatial accumulators for RMSE maps
         self.spatial_errors_model = []  # Store (error_map, count_map) for each batch
         self.spatial_errors_baseline = []
 
         # Initialize accumulators for incremental computation
         self._reset_accumulators()
+        self._init_coastal_distance_diagnostics()
 
         # Sample storage for plots (optional, limited size)
         self.plot_samples = {
@@ -300,6 +358,273 @@ class ModelEvaluator:
 
         # Timestamp cache for seasonal analysis
         self._timestamps_cache = {}
+
+        # Static bias map for soft blend and domain-mean recalibration
+        self.static_bias_map = None
+        self.static_bias_valid = None
+        self.static_domain_mean = None
+        self.blend_sigma = blend_sigma
+        self.domain_mean_recalibration = domain_mean_recalibration
+        if static_bias_map_path and (blend_sigma is not None or domain_mean_recalibration):
+            self._load_static_bias_map(static_bias_map_path)
+
+        # Optional EDCDF prior for Gaussian trust blending of predicted bias
+        self.edcdf_corrector = None
+        self.edcdf_blend_sigma = edcdf_blend_sigma
+        self.edcdf_hard_fallback_bins = self._parse_wave_bin_ranges(
+            edcdf_hard_fallback_bins
+        )
+        self.edcdf_fallback_bin_source = (
+            str(edcdf_fallback_bin_source).strip().lower()
+            if edcdf_fallback_bin_source is not None
+            else "raw"
+        )
+        if self.edcdf_fallback_bin_source not in {"raw", "edcdf", "true"}:
+            logger.warning(
+                f"Unknown edcdf_fallback_bin_source='{edcdf_fallback_bin_source}', using 'raw'"
+            )
+            self.edcdf_fallback_bin_source = "raw"
+        if edcdf_model_path and (
+            edcdf_blend_sigma is not None or len(self.edcdf_hard_fallback_bins) > 0
+        ):
+            self._load_edcdf_corrector(edcdf_model_path)
+        self._edcdf_fallback_total_valid = 0
+        self._edcdf_fallback_total_applied = 0
+        self._edcdf_fallback_applied_per_bin = {
+            f"[{lo},{hi})": 0 for lo, hi in self.edcdf_hard_fallback_bins
+        }
+        if self.edcdf_hard_fallback_bins and self.edcdf_fallback_bin_source != "true":
+            logger.info(
+                "EDCDF hard fallback gating is not using true bins "
+                f"(source='{self.edcdf_fallback_bin_source}'). "
+                "Sea-bin plots use true bins, so fallback coverage may differ from plotted bins."
+            )
+        self.prior_hard_fallback_bins = self._parse_wave_bin_ranges(
+            prior_hard_fallback_bins
+        )
+        self.prior_fallback_bin_source = (
+            str(prior_fallback_bin_source).strip().lower()
+            if prior_fallback_bin_source is not None
+            else "raw"
+        )
+        if self.prior_fallback_bin_source not in {"raw", "true"}:
+            logger.warning(
+                f"Unknown prior_fallback_bin_source='{prior_fallback_bin_source}', using 'raw'"
+            )
+            self.prior_fallback_bin_source = "raw"
+        self.prior_fallback_target = (
+            str(prior_fallback_target).strip().lower()
+            if prior_fallback_target is not None
+            else "prior"
+        )
+        if self.prior_fallback_target not in {"prior", "raw"}:
+            logger.warning(
+                f"Unknown prior_fallback_target='{prior_fallback_target}', using 'prior'"
+            )
+            self.prior_fallback_target = "prior"
+        self._prior_fallback_total_valid = 0
+        self._prior_fallback_total_applied = 0
+        self._prior_fallback_applied_per_bin = {
+            f"[{lo},{hi})": 0 for lo, hi in self.prior_hard_fallback_bins
+        }
+        if self.prior_hard_fallback_bins and self.prior_fallback_bin_source != "true":
+            logger.info(
+                "Prior hard fallback gating is not using true bins "
+                f"(source='{self.prior_fallback_bin_source}'). "
+                "Sea-bin plots use true bins, so fallback coverage may differ from plotted bins."
+            )
+
+        self.low_bin_affine_params = self._parse_low_bin_affine_params(
+            low_bin_affine_params
+        )
+        self.low_bin_affine_source = (
+            str(low_bin_affine_source).strip().lower()
+            if low_bin_affine_source is not None
+            else "raw"
+        )
+        if self.low_bin_affine_source not in {"raw", "true"}:
+            logger.warning(
+                f"Unknown low_bin_affine_source='{low_bin_affine_source}', using 'raw'"
+            )
+            self.low_bin_affine_source = "raw"
+
+    def _parse_wave_bin_ranges(self, bins) -> List[tuple]:
+        """Parse [[lo, hi], ...] wave bins into validated [(lo, hi), ...]."""
+        if bins is None:
+            return []
+
+        parsed = []
+        for idx, item in enumerate(bins):
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                logger.warning(
+                    f"Skipping invalid EDCDF fallback bin at index {idx}: {item}"
+                )
+                continue
+            try:
+                lo = float(item[0])
+                hi = float(item[1])
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Skipping non-numeric EDCDF fallback bin at index {idx}: {item}"
+                )
+                continue
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                logger.warning(
+                    f"Skipping invalid EDCDF fallback bin bounds at index {idx}: {item}"
+                )
+                continue
+            parsed.append((lo, hi))
+
+        if parsed:
+            logger.info(f"EDCDF hard fallback bins enabled: {parsed}")
+        return parsed
+
+    def _parse_low_bin_affine_params(self, params) -> List[dict]:
+        """Parse low-bin affine calibration config into validated entries."""
+        if params is None:
+            return []
+        parsed = []
+        for i, p in enumerate(params):
+            if not isinstance(p, dict):
+                logger.warning(f"Skipping invalid low_bin_affine_params[{i}]: {p}")
+                continue
+            try:
+                lo = float(p["min"])
+                hi = float(p["max"])
+                a = float(p["a"])
+                c = float(p["c"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning(f"Skipping malformed low_bin_affine_params[{i}]: {p}")
+                continue
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                logger.warning(f"Skipping invalid low-bin range low_bin_affine_params[{i}]: {p}")
+                continue
+            parsed.append({"min": lo, "max": hi, "a": a, "c": c})
+        if parsed:
+            logger.info(f"Low-bin affine calibration enabled with {len(parsed)} range(s): {parsed}")
+        return parsed
+
+    def _load_static_bias_map(self, path: str):
+        """Load static bias map and crop to match dataset region."""
+        try:
+            raw = np.load(path)
+            valid = ~np.isnan(raw)
+            raw = np.nan_to_num(raw, nan=0.0)
+
+            dataset = self.test_loader.dataset
+            crop_h = getattr(dataset, "crop_h_indices", None)
+            crop_w = getattr(dataset, "crop_w_indices", None)
+            if crop_h is not None and crop_w is not None:
+                raw = raw[crop_h.numpy(), :][:, crop_w.numpy()]
+                valid = valid[crop_h.numpy(), :][:, crop_w.numpy()]
+
+            self.static_bias_map = torch.from_numpy(raw).float().to(self.device)
+            self.static_bias_valid = torch.from_numpy(valid).to(self.device)
+            self.static_domain_mean = self.static_bias_map[self.static_bias_valid].mean().item()
+            logger.info(
+                f"Loaded static bias map ({self.static_bias_map.shape}) "
+                f"with blend_sigma={self.blend_sigma}, "
+                f"domain_mean_recal={self.domain_mean_recalibration}, "
+                f"static_domain_mean={self.static_domain_mean:.6f}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not load static bias map: {e}")
+            self.static_bias_map = None
+            self.static_bias_valid = None
+
+    def _load_edcdf_corrector(self, path: str):
+        """Load fitted EDCDFCorrector used as a dynamic prior."""
+        try:
+            self.edcdf_corrector = joblib.load(path)
+            n_models = len(getattr(self.edcdf_corrector, "cdf_models", {}))
+            logger.info(
+                f"Loaded EDCDF model from {path} with {n_models} variable model(s), "
+                f"edcdf_blend_sigma={self.edcdf_blend_sigma}"
+            )
+        except Exception as e:
+            logger.warning(f"Could not load EDCDF model from {path}: {e}")
+            self.edcdf_corrector = None
+
+    def _format_distance_bin_label(self, lo: float, hi: float) -> str:
+        if np.isinf(hi):
+            return f">={int(lo)}km"
+        return f"{int(lo)}-{int(hi)}km"
+
+    def _init_coastal_distance_diagnostics(self):
+        """Build distance-to-coast map (km) and per-pixel distance-bin map."""
+        if distance_transform_edt is None:
+            logger.warning(
+                "scipy.ndimage.distance_transform_edt unavailable; coastal diagnostics disabled."
+            )
+            return
+        try:
+            dataset = self.test_loader.dataset
+            if not hasattr(dataset, "get_coordinates"):
+                logger.warning("Dataset has no get_coordinates; coastal diagnostics disabled.")
+                return
+
+            lat_grid, lon_grid = dataset.get_coordinates()
+            lat_grid = np.asarray(lat_grid, dtype=np.float64)
+            lon_grid = np.asarray(lon_grid, dtype=np.float64)
+            if lat_grid.ndim != 2 or lon_grid.ndim != 2:
+                logger.warning("Invalid coordinate grids for coastal diagnostics.")
+                return
+
+            # Use first sample mask as static sea/land proxy.
+            sample = dataset[0]
+            if not isinstance(sample, (tuple, list)) or len(sample) < 3:
+                logger.warning("Could not read sample mask for coastal diagnostics.")
+                return
+            sample_mask = sample[2]
+            if isinstance(sample_mask, torch.Tensor):
+                sample_mask_np = sample_mask.detach().cpu().numpy()
+            else:
+                sample_mask_np = np.asarray(sample_mask)
+            if sample_mask_np.ndim == 3:
+                sea_mask = sample_mask_np[0].astype(bool)
+            elif sample_mask_np.ndim == 2:
+                sea_mask = sample_mask_np.astype(bool)
+            else:
+                logger.warning("Unexpected sample mask shape for coastal diagnostics.")
+                return
+
+            # Estimate km spacing per pixel from coordinate grid.
+            lat_diffs = np.abs(np.diff(lat_grid, axis=0))
+            lon_diffs = np.abs(np.diff(lon_grid, axis=1))
+            lat_step_deg = np.nanmedian(lat_diffs[np.isfinite(lat_diffs)])
+            lon_step_deg = np.nanmedian(lon_diffs[np.isfinite(lon_diffs)])
+            mean_lat = np.nanmean(lat_grid[np.isfinite(lat_grid)])
+            lat_km = max(1e-6, 111.32 * lat_step_deg)
+            lon_km = max(1e-6, 111.32 * np.cos(np.deg2rad(mean_lat)) * lon_step_deg)
+
+            if not np.isfinite(lat_km) or not np.isfinite(lon_km):
+                logger.warning("Invalid coordinate spacing; coastal diagnostics disabled.")
+                return
+
+            # Distance to nearest land for sea pixels.
+            dist_km = distance_transform_edt(sea_mask, sampling=(lat_km, lon_km)).astype(
+                np.float64
+            )
+            dist_km[~sea_mask] = np.nan
+
+            bin_idx = np.full(dist_km.shape, -1, dtype=np.int16)
+            for i, (lo, hi) in enumerate(self.coastal_distance_bins_km):
+                if np.isinf(hi):
+                    m = sea_mask & (dist_km >= lo)
+                else:
+                    m = sea_mask & (dist_km >= lo) & (dist_km < hi)
+                bin_idx[m] = i
+
+            self.coastal_distance_km_map = dist_km
+            self.coastal_distance_bin_idx_map = bin_idx
+            logger.info(
+                "Initialized coastal diagnostics with bins: %s",
+                [self._format_distance_bin_label(lo, hi) for lo, hi in self.coastal_distance_bins_km],
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize coastal diagnostics: {e}")
+            self.coastal_distance_km_map = None
+            self.coastal_distance_bin_idx_map = None
 
     def _reset_accumulators(self):
         """Reset all metric accumulators."""
@@ -345,6 +670,41 @@ class ModelEvaluator:
         }
 
         self.spatial_rmse_accumulators = {}
+        self.low_bin_spatial_accumulators = {
+            f"{lo:.1f}_{hi:.1f}": {
+                "sum_delta_abs_err": None,
+                "sum_model_err": None,
+                "sum_base_err": None,
+                "count": None,
+                "count_worse": None,
+            }
+            for lo, hi in self.low_bin_spatial_subbins
+        }
+        self.low_bin_plot_sample_limit_per_subbin = 250000
+        self.low_bin_plot_samples = {
+            f"{lo:.1f}_{hi:.1f}": {
+                "true_wave": [],
+                "pred_wave": [],
+                "raw_wave": [],
+                "true_bias": [],
+                "pred_bias": [],
+                "prior_bias": [],
+            }
+            for lo, hi in self.low_bin_spatial_subbins
+        }
+        self.coastal_distance_accumulators = {
+            i: {
+                "label": self._format_distance_bin_label(lo, hi),
+                "count": 0,
+                "sum_mae": 0.0,
+                "sum_mse": 0.0,
+                "sum_bias": 0.0,
+                "sum_baseline_mae": 0.0,
+                "sum_baseline_mse": 0.0,
+                "sum_baseline_bias": 0.0,
+            }
+            for i, (lo, hi) in enumerate(self.coastal_distance_bins_km)
+        }
 
         # Category breakdown accumulators: corrected vs not_corrected
         self.category_breakdown = {}
@@ -388,6 +748,440 @@ class ModelEvaluator:
                 "seasons": {"winter": 0, "spring": 0, "summer": 0, "autumn": 0},
             },
         }
+
+        # Detailed diagnostics for first two bins (calm/light)
+        self.low_bin_sample_limit = 200000
+        self.low_bin_diagnostics = {}
+        for bin_config in self.sea_bins:
+            if bin_config["name"] not in {"calm", "light"}:
+                continue
+            bmin = float(bin_config["min"])
+            bmax = float(bin_config["max"])
+            step = 0.1
+            n_true = max(1, int(round((bmax - bmin) / step)))
+            self.low_bin_diagnostics[bin_config["name"]] = {
+                "label": bin_config["label"],
+                "bin_min": bmin,
+                "bin_max": bmax,
+                "step": step,
+                "count": 0,
+                "raw_in_same_bin_count": 0,
+                "sum_true": 0.0,
+                "sum_pred": 0.0,
+                "sum_raw": 0.0,
+                "sum_model_err": 0.0,
+                "sum_model_abs_err": 0.0,
+                "sum_model_sq_err": 0.0,
+                "sum_base_err": 0.0,
+                "sum_base_abs_err": 0.0,
+                "sum_base_sq_err": 0.0,
+                "true_subbin": {
+                    "count": np.zeros(n_true, dtype=np.int64),
+                    "sum_model_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_model_abs_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_model_sq_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_abs_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_base_sq_err": np.zeros(n_true, dtype=np.float64),
+                    "sum_true": np.zeros(n_true, dtype=np.float64),
+                    "sum_pred": np.zeros(n_true, dtype=np.float64),
+                    "sum_raw": np.zeros(n_true, dtype=np.float64),
+                },
+                "samples": {
+                    "true": [],
+                    "pred": [],
+                    "raw": [],
+                    "model_err": [],
+                    "base_err": [],
+                },
+            }
+
+    def _update_low_bin_diagnostics(
+        self,
+        bin_name: str,
+        bin_y_true: np.ndarray,
+        bin_y_pred: np.ndarray,
+        bin_y_uncorrected: np.ndarray,
+    ) -> None:
+        """Update detailed diagnostics for calm/light bins."""
+        if bin_name not in self.low_bin_diagnostics:
+            return
+        if len(bin_y_true) == 0:
+            return
+
+        stats = self.low_bin_diagnostics[bin_name]
+        n = len(bin_y_true)
+        model_err = bin_y_pred - bin_y_true
+        base_err = bin_y_uncorrected - bin_y_true
+
+        stats["count"] += n
+        stats["raw_in_same_bin_count"] += int(
+            np.sum(
+                (bin_y_uncorrected >= stats["bin_min"])
+                & (bin_y_uncorrected < stats["bin_max"])
+            )
+        )
+        stats["sum_true"] += float(np.sum(bin_y_true))
+        stats["sum_pred"] += float(np.sum(bin_y_pred))
+        stats["sum_raw"] += float(np.sum(bin_y_uncorrected))
+        stats["sum_model_err"] += float(np.sum(model_err))
+        stats["sum_model_abs_err"] += float(np.sum(np.abs(model_err)))
+        stats["sum_model_sq_err"] += float(np.sum(model_err**2))
+        stats["sum_base_err"] += float(np.sum(base_err))
+        stats["sum_base_abs_err"] += float(np.sum(np.abs(base_err)))
+        stats["sum_base_sq_err"] += float(np.sum(base_err**2))
+
+        # True sub-bin diagnostics (0.1m granularity)
+        sub = stats["true_subbin"]
+        n_sub = len(sub["count"])
+        idx = np.floor((bin_y_true - stats["bin_min"]) / stats["step"]).astype(int)
+        idx = np.clip(idx, 0, n_sub - 1)
+        np.add.at(sub["count"], idx, 1)
+        np.add.at(sub["sum_model_err"], idx, model_err)
+        np.add.at(sub["sum_model_abs_err"], idx, np.abs(model_err))
+        np.add.at(sub["sum_model_sq_err"], idx, model_err**2)
+        np.add.at(sub["sum_base_err"], idx, base_err)
+        np.add.at(sub["sum_base_abs_err"], idx, np.abs(base_err))
+        np.add.at(sub["sum_base_sq_err"], idx, base_err**2)
+        np.add.at(sub["sum_true"], idx, bin_y_true)
+        np.add.at(sub["sum_pred"], idx, bin_y_pred)
+        np.add.at(sub["sum_raw"], idx, bin_y_uncorrected)
+
+        # Save a bounded sample for quantile diagnostics
+        samples = stats["samples"]
+        remaining = self.low_bin_sample_limit - len(samples["true"])
+        if remaining > 0:
+            take = min(remaining, n)
+            samples["true"].extend(bin_y_true[:take].tolist())
+            samples["pred"].extend(bin_y_pred[:take].tolist())
+            samples["raw"].extend(bin_y_uncorrected[:take].tolist())
+            samples["model_err"].extend(model_err[:take].tolist())
+            samples["base_err"].extend(base_err[:take].tolist())
+
+    def _update_low_bin_spatial_accumulators(
+        self,
+        y_true_4d: torch.Tensor,
+        y_pred_4d: torch.Tensor,
+        y_base_4d: torch.Tensor,
+        valid_mask_4d: torch.Tensor,
+    ) -> None:
+        """Accumulate spatial diagnostics for ultra-calm true-wave sub-bins."""
+        if y_base_4d is None:
+            return
+
+        y_true_np = y_true_4d.detach().cpu().numpy()
+        y_pred_np = y_pred_4d.detach().cpu().numpy()
+        y_base_np = y_base_4d.detach().cpu().numpy()
+        valid_np = valid_mask_4d.detach().cpu().numpy().astype(bool)
+
+        abs_err_model = np.abs(y_pred_np - y_true_np)
+        abs_err_base = np.abs(y_base_np - y_true_np)
+        delta_abs_err = abs_err_model - abs_err_base
+        model_err = y_pred_np - y_true_np
+        base_err = y_base_np - y_true_np
+
+        spatial_shape = y_true_np.shape[-2:]
+        for lo, hi in self.low_bin_spatial_subbins:
+            key = f"{lo:.1f}_{hi:.1f}"
+            stats = self.low_bin_spatial_accumulators[key]
+            if stats["count"] is None:
+                stats["sum_delta_abs_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["sum_model_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["sum_base_err"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["count"] = np.zeros(spatial_shape, dtype=np.float64)
+                stats["count_worse"] = np.zeros(spatial_shape, dtype=np.float64)
+
+            submask = valid_np & (y_true_np >= lo) & (y_true_np < hi)
+            if not np.any(submask):
+                continue
+
+            stats["sum_delta_abs_err"] += (delta_abs_err * submask).sum(axis=(0, 1))
+            stats["sum_model_err"] += (model_err * submask).sum(axis=(0, 1))
+            stats["sum_base_err"] += (base_err * submask).sum(axis=(0, 1))
+            stats["count"] += submask.sum(axis=(0, 1))
+            stats["count_worse"] += (
+                ((abs_err_model > abs_err_base) & submask).sum(axis=(0, 1))
+            )
+
+    def _save_low_bin_diagnostics(self, sea_bin_metrics: Dict[str, dict]) -> None:
+        """Write detailed low-bin diagnostics (JSON + CSV)."""
+        if not self.low_bin_diagnostics:
+            return
+        low_bin_dir = self.output_dir / "low_bin_spatial_maps"
+        low_bin_dir.mkdir(parents=True, exist_ok=True)
+
+        report = {}
+        rows = []
+        quantiles = [0.01, 0.05, 0.5, 0.95, 0.99]
+
+        for bin_name, stats in self.low_bin_diagnostics.items():
+            count = int(stats["count"])
+            if count == 0:
+                continue
+
+            def _q(arr):
+                if len(arr) == 0:
+                    return None
+                vals = np.quantile(np.array(arr, dtype=np.float64), quantiles)
+                return {
+                    "q01": float(vals[0]),
+                    "q05": float(vals[1]),
+                    "q50": float(vals[2]),
+                    "q95": float(vals[3]),
+                    "q99": float(vals[4]),
+                }
+
+            overall = {
+                "label": stats["label"],
+                "count": count,
+                "raw_in_same_bin_pct": 100.0
+                * float(stats["raw_in_same_bin_count"])
+                / max(1, count),
+                "model_mae": float(stats["sum_model_abs_err"]) / count,
+                "model_rmse": float(np.sqrt(stats["sum_model_sq_err"] / count)),
+                "model_bias": float(stats["sum_model_err"]) / count,
+                "baseline_mae": float(stats["sum_base_abs_err"]) / count,
+                "baseline_rmse": float(np.sqrt(stats["sum_base_sq_err"] / count)),
+                "baseline_bias": float(stats["sum_base_err"]) / count,
+                "mean_true": float(stats["sum_true"]) / count,
+                "mean_pred": float(stats["sum_pred"]) / count,
+                "mean_raw": float(stats["sum_raw"]) / count,
+                "sea_bin_metrics": sea_bin_metrics.get(bin_name, {}),
+                "sample_quantiles": {
+                    "true": _q(stats["samples"]["true"]),
+                    "pred": _q(stats["samples"]["pred"]),
+                    "raw": _q(stats["samples"]["raw"]),
+                    "model_err": _q(stats["samples"]["model_err"]),
+                    "baseline_err": _q(stats["samples"]["base_err"]),
+                },
+            }
+
+            # Per-0.1m sub-bin metrics inside each target bin
+            sub = stats["true_subbin"]
+            sub_rows = []
+            for i in range(len(sub["count"])):
+                c = int(sub["count"][i])
+                lo = stats["bin_min"] + i * stats["step"]
+                hi = lo + stats["step"]
+                if c == 0:
+                    continue
+                rmse_model = float(np.sqrt(sub["sum_model_sq_err"][i] / c))
+                rmse_base = float(np.sqrt(sub["sum_base_sq_err"][i] / c))
+                mae_model = float(sub["sum_model_abs_err"][i] / c)
+                mae_base = float(sub["sum_base_abs_err"][i] / c)
+                row = {
+                    "bin_name": bin_name,
+                    "true_subbin_label": f"{lo:.1f}-{hi:.1f}",
+                    "count": c,
+                    "model_rmse": rmse_model,
+                    "baseline_rmse": rmse_base,
+                    "rmse_improvement_pct": (
+                        (rmse_base - rmse_model) / rmse_base * 100.0
+                        if rmse_base > 0
+                        else None
+                    ),
+                    "model_mae": mae_model,
+                    "baseline_mae": mae_base,
+                    "mae_improvement_pct": (
+                        (mae_base - mae_model) / mae_base * 100.0 if mae_base > 0 else None
+                    ),
+                    "model_bias": float(sub["sum_model_err"][i] / c),
+                    "baseline_bias": float(sub["sum_base_err"][i] / c),
+                    "mean_true": float(sub["sum_true"][i] / c),
+                    "mean_pred": float(sub["sum_pred"][i] / c),
+                    "mean_raw": float(sub["sum_raw"][i] / c),
+                }
+                sub_rows.append(row)
+                rows.append(row)
+
+            overall["true_subbin_metrics"] = sub_rows
+            report[bin_name] = overall
+
+        if report:
+            with open(low_bin_dir / "low_bin_diagnostics.json", "w") as f:
+                json.dump(report, f, indent=2)
+
+        if rows:
+            csv_path = low_bin_dir / "low_bin_subbin_metrics.csv"
+            fieldnames = [
+                "bin_name",
+                "true_subbin_label",
+                "count",
+                "model_rmse",
+                "baseline_rmse",
+                "rmse_improvement_pct",
+                "model_mae",
+                "baseline_mae",
+                "mae_improvement_pct",
+                "model_bias",
+                "baseline_bias",
+                "mean_true",
+                "mean_pred",
+                "mean_raw",
+            ]
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+
+    def _update_low_bin_plot_samples(
+        self,
+        y_true_wave: np.ndarray,
+        y_pred_wave: np.ndarray,
+        raw_wave: np.ndarray,
+        y_true_bias: np.ndarray,
+        y_pred_bias: np.ndarray,
+        prior_bias: np.ndarray = None,
+    ) -> None:
+        """Collect bounded sample sets for low-bin advanced diagnostics."""
+        if raw_wave is None:
+            return
+        if y_true_wave is None or y_pred_wave is None:
+            return
+
+        for lo, hi in self.low_bin_spatial_subbins:
+            key = f"{lo:.1f}_{hi:.1f}"
+            buf = self.low_bin_plot_samples.get(key)
+            if buf is None:
+                continue
+
+            mask = (
+                np.isfinite(y_true_wave)
+                & np.isfinite(y_pred_wave)
+                & np.isfinite(raw_wave)
+                & (y_true_wave >= lo)
+                & (y_true_wave < hi)
+            )
+            idx = np.where(mask)[0]
+            if len(idx) == 0:
+                continue
+
+            remaining = self.low_bin_plot_sample_limit_per_subbin - len(buf["true_wave"])
+            if remaining <= 0:
+                continue
+
+            if len(idx) > remaining:
+                idx = np.random.choice(idx, size=remaining, replace=False)
+
+            buf["true_wave"].extend(y_true_wave[idx].tolist())
+            buf["pred_wave"].extend(y_pred_wave[idx].tolist())
+            buf["raw_wave"].extend(raw_wave[idx].tolist())
+            if y_true_bias is not None:
+                buf["true_bias"].extend(y_true_bias[idx].tolist())
+            if y_pred_bias is not None:
+                buf["pred_bias"].extend(y_pred_bias[idx].tolist())
+            if prior_bias is not None:
+                pb = prior_bias[idx]
+                pb = np.where(np.isfinite(pb), pb, np.nan)
+                buf["prior_bias"].extend(pb.tolist())
+
+    def _update_coastal_distance_accumulators(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        y_base: np.ndarray,
+        coastal_bin_ids: np.ndarray,
+    ) -> None:
+        """Update per-distance-to-coast error accumulators."""
+        if y_base is None or self.coastal_distance_bin_idx_map is None:
+            return
+        if len(y_true) == 0:
+            return
+
+        valid = (
+            np.isfinite(y_true)
+            & np.isfinite(y_pred)
+            & np.isfinite(y_base)
+            & np.isfinite(coastal_bin_ids)
+            & (coastal_bin_ids >= 0)
+        )
+        if not np.any(valid):
+            return
+
+        yt = y_true[valid]
+        yp = y_pred[valid]
+        yb = y_base[valid]
+        ids = coastal_bin_ids[valid].astype(np.int64)
+
+        err = yp - yt
+        berr = yb - yt
+
+        for i in np.unique(ids):
+            m = ids == i
+            if not np.any(m):
+                continue
+            stats = self.coastal_distance_accumulators.get(int(i))
+            if stats is None:
+                continue
+            stats["count"] += int(np.sum(m))
+            stats["sum_mae"] += float(np.sum(np.abs(err[m])))
+            stats["sum_mse"] += float(np.sum(err[m] ** 2))
+            stats["sum_bias"] += float(np.sum(err[m]))
+            stats["sum_baseline_mae"] += float(np.sum(np.abs(berr[m])))
+            stats["sum_baseline_mse"] += float(np.sum(berr[m] ** 2))
+            stats["sum_baseline_bias"] += float(np.sum(berr[m]))
+
+    def _save_coastal_distance_diagnostics(self) -> None:
+        """Save coastal-distance metrics to CSV and plot."""
+        if not self.coastal_distance_accumulators:
+            return
+
+        rows = []
+        for i in sorted(self.coastal_distance_accumulators.keys()):
+            s = self.coastal_distance_accumulators[i]
+            c = int(s["count"])
+            if c > 0:
+                rmse = float(np.sqrt(s["sum_mse"] / c))
+                mae = float(s["sum_mae"] / c)
+                bias = float(s["sum_bias"] / c)
+                brmse = float(np.sqrt(s["sum_baseline_mse"] / c))
+                bmae = float(s["sum_baseline_mae"] / c)
+                bbias = float(s["sum_baseline_bias"] / c)
+                rmse_imp = (brmse - rmse) / brmse * 100.0 if brmse > 0 else None
+                mae_imp = (bmae - mae) / bmae * 100.0 if bmae > 0 else None
+            else:
+                rmse = None
+                mae = None
+                bias = None
+                brmse = None
+                bmae = None
+                bbias = None
+                rmse_imp = None
+                mae_imp = None
+            rows.append(
+                {
+                    "distance_bin_km": s["label"],
+                    "count": c,
+                    "model_rmse": rmse,
+                    "baseline_rmse": brmse,
+                    "rmse_improvement_pct": rmse_imp,
+                    "model_mae": mae,
+                    "baseline_mae": bmae,
+                    "mae_improvement_pct": mae_imp,
+                    "model_bias": bias,
+                    "baseline_bias": bbias,
+                }
+            )
+
+        csv_path = self.output_dir / "coastal_distance_metrics.csv"
+        fieldnames = [
+            "distance_bin_km",
+            "count",
+            "model_rmse",
+            "baseline_rmse",
+            "rmse_improvement_pct",
+            "model_mae",
+            "baseline_mae",
+            "mae_improvement_pct",
+            "model_bias",
+            "baseline_bias",
+        ]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        plot_coastal_distance_improvement_fn(rows, self.output_dir)
 
     def _configure_labels(self):
         """Configure dynamic labels based on target_column."""
@@ -557,17 +1351,17 @@ class ModelEvaluator:
             logger.info("Loading geographic coordinates for filtering...")
 
             # Try to get coordinates from dataset (handles region filtering automatically)
-            if hasattr(self.test_dataset, "get_coordinates"):
-                lat_grid, lon_grid = self.test_dataset.get_coordinates()
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
                 logger.info(
                     "Loaded coordinates from dataset (respects region filtering if enabled)"
                 )
             else:
                 # Fallback to loading from file (legacy)
+                coord_file = self.test_files[0]
                 lat_grid, lon_grid = load_coordinates_from_parquet(
-                    "s3://" + self.test_files[0]
-                    if not self.test_files[0].startswith("s3://")
-                    else self.test_files[0],
+                    coord_file,
                     subsample_step=self.subsample_step,
                 )
 
@@ -580,13 +1374,16 @@ class ModelEvaluator:
             )
             geo_mask = lat_mask & lon_mask
 
-            if self.region_filter == "mediterranean":
-                med_mask = lon_grid >= -5.5  # East of Gibraltar
-                geo_mask = geo_mask & med_mask
-            elif self.region_filter == "atlantic":
-                atl_mask = lon_grid < -5.5  # West of Gibraltar
-                geo_mask = geo_mask & atl_mask
+            GIBRALTAR_LON = -5.5
+            BISCAY_LAT = 43.0
+            BISCAY_LON = 0.0
+            biscay = (lat_grid > BISCAY_LAT) & (lon_grid < BISCAY_LON)
 
+            if self.region_filter == "mediterranean":
+                geo_mask = geo_mask & (lon_grid >= GIBRALTAR_LON) & ~biscay
+            elif self.region_filter == "atlantic":
+                geo_mask = geo_mask & ((lon_grid < GIBRALTAR_LON) | biscay)
+            
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
 
@@ -605,14 +1402,232 @@ class ModelEvaluator:
             )
             self.geo_mask = None
 
+    def _build_atlantic_exclusion_mask(self):
+        """Build a static 2D mask excluding Bay of Biscay pixels (lat > 43.5° AND lon < 0°).
+
+        These are Atlantic water pixels that leak through the simple lon >= -5.5° Mediterranean cut.
+        The mask is True for pixels to KEEP (Mediterranean) and False for excluded pixels.
+        """
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                exclude = (lat_grid > 43.0) & (lon_grid < 0.0)
+                keep_mask = ~exclude
+                n_excluded = exclude.sum()
+                if n_excluded > 0:
+                    self.atlantic_exclusion_mask = torch.from_numpy(keep_mask).to(
+                        self.device
+                    )
+                    logger.info(
+                        f"Atlantic exclusion mask: excluding {n_excluded} Bay of Biscay pixels "
+                        f"(lat > 43.0° AND lon < 0°)"
+                    )
+        except Exception as e:
+            logger.warning(f"Could not build Atlantic exclusion mask: {e}")
+
     def _reconstruct_wave_heights(
         self, bias: torch.Tensor, vhm0: torch.Tensor
     ) -> torch.Tensor:
         """Reconstruct full wave heights from bias: corrected = vhm0 + bias"""
         return bias + vhm0
 
+    def _apply_static_blend(self, dnn_bias: torch.Tensor) -> torch.Tensor:
+        """Blend DNN bias toward static map when the DNN deviates too far.
+
+        trust = exp(-deviation^2 / (2*sigma^2))
+        blended = trust * dnn_bias + (1-trust) * static_bias
+        """
+        if self.static_bias_map is None or self.blend_sigma is None:
+            return dnn_bias
+        h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+        static = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0)
+        valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0)
+        deviation = (dnn_bias - static).abs()
+        trust = torch.exp(-deviation ** 2 / (2 * self.blend_sigma ** 2))
+        blended = trust * dnn_bias + (1 - trust) * static
+        return torch.where(valid, blended, dnn_bias)
+
+    def _apply_edcdf_blend(
+        self,
+        dnn_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Blend DNN bias toward EDCDF-implied bias using Gaussian trust:
+            trust = exp(-|b_dnn - b_edcdf|^2 / (2*sigma^2))
+            b_blend = trust*b_dnn + (1-trust)*b_edcdf
+        """
+        if self.edcdf_corrector is None or raw_uncorrected is None:
+            return dnn_bias
+
+        use_soft_blend = self.edcdf_blend_sigma is not None
+        use_hard_fallback = len(self.edcdf_hard_fallback_bins) > 0
+        if not use_soft_blend and not use_hard_fallback:
+            return dnn_bias
+
+        var_name = self.target_column.replace("corrected_", "")
+        cdf_models = getattr(self.edcdf_corrector, "cdf_models", {})
+        if var_name not in cdf_models:
+            return dnn_bias
+
+        f_model_cdf, f_obs_quantile, p_min, p_max = cdf_models[var_name]
+
+        # Evaluate EDCDF map in numpy and convert back to tensor
+        raw_np = raw_uncorrected.detach().cpu().numpy().astype(float)
+        prob = np.clip(f_model_cdf(raw_np), p_min, p_max)
+        edcdf_corrected_np = f_obs_quantile(prob)
+        edcdf_corrected = torch.from_numpy(edcdf_corrected_np).to(
+            device=dnn_bias.device, dtype=dnn_bias.dtype
+        )
+
+        edcdf_bias = edcdf_corrected - raw_uncorrected
+        valid = torch.isfinite(edcdf_bias)
+        out_bias = dnn_bias
+
+        if use_soft_blend:
+            deviation = (out_bias - edcdf_bias).abs()
+            trust = torch.exp(-deviation ** 2 / (2 * self.edcdf_blend_sigma ** 2))
+            blended = trust * out_bias + (1 - trust) * edcdf_bias
+            out_bias = torch.where(valid, blended, out_bias)
+
+        if use_hard_fallback:
+            if self.edcdf_fallback_bin_source == "raw":
+                gate_values = raw_uncorrected
+            elif self.edcdf_fallback_bin_source == "edcdf":
+                gate_values = edcdf_corrected
+            elif self.edcdf_fallback_bin_source == "true":
+                if y_true_bias is None:
+                    logger.warning(
+                        "edcdf_fallback_bin_source='true' requires y_true_bias; falling back to raw."
+                    )
+                    gate_values = raw_uncorrected
+                else:
+                    gate_values = y_true_bias + raw_uncorrected
+            else:
+                gate_values = raw_uncorrected
+
+            fallback_mask = torch.zeros_like(raw_uncorrected, dtype=torch.bool)
+            for lo, hi in self.edcdf_hard_fallback_bins:
+                fallback_mask = fallback_mask | (
+                    (gate_values >= lo) & (gate_values < hi)
+                )
+            fallback_mask = fallback_mask & valid
+            self._edcdf_fallback_total_valid += int(valid.sum().item())
+            self._edcdf_fallback_total_applied += int(fallback_mask.sum().item())
+            for lo, hi in self.edcdf_hard_fallback_bins:
+                key = f"[{lo},{hi})"
+                bin_mask = ((gate_values >= lo) & (gate_values < hi) & valid)
+                self._edcdf_fallback_applied_per_bin[key] = (
+                    self._edcdf_fallback_applied_per_bin.get(key, 0)
+                    + int(bin_mask.sum().item())
+                )
+            out_bias = torch.where(fallback_mask, edcdf_bias, out_bias)
+
+        return out_bias
+
+    def _apply_low_bin_affine_calibration(
+        self,
+        dnn_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Apply piecewise affine calibration in selected low-wave bins:
+            b' = a * b + c
+        """
+        if not self.low_bin_affine_params or raw_uncorrected is None:
+            return dnn_bias
+
+        if self.low_bin_affine_source == "true":
+            if y_true_bias is None:
+                logger.warning(
+                    "low_bin_affine_source='true' requires y_true_bias; using 'raw' source."
+                )
+                gate_values = raw_uncorrected
+            else:
+                gate_values = y_true_bias + raw_uncorrected
+        else:
+            gate_values = raw_uncorrected
+
+        out = dnn_bias
+        for p in self.low_bin_affine_params:
+            mask = (gate_values >= p["min"]) & (gate_values < p["max"])
+            adjusted = p["a"] * out + p["c"]
+            out = torch.where(mask, adjusted, out)
+        return out
+
+    def _apply_prior_hard_fallback(
+        self,
+        dnn_bias: torch.Tensor,
+        prior_bias: torch.Tensor,
+        raw_uncorrected: torch.Tensor,
+        y_true_bias: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """Replace DNN bias with configured fallback target in selected bins.
+
+        prior_fallback_target:
+          - "prior": replace with static prior bias
+          - "raw": replace with raw baseline in wave space (bias=0)
+        """
+        if not self.prior_hard_fallback_bins or raw_uncorrected is None:
+            return dnn_bias
+
+        if self.prior_fallback_bin_source == "true":
+            if y_true_bias is None:
+                logger.warning(
+                    "prior_fallback_bin_source='true' requires y_true_bias; using 'raw' source."
+                )
+                gate_values = raw_uncorrected
+            else:
+                gate_values = y_true_bias + raw_uncorrected
+        else:
+            gate_values = raw_uncorrected
+
+        if self.prior_fallback_target == "raw":
+            replacement_bias = torch.zeros_like(dnn_bias)
+            valid = torch.isfinite(raw_uncorrected)
+        else:
+            if prior_bias is None:
+                return dnn_bias
+            replacement_bias = prior_bias
+            valid = torch.isfinite(prior_bias)
+
+        fallback_mask = torch.zeros_like(raw_uncorrected, dtype=torch.bool)
+        for lo, hi in self.prior_hard_fallback_bins:
+            fallback_mask = fallback_mask | ((gate_values >= lo) & (gate_values < hi))
+        fallback_mask = fallback_mask & valid
+
+        self._prior_fallback_total_valid += int(valid.sum().item())
+        self._prior_fallback_total_applied += int(fallback_mask.sum().item())
+        for lo, hi in self.prior_hard_fallback_bins:
+            key = f"[{lo},{hi})"
+            bin_mask = ((gate_values >= lo) & (gate_values < hi) & valid)
+            self._prior_fallback_applied_per_bin[key] = (
+                self._prior_fallback_applied_per_bin.get(key, 0)
+                + int(bin_mask.sum().item())
+            )
+
+        return torch.where(fallback_mask, replacement_bias, dnn_bias)
+
+    def _recalibrate_domain_mean(
+        self, dnn_bias: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Re-anchor the DNN's domain-average level to the static map's level.
+
+        Preserves the DNN's spatial patterns but shifts the overall mean
+        to match the static map, correcting systematic year-level drift.
+        """
+        if not self.domain_mean_recalibration or self.static_domain_mean is None:
+            return dnn_bias
+        valid = mask.bool() if mask is not None else torch.ones_like(dnn_bias, dtype=torch.bool)
+        dnn_mean = dnn_bias[valid.expand_as(dnn_bias)].mean()
+        offset = dnn_mean - self.static_domain_mean
+        return dnn_bias - offset
+
     def _process_batch(
-        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None
+        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None
     ):
         """Process a single batch and update accumulators.
 
@@ -624,6 +1639,7 @@ class ModelEvaluator:
             y_pred: Model predictions (B, 1, H, W)
             timestamps: Batch timestamps for season extraction (optional)
             confidence: Model confidence values (B, H, W) (optional)
+            prior_bias: Static prior bias used in residual-to-prior mode (optional)
         """
         # Apply geographic mask if available
         if self.geo_mask is not None:
@@ -648,8 +1664,30 @@ class ModelEvaluator:
         #     y_pred = self.normalizer.inverse_transform_torch(y_pred)
         #     y = self.normalizer.inverse_transform_torch(y)
 
+        if (
+            self.predict_residual_to_prior
+            and prior_bias is not None
+            and self.task_name == self.residual_prior_task
+        ):
+            # Dataset yields residuals (bias - prior); reconstruct bias first.
+            y = y + prior_bias
+            y_pred = y_pred + prior_bias
+
+        if self.eval_in_bias_mode:
+            y_pred = self._recalibrate_domain_mean(y_pred, mask)
+            y_pred = self._apply_static_blend(y_pred)
+            y_pred = self._apply_low_bin_affine_calibration(
+                y_pred, vhm0, y_true_bias=y
+            )
+            y_pred = self._apply_prior_hard_fallback(
+                y_pred, prior_bias, vhm0, y_true_bias=y
+            )
+            # Keep EDCDF blend/fallback last so configured hard-fallback bins
+            # are guaranteed to end up with EDCDF bias.
+            y_pred = self._apply_edcdf_blend(y_pred, vhm0, y_true_bias=y)
+
         # ========== COMPUTE SPATIAL ERROR MAPS FIRST (using full 4D tensors) ==========
-        if self.predict_bias:
+        if self.eval_in_bias_mode:
             # Reconstruct full wave heights (4D tensors)
             y_pred_full = self._reconstruct_wave_heights(y_pred, vhm0)
             y_true_full = self._reconstruct_wave_heights(y, vhm0)
@@ -665,6 +1703,9 @@ class ModelEvaluator:
             error_map_baseline_mae = (
                 (y_baseline_full - y_true_full).abs().cpu().numpy()
             )  # (N, C, H, W)
+            y_true_wave_4d = y_true_full
+            y_pred_wave_4d = y_pred_full
+            y_base_wave_4d = y_baseline_full
         else:
             # Not predicting bias
             error_map = ((y_pred - y) ** 2).cpu().numpy()  # (N, C, H, W)
@@ -672,11 +1713,28 @@ class ModelEvaluator:
             if vhm0 is not None:
                 error_map_baseline = ((vhm0 - y) ** 2).cpu().numpy()  # (N, C, H, W)
                 error_map_baseline_mae = (vhm0 - y).abs().cpu().numpy()  # (N, C, H, W)
+                y_base_wave_4d = vhm0
             else:
                 error_map_baseline = None
                 error_map_baseline_mae = None
+                y_base_wave_4d = None
+            y_true_wave_4d = y
+            y_pred_wave_4d = y_pred
 
-        count_map = mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
+        combined_mask = mask.float()
+        if self.atlantic_exclusion_mask is not None:
+            # Broadcast 2D (H, W) mask to match 4D (N, C, H, W)
+            h, w = combined_mask.shape[2], combined_mask.shape[3]
+            exc = self.atlantic_exclusion_mask[:h, :w].float()
+            combined_mask = combined_mask * exc.unsqueeze(0).unsqueeze(0)
+
+        self._update_low_bin_spatial_accumulators(
+            y_true_4d=y_true_wave_4d,
+            y_pred_4d=y_pred_wave_4d,
+            y_base_4d=y_base_wave_4d,
+            valid_mask_4d=combined_mask,
+        )
+        count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
         error_map = error_map * count_map
@@ -702,13 +1760,18 @@ class ModelEvaluator:
                 }
             )
 
-        # Apply mask
-        mask_flat = mask.flatten()
+        # Apply mask (including Atlantic exclusion)
+        mask_combined = mask.clone()
+        if self.atlantic_exclusion_mask is not None:
+            h, w = mask_combined.shape[2], mask_combined.shape[3]
+            exc = self.atlantic_exclusion_mask[:h, :w]
+            mask_combined = mask_combined & exc.unsqueeze(0).unsqueeze(0)
+        mask_flat = mask_combined.flatten()
         y_true_flat = y.flatten()[mask_flat]
         y_pred_flat = y_pred.flatten()[mask_flat]
 
         # Reconstruct wave heights if predicting bias
-        if self.predict_bias and vhm0 is not None:
+        if self.eval_in_bias_mode and vhm0 is not None:
             vhm0_flat = vhm0.flatten()[mask_flat]
             y_true_wave_heights = self._reconstruct_wave_heights(y_true_flat, vhm0_flat)
             y_pred_wave_heights = self._reconstruct_wave_heights(y_pred_flat, vhm0_flat)
@@ -722,10 +1785,54 @@ class ModelEvaluator:
             y_uncorrected = vhm0_flat
         else:
             y_uncorrected = None
+        if prior_bias is not None:
+            prior_bias_flat = prior_bias.flatten()[mask_flat]
+        else:
+            prior_bias_flat = None
+
+        # Filter out extreme wave heights (true VHM0 >= 11m)
+        # valid_range_mask = y_true_wave_heights < 11.0
+        # valid_range_mask_np = valid_range_mask.cpu().numpy()
+        # y_true_wave_heights = y_true_wave_heights[valid_range_mask]
+        # y_pred_wave_heights = y_pred_wave_heights[valid_range_mask]
+        # if y_uncorrected is not None:
+        #     y_uncorrected = y_uncorrected[valid_range_mask]
 
         # Convert to numpy for binning
         y_true_np = y_true_wave_heights.cpu().numpy()
         y_pred_np = y_pred_wave_heights.cpu().numpy()
+        y_true_bias_np = y_true_flat.cpu().numpy() if self.eval_in_bias_mode else None
+        y_pred_bias_np = y_pred_flat.cpu().numpy() if self.eval_in_bias_mode else None
+        y_uncorrected_np = y_uncorrected.cpu().numpy() if y_uncorrected is not None else None
+        prior_bias_np = (
+            prior_bias_flat.cpu().numpy() if prior_bias_flat is not None else None
+        )
+        coastal_bin_ids = None
+        if self.coastal_distance_bin_idx_map is not None:
+            h, w = mask_combined.shape[2], mask_combined.shape[3]
+            idx2d = self.coastal_distance_bin_idx_map[:h, :w]
+            idx_t = torch.from_numpy(idx2d).to(mask_combined.device)
+            idx4d = idx_t.unsqueeze(0).unsqueeze(0).expand(
+                mask_combined.shape[0], mask_combined.shape[1], h, w
+            )
+            coastal_bin_ids = idx4d.flatten()[mask_flat].cpu().numpy()
+
+        if self.eval_in_bias_mode and y_uncorrected_np is not None:
+            self._update_low_bin_plot_samples(
+                y_true_wave=y_true_np,
+                y_pred_wave=y_pred_np,
+                raw_wave=y_uncorrected_np,
+                y_true_bias=y_true_bias_np,
+                y_pred_bias=y_pred_bias_np,
+                prior_bias=prior_bias_np,
+            )
+        if y_uncorrected_np is not None and coastal_bin_ids is not None:
+            self._update_coastal_distance_accumulators(
+                y_true=y_true_np,
+                y_pred=y_pred_np,
+                y_base=y_uncorrected_np,
+                coastal_bin_ids=coastal_bin_ids,
+            )
 
         # Update overall metrics
         n = len(y_true_np)
@@ -740,7 +1847,6 @@ class ModelEvaluator:
 
             # Baseline metrics
             if y_uncorrected is not None:
-                y_uncorrected_np = y_uncorrected.cpu().numpy()
                 baseline_errors = y_uncorrected_np - y_true_np
                 self.sum_baseline_mae += np.sum(np.abs(baseline_errors))
                 self.sum_baseline_mse += np.sum(baseline_errors**2)
@@ -811,6 +1917,14 @@ class ModelEvaluator:
                         # Store all baseline error samples
                         self.sea_bin_error_samples[bin_name]["baseline_errors"].extend(
                             baseline_bin_errors.tolist()
+                        )
+
+                        # Extra diagnostics for first two bins (0-1m, 1-2m)
+                        self._update_low_bin_diagnostics(
+                            bin_name=bin_name,
+                            bin_y_true=bin_y_true,
+                            bin_y_pred=bin_y_pred,
+                            bin_y_uncorrected=bin_y_uncorrected,
                         )
 
                         # NEW: Track category breakdown (corrected vs not_corrected)
@@ -1025,7 +2139,11 @@ class ModelEvaluator:
                 tqdm(self.test_loader, desc="Processing batches")
             ):
                 # Unpack batch
-                X, y, mask, vhm0_batch = batch
+                prior_bias_batch = None
+                if len(batch) == 5:
+                    X, y, mask, vhm0_batch, prior_bias_batch = batch
+                else:
+                    X, y, mask, vhm0_batch = batch
                 vhm0 = vhm0_batch.to(self.device) if vhm0_batch is not None else None
 
                 # Handle multi-task vs single-task format
@@ -1044,6 +2162,9 @@ class ModelEvaluator:
 
                 if vhm0 is not None:
                     vhm0, _ = pad_to_multiple(vhm0, multiple=16)
+                if prior_bias_batch is not None:
+                    prior_bias_batch = prior_bias_batch.to(self.device)
+                    prior_bias_batch, _ = pad_to_multiple(prior_bias_batch, multiple=16)
 
                 # Load timestamps from test files for seasonal analysis
                 timestamps = None
@@ -1123,9 +2244,21 @@ class ModelEvaluator:
                         self.low_wave_model is not None
                         or self.high_wave_model is not None
                     ) and vhm0 is not None:
+                        y_for_wave_mask = y
+                        if (
+                            self.predict_residual_to_prior
+                            and prior_bias_batch is not None
+                            and self.task_name == self.residual_prior_task
+                        ):
+                            y_for_wave_mask = y + prior_bias_batch
                         # Create masks for different wave height ranges
-                        low_wave_mask = (vhm0 >= 0.0) & (vhm0 <= 1.0)
-                        high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
+                        low_wave_mask = ((vhm0 + y_for_wave_mask) >= 0.0) & (
+                            (vhm0 + y_for_wave_mask) <= 3.0
+                        )
+                        # high_wave_mask = (vhm0 >= 8.0) & (vhm0 <= 9.0)
+                        high_wave_mask = ((vhm0 + y_for_wave_mask) >= 5.0) & (
+                            (vhm0 + y_for_wave_mask) <= 11.0
+                        )
                         mid_wave_mask = ~(low_wave_mask | high_wave_mask)
 
                         # Get predictions from all models
@@ -1188,46 +2321,50 @@ class ModelEvaluator:
                             y_pred = torch.where(
                                 low_wave_mask_aligned, y_pred_low, y_pred
                             )
-                        # Apply DeltaCorrector bias for 11-12m and 12-13m bins (use default model - bias)
-                        # if self.apply_delta_corrector_flag is not None:
-                        #     delta_bins_mask = (
-                        #         (vhm0 >= 11.5) & (vhm0 < 13.0)
-                        #     )
-                        #     if delta_bins_mask.any():
-                        #         y_pred = y_pred.clone()
-                        #         delta = 0.0325
-                        #         if self.predict_bias:
-                        #             # bias = y_true - vhm0
-                        #             y_pred[delta_bins_mask] = delta
-                        #         else:
-                        #             # y_pred is corrected Hs
-                        #             y_pred[delta_bins_mask] = vhm0[delta_bins_mask] + delta
-
                         if self.apply_delta_corrector_flag:
-                            # vhm0: uncorrected wave height (raw model)
-                            # start, end = 11.5, 13.0  # tune as you like
-                            start, end = 11.2, 12.0
+                            y_pred = y_pred.clone()
 
-                            # only in the tail region
-                            tail_mask = vhm0 >= start
-                            if tail_mask.any():
-                                y_pred = y_pred.clone()
+                            # --- Alternative A: outlier ratio clamping ---
+                            max_bias_ratio = 1.5
+                            delta = 0.035
+                            if self.eval_in_bias_mode:
+                                corrected = vhm0 + y_pred
+                                true_wave = vhm0 + y_for_wave_mask  # ground truth
+                                outlier_mask = (corrected.abs() > (max_bias_ratio * vhm0.abs().clamp(min=0.1))) & (true_wave >= 11.0)
+                                outlier_mask = (true_wave >= 11.0)
+                                if outlier_mask.any():
+                                    y_pred[outlier_mask] = delta
+                            else:
+                                true_wave = y  # ground truth is already absolute
+                                outlier_mask = (y_pred.abs() > (max_bias_ratio * vhm0.abs().clamp(min=0.1))) & (true_wave >= 11.0)
+                                if outlier_mask.any():
+                                    y_pred[outlier_mask] = vhm0[outlier_mask] + delta
 
-                                # scale in [0, 1]: 1 -> trust DNN, 0 -> ignore DNN (bias=0 => fallback to raw)
-                                # scale = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
-                                scale_lin = 1.0 - ((vhm0 - start) / (end - start)).clamp(0.0, 1.0)
-                                p = 3.0
-                                scale = scale_lin ** p
-
-                                # apply scaling only on tail pixels
-                                y_pred[tail_mask] = y_pred[tail_mask] * scale[tail_mask]
-
-                                # OPTIONAL: add a tiny fixed delta bias (since your bias = y_true - vhm0)
-                                delta = 0.035
-                                y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
-
-                                max_bias_tail = 0.3
-                                y_pred[tail_mask] = y_pred[tail_mask].clamp(-max_bias_tail, max_bias_tail)
+                            # --- Alternative B: tail fade-out with power scaling ---
+                            # start, end = 10.8, 13.0
+                            # if self.predict_bias:
+                            #     tail_mask = (vhm0 + y) >= start
+                            #     if tail_mask.any():
+                            #         scale_lin = 1.0 - (((vhm0 + y) - start) / (end - start)).clamp(0.0, 1.0)
+                            #         p = 3.0
+                            #         scale = scale_lin ** p
+                            #         y_pred[tail_mask] = y_pred[tail_mask] * scale[tail_mask]
+                            #         delta = 0.035
+                            #         y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
+                            #         max_bias_tail = 0.3
+                            #         y_pred[tail_mask] = y_pred[tail_mask].clamp(-max_bias_tail, max_bias_tail)
+                            # else:
+                            #     tail_mask = y_pred >= start
+                            #     if tail_mask.any():
+                            #         scale_lin = 1.0 - ((y_pred - start) / (end - start)).clamp(0.0, 1.0)
+                            #         p = 3.0
+                            #         scale = scale_lin ** p
+                            #         y_pred[tail_mask] = vhm0[tail_mask] + (y_pred[tail_mask] - vhm0[tail_mask]) * scale[tail_mask]
+                            #         delta = 0.035
+                            #         y_pred[tail_mask] = y_pred[tail_mask] + (1.0 - scale[tail_mask]) * delta
+                            #         max_bias_tail = 0.3
+                            #         bias_tail = y_pred[tail_mask] - vhm0[tail_mask]
+                            #         y_pred[tail_mask] = vhm0[tail_mask] + bias_tail.clamp(-max_bias_tail, max_bias_tail)
 
                         # Apply high-wave specialized model if available
                         if self.high_wave_model is not None and high_wave_mask.any():
@@ -1311,6 +2448,8 @@ class ModelEvaluator:
 
                 if vhm0 is not None:
                     vhm0 = vhm0[:, :, :min_h, :min_w]
+                if prior_bias_batch is not None:
+                    prior_bias_batch = prior_bias_batch[:, :, :min_h, :min_w]
 
                 if confidence is not None:
                     confidence = confidence[:, :min_h, :min_w]
@@ -1338,7 +2477,14 @@ class ModelEvaluator:
                     y_pred = self._apply_bin_corrections(y_pred, vhm0, mask)
                 # Process batch and update accumulators
                 self._process_batch(
-                    X_cropped, y, mask, vhm0, y_pred, timestamps, confidence
+                    X_cropped,
+                    y,
+                    mask,
+                    vhm0,
+                    y_pred,
+                    timestamps,
+                    confidence,
+                    prior_bias_batch,
                 )
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
@@ -1368,7 +2514,7 @@ class ModelEvaluator:
             data_loader=self.bias_loader,
             device=self.device,
             bins=self.bins,
-            predict_bias=self.predict_bias,
+            predict_bias=self.eval_in_bias_mode,
             normalize_target=self.normalize_target,
             normalizer=self.normalizer,
             unit=self.unit,
@@ -1424,7 +2570,7 @@ class ModelEvaluator:
             sum_y_pred=self.sum_y_pred,
             sum_y_pred_sq=self.sum_y_pred_sq,
             sum_y_true_y_pred=self.sum_y_true_y_pred,
-            predict_bias=self.predict_bias,
+            predict_bias=self.eval_in_bias_mode,
         )
 
     def compute_sea_bin_metrics(self) -> Dict[str, Dict]:
@@ -1918,6 +3064,19 @@ class ModelEvaluator:
 
     def plot_rmse_maps(self):
         """Plot spatial RMSE maps for model and baseline."""
+        # Get coordinates from dataset (respects region cropping)
+        dataset_coords = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                dataset_coords = (lat_grid, lon_grid)
+                logger.info(
+                    f"Using dataset coordinates for RMSE maps: {lat_grid.shape}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not get dataset coordinates: {e}")
+
         plot_rmse_maps_fn(
             spatial_errors_model=self.spatial_errors_model,
             spatial_errors_baseline=self.spatial_errors_baseline,
@@ -1925,6 +3084,36 @@ class ModelEvaluator:
             subsample_step=self.subsample_step,
             geo_bounds=self.geo_bounds,
             unit=self.unit,
+            output_dir=self.output_dir,
+            dataset_coords=dataset_coords,
+        )
+
+    def plot_low_bin_spatial_maps(self):
+        """Plot spatial diagnostics for ultra-calm true-wave sub-bins."""
+        dataset_coords = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                lat_grid, lon_grid = dataset.get_coordinates()
+                dataset_coords = (lat_grid, lon_grid)
+        except Exception as e:
+            logger.warning(f"Could not get dataset coordinates for low-bin maps: {e}")
+
+        plot_low_bin_spatial_maps_fn(
+            low_bin_spatial_accumulators=self.low_bin_spatial_accumulators,
+            low_bin_spatial_subbins=self.low_bin_spatial_subbins,
+            test_files=self.test_files,
+            subsample_step=self.subsample_step,
+            geo_bounds=self.geo_bounds,
+            output_dir=self.output_dir,
+            dataset_coords=dataset_coords,
+        )
+
+    def plot_low_bin_advanced_diagnostics(self):
+        """Create low-bin CDF/hist/hexbin diagnostics from sampled points."""
+        plot_low_bin_advanced_diagnostics_fn(
+            low_bin_plot_samples=self.low_bin_plot_samples,
+            low_bin_spatial_subbins=self.low_bin_spatial_subbins,
             output_dir=self.output_dir,
         )
 
@@ -2082,6 +3271,28 @@ class ModelEvaluator:
         print("Computing final metrics...")
         overall_metrics = self.compute_overall_metrics()
         sea_bin_metrics = self.compute_sea_bin_metrics()
+        if self.edcdf_hard_fallback_bins:
+            valid = max(1, self._edcdf_fallback_total_valid)
+            pct = 100.0 * self._edcdf_fallback_total_applied / valid
+            logger.info(
+                "EDCDF hard fallback coverage: "
+                f"{self._edcdf_fallback_total_applied:,}/{self._edcdf_fallback_total_valid:,} "
+                f"valid pixels ({pct:.2f}%) using source='{self.edcdf_fallback_bin_source}'"
+            )
+            logger.info(
+                f"EDCDF hard fallback per-bin applied counts: {self._edcdf_fallback_applied_per_bin}"
+            )
+        if self.prior_hard_fallback_bins:
+            valid = max(1, self._prior_fallback_total_valid)
+            pct = 100.0 * self._prior_fallback_total_applied / valid
+            logger.info(
+                "Prior hard fallback coverage: "
+                f"{self._prior_fallback_total_applied:,}/{self._prior_fallback_total_valid:,} "
+                f"valid pixels ({pct:.2f}%) using source='{self.prior_fallback_bin_source}'"
+            )
+            logger.info(
+                f"Prior hard fallback per-bin applied counts: {self._prior_fallback_applied_per_bin}"
+            )
 
         # NEW: Compute category breakdown
         print("Computing category breakdown (corrected vs not_corrected)...")
@@ -2103,13 +3314,21 @@ class ModelEvaluator:
         print("Saving category breakdown to CSV...")
         self.save_category_breakdown_csv(category_breakdown, self.output_dir)
         self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
+        print("Saving detailed low-bin diagnostics...")
+        self._save_low_bin_diagnostics(sea_bin_metrics)
+        print("Saving coastal-distance diagnostics...")
+        self._save_coastal_distance_diagnostics()
 
         # Create plots using samples
         print("Creating plots...")
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_low_bin_spatial_maps()
+        # self.plot_low_bin_advanced_diagnostics()
         # self.plot_vhm0_distributions()
+        # self.plot_vhm0_distributions(vhm0_range=(0, 1))
+        # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         self.plot_vhm0_distributions(vhm0_range=(11, 12))
         self.plot_vhm0_distributions(vhm0_range=(12, 13))
         self.plot_error_distribution_histograms()
@@ -2165,13 +3384,30 @@ def main():
         default=False,
         help="Apply delta corrector to predictions for bins >= 11m",
     )
+    parser.add_argument(
+        "--region-filter",
+        type=str,
+        default=None,
+        choices=["atlantic", "mediterranean"],
+        help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
+    )
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+
 
     config = DNNConfig(args.config)
 
     training_config = config.config["training"]
     data_config = config.config["data"]
     predict_bias = data_config.get("predict_bias", False)
+    predict_residual_to_prior = data_config.get("predict_residual_to_prior", False)
+    residual_prior_task = data_config.get("residual_prior_task", None)
+    prior_source = data_config.get("prior_source", "none")
+    if predict_bias and predict_residual_to_prior:
+        raise ValueError(
+            "Only one of data.predict_bias or data.predict_residual_to_prior can be enabled for evaluation."
+        )
 
     # Support both old target_column (str) and new target_columns (dict)
     target_columns = data_config.get("target_columns", None)
@@ -2184,21 +3420,38 @@ def main():
     files = get_file_list(
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
     )
-    _test_files_parq = get_file_list(
-        f"s3://medwav-dev-data/parquet/hourly/year={data_config.get('test_year', [2023])[0]}/",
-        # "/data/users/aiuser/parquet",
-        f"WAVEAN{data_config.get('test_year', [2023])[0]}*.parquet",
+    test_year_cfg = data_config.get("test_year", [2023])
+    test_year = test_year_cfg[0] if isinstance(test_year_cfg, list) else test_year_cfg
+    parquet_data_path = data_config.get(
+        "diagnostics_parquet_data_path",
+        "/mnt/blobstorage/parquet/hourly/",
     )
-
-    _, _, test_files_parq = split_files_by_year(
-        _test_files_parq,
-        train_year=data_config.get("train_year", 2021),
-        val_year=data_config.get("val_year", 2022),
-        test_year=data_config.get("test_year", 2023),
-        val_months=data_config.get("val_months", []),
-        test_months=data_config.get("test_months", []),
+    parquet_file_pattern = data_config.get(
+        "diagnostics_parquet_file_pattern", f"WAVEAN{test_year}*.parquet"
     )
-    print(test_files_parq[:10])
+    test_files_parq = []
+    try:
+        _test_files_parq = get_file_list(parquet_data_path, parquet_file_pattern)
+        # Enforce test-year filtering even when a broad file pattern/path is used.
+        year_prefix = f"WAVEAN{int(test_year)}"
+        _test_files_parq = [
+            fp for fp in _test_files_parq if fp.rsplit("/", 1)[-1].startswith(year_prefix)
+        ]
+        _, _, test_files_parq = split_files_by_year(
+            _test_files_parq,
+            train_year=data_config.get("train_year", 2021),
+            val_year=data_config.get("val_year", 2022),
+            test_year=data_config.get("test_year", 2023),
+            val_months=data_config.get("val_months", []),
+            test_months=data_config.get("test_months", []),
+        )
+        print(test_files_parq[:10])
+    except Exception as e:
+        logger.warning(
+            "Could not list diagnostics parquet files (%s). "
+            "Continuing without timestamp-based diagnostics.",
+            e,
+        )
 
     logger.info(f"Found {len(files)} files")
 
@@ -2215,15 +3468,16 @@ def main():
     logger.info(f"Test files: {len(test_files)}")
     logger.info(f"Train files: {len(train_files)}")
 
-    # Load normalizer (same as training)
-    normalizer = WaveNormalizer.load_from_s3(
-        "medwav-dev-data", data_config["normalizer_path"]
-    )
-    # normalizer = WaveNormalizer.load_from_disk(
-    #     data_config["normalizer_path"]
-    # )
+    # Load normalizer (supports both local and s3:// paths)
+    normalizer_path = str(data_config["normalizer_path"])
+    if normalizer_path.startswith("s3://"):
+        s3_uri = normalizer_path.replace("s3://", "", 1)
+        bucket, key = s3_uri.split("/", 1)
+        normalizer = WaveNormalizer.load_from_s3(bucket, key)
+    else:
+        normalizer = WaveNormalizer().load(normalizer_path)
     logger.info(f"Normalizer: {normalizer.mode}")
-    logger.info(f"Loaded normalizer from {data_config['normalizer_path']}")
+    logger.info(f"Loaded normalizer from {normalizer_path}")
 
     # CRITICAL: Set target_stats_ for the target column we're evaluating
     # Without this, inverse_transform_torch falls back to the last channel!
@@ -2267,12 +3521,17 @@ def main():
             excluded_columns=excluded_columns,
             target_columns=target_columns,
             predict_bias=predict_bias,
+            predict_residual_to_prior=predict_residual_to_prior,
+            prior_source=prior_source,
+            static_bias_map_path=data_config.get("static_bias_map_path", None),
+            residual_prior_task=residual_prior_task,
             subsample_step=subsample_step,
             normalizer=normalizer,
             enable_profiler=False,
             use_cache=False,  # Use cache for evaluation
             normalize_target=data_config.get("normalize_target", False),
             region_filter=data_config.get("region_filter", None),
+            add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
         )
     # Create test loader (use training batch size)
     # Note: num_workers=0 for reproducible evaluation
@@ -2323,12 +3582,17 @@ def main():
                 excluded_columns=excluded_columns,
                 target_columns=target_columns,
                 predict_bias=predict_bias,
+                predict_residual_to_prior=predict_residual_to_prior,
+                prior_source=prior_source,
+                static_bias_map_path=data_config.get("static_bias_map_path", None),
+                residual_prior_task=residual_prior_task,
                 subsample_step=subsample_step,
                 normalizer=normalizer,
                 enable_profiler=False,
                 use_cache=False,
                 normalize_target=data_config.get("normalize_target", False),
                 region_filter=data_config.get("region_filter", None),
+                add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
             )
         train_loader = DataLoader(
             train_dataset,
@@ -2359,7 +3623,7 @@ def main():
 
     if checkpoint_path.is_dir():
         # Find all .ckpt files in directory
-        checkpoint_list = sorted(list(checkpoint_path.glob("*.ckpt")))
+        checkpoint_list = sorted(list(checkpoint_path.glob("epoch=1*-val_loss=*.ckpt")))
         if not checkpoint_list:
             raise ValueError(f"No .ckpt files found in directory: {checkpoint_path}")
         logger.info(f"Found {len(checkpoint_list)} checkpoints to evaluate")
@@ -2378,7 +3642,11 @@ def main():
 
         logger.info(f"Loading model from {checkpoint}...")
         model = WaveBiasCorrector.load_from_checkpoint(checkpoint)
-        logger.info(f"Model loaded. predict_bias={predict_bias}")
+        logger.info(
+            "Model loaded. predict_bias=%s, predict_residual_to_prior=%s",
+            predict_bias,
+            predict_residual_to_prior,
+        )
 
         if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
             logger.info("Applying EMA weights for evaluation...")
@@ -2392,6 +3660,7 @@ def main():
 
         # Create geographic bounds dictionary if filtering is requested
         geo_bounds = None
+        region_filter = args.region_filter
         if args.apply_geographic_filtering:
             if patch_size is not None:
                 logger.warning("=" * 80)
@@ -2400,33 +3669,19 @@ def main():
                 )
                 logger.warning("Patches don't maintain spatial coordinate information.")
                 logger.warning("Geographic filtering will be DISABLED.")
-                logger.warning(
-                    "To use geographic filtering, set patch_size to null in config."
-                )
                 logger.warning("=" * 80)
                 geo_bounds = None
             else:
-                # Region filtering is now handled by dataset's region_filter parameter
-                # No need for manual geo_bounds - spatial cropping is done at dataset level
-                region_filter = data_config.get("region_filter", None)
-                if region_filter:
-                    logger.info(
-                        f"Geographic filtering via dataset region_filter: {region_filter} "
-                        f"(spatial cropping at dataset level, Gibraltar boundary: lon=-5.5°)"
-                    )
-                    geo_bounds = None  # Not needed - dataset already crops
-                else:
-                    # Fallback to manual geo_bounds if no region_filter
-                    geo_bounds = {
-                        "lat_min": 30.0,
-                        "lat_max": 46.0,
-                        "lon_min": -5.5,
-                        "lon_max": 36.5,
-                    }
-                    logger.info(
-                        f"Geographic filtering enabled: lat=[{geo_bounds['lat_min']}, {geo_bounds['lat_max']}], "
-                        f"lon=[{geo_bounds['lon_min']}, {geo_bounds['lon_max']}]"
-                    )
+                geo_bounds = {
+                    "lat_min": 30.0,
+                    "lat_max": 46.0,
+                    "lon_min": -18.5,
+                    "lon_max": 36.5,
+                }
+                logger.info(
+                    f"Geographic filtering enabled: region_filter={region_filter}, "
+                    f"geo_bounds={geo_bounds}"
+                )
 
         # Create evaluator and run evaluation
         evaluator = ModelEvaluator(
@@ -2434,8 +3689,10 @@ def main():
             test_loader=test_loader,
             output_dir=Path(args.output_dir)
             / config.config["logging"]["experiment_name"]
-            / checkpoint.stem,  # Use checkpoint filename without extension
+            / str(test_year) /checkpoint.stem,  # Use checkpoint filename without extension
             predict_bias=predict_bias,
+            predict_residual_to_prior=predict_residual_to_prior,
+            residual_prior_task=residual_prior_task,
             device="cuda",
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
@@ -2450,6 +3707,21 @@ def main():
             target_columns=target_columns,
             apply_bilateral_filter=False,
             apply_delta_corrector_flag=args.apply_delta_corrector_flag,
+            region_filter=region_filter,
+            low_wave_ckpt=config.config["checkpoint"]["low_wave_ckpt"],
+            high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
+            static_bias_map_path=data_config.get("static_bias_map_path", None),
+            blend_sigma=data_config.get("blend_sigma", None),
+            domain_mean_recalibration=data_config.get("domain_mean_recalibration", False),
+            edcdf_model_path=data_config.get("edcdf_model_path", None),
+            edcdf_blend_sigma=data_config.get("edcdf_blend_sigma", None),
+            edcdf_hard_fallback_bins=data_config.get("edcdf_hard_fallback_bins", None),
+            edcdf_fallback_bin_source=data_config.get("edcdf_fallback_bin_source", "raw"),
+            prior_hard_fallback_bins=data_config.get("prior_hard_fallback_bins", None),
+            prior_fallback_bin_source=data_config.get("prior_fallback_bin_source", "raw"),
+            prior_fallback_target=data_config.get("prior_fallback_target", "prior"),
+            low_bin_affine_params=data_config.get("low_bin_affine_params", None),
+            low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
         )
 
         evaluator.evaluate()

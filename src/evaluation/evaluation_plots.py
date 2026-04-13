@@ -25,6 +25,7 @@ def plot_rmse_maps(
     geo_bounds: dict,
     unit: str,
     output_dir: Path,
+    dataset_coords: tuple = None,
 ):
     """Plot spatial RMSE maps for model and baseline."""
     if not test_files or not spatial_errors_model:
@@ -34,15 +35,21 @@ def plot_rmse_maps(
     cmap = plt.get_cmap("jet").copy()
     cmap.set_bad("white")
 
-    # Load coordinates from first test file
-    try:
-        lat_grid, lon_grid = load_coordinates_from_parquet(
-            "s3://" + test_files[0], subsample_step=subsample_step
-        )
-        logger.info(f"Coordinate grid shape: {lat_grid.shape}")
-    except Exception as e:
-        logger.error(f"Failed to load coordinates: {e}")
-        return
+    # Prefer coordinates coming directly from the evaluation dataset because
+    # they match any runtime cropping/orientation used during inference.
+    if dataset_coords is not None:
+        lat_grid, lon_grid = dataset_coords
+        logger.info(f"Using dataset coordinate grid shape: {lat_grid.shape}")
+    else:
+        # Fallback: load coordinates from first test file
+        try:
+            lat_grid, lon_grid = load_coordinates_from_parquet(
+                test_files[0], subsample_step=subsample_step
+            )
+            logger.info(f"Coordinate grid shape: {lat_grid.shape}")
+        except Exception as e:
+            logger.error(f"Failed to load coordinates: {e}")
+            return
 
     # Aggregate spatial errors across all batches
     total_error_sq_model = np.zeros_like(lat_grid)
@@ -219,6 +226,409 @@ def plot_rmse_maps(
             norm=norm_binary_mae,
         )
 
+
+def plot_low_bin_spatial_maps(
+    low_bin_spatial_accumulators: Dict[str, Dict[str, np.ndarray]],
+    low_bin_spatial_subbins: List[tuple],
+    test_files: List[str],
+    subsample_step: int,
+    geo_bounds: dict,
+    output_dir: Path,
+    dataset_coords: tuple = None,
+):
+    """Plot spatial diagnostics for ultra-calm true-wave sub-bins."""
+    if not low_bin_spatial_accumulators:
+        logger.warning("No low-bin spatial accumulators available")
+        return
+    if not test_files:
+        logger.warning("No test files available for low-bin spatial plots")
+        return
+
+    if dataset_coords is not None:
+        lat_grid, lon_grid = dataset_coords
+    else:
+        try:
+            lat_grid, lon_grid = load_coordinates_from_parquet(
+                test_files[0], subsample_step=subsample_step
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load coordinates for low-bin spatial plots: {e}")
+            return
+
+    low_bin_dir = output_dir / "low_bin_spatial_maps"
+    low_bin_dir.mkdir(parents=True, exist_ok=True)
+
+    for lo, hi in low_bin_spatial_subbins:
+        bin_key = f"{lo:.1f}_{hi:.1f}"
+        stats = low_bin_spatial_accumulators.get(bin_key)
+        if not stats:
+            continue
+
+        count = stats["count"]
+        if np.nansum(count) <= 0:
+            logger.info(f"No samples for low-bin spatial sub-bin {lo:.1f}-{hi:.1f}")
+            continue
+
+        valid = count > 0
+        delta_mae = np.full_like(count, np.nan, dtype=np.float64)
+        bias_shift = np.full_like(count, np.nan, dtype=np.float64)
+        worse_pct = np.full_like(count, np.nan, dtype=np.float64)
+
+        delta_mae[valid] = stats["sum_delta_abs_err"][valid] / count[valid]
+        bias_shift[valid] = (
+            stats["sum_model_err"][valid] - stats["sum_base_err"][valid]
+        ) / count[valid]
+        worse_pct[valid] = 100.0 * stats["count_worse"][valid] / count[valid]
+
+        abs_delta = np.nanpercentile(np.abs(delta_mae), 98)
+        abs_bias = np.nanpercentile(np.abs(bias_shift), 98)
+        worse_vmax = np.nanpercentile(worse_pct, 98)
+        if not np.isfinite(abs_delta) or abs_delta <= 0:
+            abs_delta = 1e-6
+        if not np.isfinite(abs_bias) or abs_bias <= 0:
+            abs_bias = 1e-6
+        if not np.isfinite(worse_vmax) or worse_vmax <= 0:
+            worse_vmax = 100.0
+
+        stem = f"low_bin_true_{lo:.1f}_{hi:.1f}".replace(".", "p")
+
+        plot_spatial_rmse_map(
+            lat_grid,
+            lon_grid,
+            delta_mae,
+            save_path=low_bin_dir / f"{stem}_delta_abs_error_model_minus_baseline.png",
+            title=f"Delta |Error| (Model - Baseline), True {lo:.1f}-{hi:.1f}m",
+            vmin=-abs_delta,
+            vmax=abs_delta,
+            cmap="coolwarm",
+            geo_bounds=geo_bounds,
+            unit="m",
+        )
+        plot_spatial_rmse_map(
+            lat_grid,
+            lon_grid,
+            bias_shift,
+            save_path=low_bin_dir / f"{stem}_bias_shift_model_minus_baseline.png",
+            title=f"Bias Shift (Model - Baseline), True {lo:.1f}-{hi:.1f}m",
+            vmin=-abs_bias,
+            vmax=abs_bias,
+            cmap="coolwarm",
+            geo_bounds=geo_bounds,
+            unit="m",
+        )
+        plot_spatial_rmse_map(
+            lat_grid,
+            lon_grid,
+            worse_pct,
+            save_path=low_bin_dir / f"{stem}_worse_percentage.png",
+            title=f"Worse % (|err_model| > |err_base|), True {lo:.1f}-{hi:.1f}m",
+            vmin=0.0,
+            vmax=min(100.0, worse_vmax),
+            cmap="viridis",
+            geo_bounds=geo_bounds,
+            unit="%",
+        )
+
+
+def plot_low_bin_advanced_diagnostics(
+    low_bin_plot_samples: Dict[str, Dict[str, List[float]]],
+    low_bin_spatial_subbins: List[tuple],
+    output_dir: Path,
+):
+    """Create advanced low-bin diagnostics (CDF, hist/KDE, and hexbins)."""
+    if not low_bin_plot_samples:
+        logger.warning("No low-bin sample buffers available for advanced diagnostics")
+        return
+
+    low_bin_dir = output_dir / "low_bin_spatial_maps"
+    low_bin_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from scipy.stats import gaussian_kde
+
+        has_kde = True
+    except Exception:
+        gaussian_kde = None
+        has_kde = False
+
+    for lo, hi in low_bin_spatial_subbins:
+        key = f"{lo:.1f}_{hi:.1f}"
+        samples = low_bin_plot_samples.get(key, {})
+        if not samples:
+            continue
+
+        true_wave = np.array(samples.get("true_wave", []), dtype=np.float64)
+        pred_wave = np.array(samples.get("pred_wave", []), dtype=np.float64)
+        raw_wave = np.array(samples.get("raw_wave", []), dtype=np.float64)
+        pred_bias = np.array(samples.get("pred_bias", []), dtype=np.float64)
+        true_bias = np.array(samples.get("true_bias", []), dtype=np.float64)
+        prior_bias = np.array(samples.get("prior_bias", []), dtype=np.float64)
+
+        if len(true_wave) == 0:
+            logger.info(f"No sampled points for low-bin diagnostics {lo:.1f}-{hi:.1f}m")
+            continue
+
+        # Base masks
+        mask_basic = np.isfinite(true_wave) & np.isfinite(pred_wave) & np.isfinite(raw_wave)
+        if np.sum(mask_basic) < 10:
+            continue
+
+        true_wave_b = true_wave[mask_basic]
+        pred_wave_b = pred_wave[mask_basic]
+        raw_wave_b = raw_wave[mask_basic]
+
+        err_model = pred_wave_b - true_wave_b
+        err_raw = raw_wave_b - true_wave_b
+
+        # Prior-derived errors in wave space, where available
+        has_prior = len(prior_bias) == len(true_wave)
+        err_prior = None
+        prior_bias_b = None
+        pred_bias_b = None
+        true_bias_b = None
+        if has_prior:
+            prior_bias_all = prior_bias[mask_basic]
+            valid_prior = np.isfinite(prior_bias_all)
+            if np.any(valid_prior):
+                prior_wave = raw_wave_b[valid_prior] + prior_bias_all[valid_prior]
+                err_prior = prior_wave - true_wave_b[valid_prior]
+
+            prior_bias_b = prior_bias_all
+            if len(pred_bias) == len(true_wave):
+                pred_bias_b = pred_bias[mask_basic]
+            if len(true_bias) == len(true_wave):
+                true_bias_b = true_bias[mask_basic]
+        else:
+            if len(pred_bias) == len(true_wave):
+                pred_bias_b = pred_bias[mask_basic]
+            if len(true_bias) == len(true_wave):
+                true_bias_b = true_bias[mask_basic]
+
+        stem = f"low_bin_true_{lo:.1f}_{hi:.1f}".replace(".", "p")
+
+        # 1) Absolute error CDF comparison
+        fig, ax = plt.subplots(figsize=(9, 6))
+        for vals, label, color in [
+            (np.abs(err_model), "Model |error|", "tab:blue"),
+            (np.abs(err_raw), "Raw/Baseline |error|", "tab:red"),
+            (np.abs(err_prior) if err_prior is not None else None, "Prior |error|", "tab:green"),
+        ]:
+            if vals is None or len(vals) == 0:
+                continue
+            s = np.sort(vals[np.isfinite(vals)])
+            if len(s) == 0:
+                continue
+            cdf = np.arange(1, len(s) + 1, dtype=np.float64) / len(s)
+            ax.plot(s, cdf, label=label, linewidth=2, color=color)
+
+        ax.set_title(f"Absolute Error CDF ({lo:.1f}-{hi:.1f}m true)")
+        ax.set_xlabel("Absolute error (m)")
+        ax.set_ylabel("CDF")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(low_bin_dir / f"{stem}_abs_error_cdf.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        # 2) Signed error histogram + KDE
+        fig, ax = plt.subplots(figsize=(9, 6))
+        for vals, label, color in [
+            (err_model, "Model error", "tab:blue"),
+            (err_raw, "Raw/Baseline error", "tab:red"),
+            (err_prior, "Prior error", "tab:green"),
+        ]:
+            if vals is None:
+                continue
+            vals = vals[np.isfinite(vals)]
+            if len(vals) < 10:
+                continue
+            q01, q99 = np.percentile(vals, [1, 99])
+            bins = np.linspace(q01, q99, 60)
+            ax.hist(
+                vals,
+                bins=bins,
+                density=True,
+                alpha=0.25,
+                color=color,
+                label=f"{label} hist",
+            )
+            if has_kde and len(vals) > 100:
+                xs = np.linspace(q01, q99, 300)
+                kde = gaussian_kde(vals)
+                ax.plot(xs, kde(xs), color=color, linewidth=2, label=f"{label} KDE")
+
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=1)
+        ax.set_title(f"Signed Error Distribution ({lo:.1f}-{hi:.1f}m true)")
+        ax.set_xlabel("Signed error (m)")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(
+            low_bin_dir / f"{stem}_signed_error_hist_kde.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+        # 3) Hexbin raw wave vs predicted bias + prior overlay
+        if pred_bias_b is not None and len(pred_bias_b) == len(raw_wave_b):
+            finite = np.isfinite(raw_wave_b) & np.isfinite(pred_bias_b)
+            if np.sum(finite) > 100:
+                x = raw_wave_b[finite]
+                y = pred_bias_b[finite]
+                fig, ax = plt.subplots(figsize=(9, 6))
+                hb = ax.hexbin(x, y, gridsize=55, mincnt=5, cmap="viridis")
+                cbar = fig.colorbar(hb, ax=ax)
+                cbar.set_label("Count")
+
+                # Overlay median prior bias by raw-wave bins when available
+                if prior_bias_b is not None and len(prior_bias_b) == len(raw_wave_b):
+                    fp = finite & np.isfinite(prior_bias_b)
+                    if np.sum(fp) > 40:
+                        xp = raw_wave_b[fp]
+                        yp = prior_bias_b[fp]
+                        edges = np.linspace(np.nanpercentile(xp, 1), np.nanpercentile(xp, 99), 30)
+                        centers = 0.5 * (edges[:-1] + edges[1:])
+                        med = np.full_like(centers, np.nan, dtype=np.float64)
+                        for i in range(len(centers)):
+                            m = (xp >= edges[i]) & (xp < edges[i + 1])
+                            if np.sum(m) > 10:
+                                med[i] = np.median(yp[m])
+                        valid = np.isfinite(med)
+                        if np.any(valid):
+                            ax.plot(
+                                centers[valid],
+                                med[valid],
+                                color="orange",
+                                linewidth=2.2,
+                                label="Prior bias median",
+                            )
+
+                # Optional true-bias overlay for reference
+                if true_bias_b is not None and len(true_bias_b) == len(raw_wave_b):
+                    ft = finite & np.isfinite(true_bias_b)
+                    if np.sum(ft) > 40:
+                        xt = raw_wave_b[ft]
+                        yt = true_bias_b[ft]
+                        edges = np.linspace(np.nanpercentile(xt, 1), np.nanpercentile(xt, 99), 30)
+                        centers = 0.5 * (edges[:-1] + edges[1:])
+                        med_t = np.full_like(centers, np.nan, dtype=np.float64)
+                        for i in range(len(centers)):
+                            m = (xt >= edges[i]) & (xt < edges[i + 1])
+                            if np.sum(m) > 10:
+                                med_t[i] = np.median(yt[m])
+                        valid_t = np.isfinite(med_t)
+                        if np.any(valid_t):
+                            ax.plot(
+                                centers[valid_t],
+                                med_t[valid_t],
+                                color="white",
+                                linewidth=1.8,
+                                linestyle="--",
+                                label="True bias median",
+                            )
+
+                ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
+                ax.set_title(f"Raw Wave vs Predicted Bias ({lo:.1f}-{hi:.1f}m true)")
+                ax.set_xlabel("Raw wave VHM0 (m)")
+                ax.set_ylabel("Predicted bias (m)")
+                ax.grid(True, alpha=0.25)
+                ax.legend(fontsize=9, loc="best")
+                fig.tight_layout()
+                fig.savefig(
+                    low_bin_dir / f"{stem}_raw_vs_pred_bias_hexbin_with_prior_overlay.png",
+                    dpi=300,
+                    bbox_inches="tight",
+                )
+                plt.close(fig)
+
+        # 4) Hexbin prior bias vs model residual
+        if (
+            prior_bias_b is not None
+            and pred_bias_b is not None
+            and len(prior_bias_b) == len(pred_bias_b)
+        ):
+            residual = pred_bias_b - prior_bias_b
+            finite = np.isfinite(prior_bias_b) & np.isfinite(residual)
+            if np.sum(finite) > 100:
+                fig, ax = plt.subplots(figsize=(9, 6))
+                hb = ax.hexbin(
+                    prior_bias_b[finite],
+                    residual[finite],
+                    gridsize=55,
+                    mincnt=5,
+                    cmap="plasma",
+                )
+                cbar = fig.colorbar(hb, ax=ax)
+                cbar.set_label("Count")
+                ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
+                ax.axvline(0.0, color="black", linestyle=":", linewidth=1)
+                ax.set_title(f"Prior Bias vs Model Residual ({lo:.1f}-{hi:.1f}m true)")
+                ax.set_xlabel("Prior bias (m)")
+                ax.set_ylabel("Model residual (pred_bias - prior_bias) (m)")
+                ax.grid(True, alpha=0.25)
+                fig.tight_layout()
+                fig.savefig(
+                    low_bin_dir / f"{stem}_prior_bias_vs_model_residual_hexbin.png",
+                    dpi=300,
+                    bbox_inches="tight",
+                )
+                plt.close(fig)
+
+
+def plot_coastal_distance_improvement(
+    coastal_rows: List[Dict],
+    output_dir: Path,
+):
+    """Plot RMSE/MAE improvement by distance-to-coast bins."""
+    if not coastal_rows:
+        logger.warning("No coastal-distance rows provided for plotting")
+        return
+
+    labels = [row["distance_bin_km"] for row in coastal_rows]
+    rmse_imp = np.array([row.get("rmse_improvement_pct", np.nan) for row in coastal_rows], dtype=np.float64)
+    mae_imp = np.array([row.get("mae_improvement_pct", np.nan) for row in coastal_rows], dtype=np.float64)
+    counts = [row.get("count", 0) for row in coastal_rows]
+
+    x = np.arange(len(labels))
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    ax.bar(x - width / 2, np.nan_to_num(rmse_imp, nan=0.0), width=width, label="RMSE improvement (%)", color="#1f77b4")
+    ax.bar(x + width / 2, np.nan_to_num(mae_imp, nan=0.0), width=width, label="MAE improvement (%)", color="#ff7f0e")
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
+
+    finite_vals = np.concatenate([rmse_imp[np.isfinite(rmse_imp)], mae_imp[np.isfinite(mae_imp)]])
+    y_pad = 0.5
+    y_top_default = 1.0
+    if finite_vals.size > 0:
+        y_top_default = max(y_top_default, float(np.max(finite_vals)) + 1.0)
+
+    for i, c in enumerate(counts):
+        local = [v for v in [rmse_imp[i], mae_imp[i]] if np.isfinite(v)]
+        local_top = max(local) if local else 0.0
+        ax.text(
+            x[i],
+            local_top + y_pad,
+            f"n={int(c):,}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylabel("Improvement (%)")
+    ax.set_title("Performance by Distance to Coast")
+    ax.set_ylim(bottom=min(-1.0, float(np.nanmin(np.nan_to_num(np.concatenate([rmse_imp, mae_imp]), nan=0.0))) - 1.0),
+                top=y_top_default)
+    ax.grid(True, alpha=0.25, axis="y")
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(output_dir / "coastal_distance_improvement.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 def plot_model_better_percentage(
     sea_bin_metrics: Dict[str, Dict],

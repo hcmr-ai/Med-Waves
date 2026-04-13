@@ -121,11 +121,15 @@ class TransformerBranch(nn.Module):
         num_layers=6,
         num_heads=8,
         mlp_ratio=4.0,
+        use_coord_pos_enc=True,
+        sea_mask_channel_index=None,
     ):
         super().__init__()
 
+        self.use_coord_pos_enc = use_coord_pos_enc
+        self.sea_mask_channel_index = sea_mask_channel_index
         self.patch = nn.Conv2d(
-            in_channels,
+            in_channels + (2 if use_coord_pos_enc else 0),
             emb_dim,
             kernel_size=patch_size,
             stride=patch_size,
@@ -133,6 +137,8 @@ class TransformerBranch(nn.Module):
 
         self.emb_dim = emb_dim
         self.patch_size = patch_size
+        # Lightweight local positional bias on the patch grid.
+        self.pos_conv = nn.Conv2d(emb_dim, emb_dim, kernel_size=3, padding=1, groups=emb_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=emb_dim,
@@ -146,10 +152,37 @@ class TransformerBranch(nn.Module):
         self.norm = nn.LayerNorm(emb_dim)
 
     def forward(self, x):
-        B = x.size(0)
+        B, _, H, W = x.shape
+        x_raw = x
+
+        if self.use_coord_pos_enc:
+            y_coords = torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype)
+            x_coords = torch.linspace(-1.0, 1.0, W, device=x.device, dtype=x.dtype)
+            yy = y_coords.view(1, 1, H, 1).expand(B, 1, H, W)
+            xx = x_coords.view(1, 1, 1, W).expand(B, 1, H, W)
+            x = torch.cat([x, yy, xx], dim=1)
 
         # Patch embedding → [B, emb_dim, H/ps, W/ps]
         x = self.patch(x)
+
+        if (
+            self.sea_mask_channel_index is not None
+            and 0 <= self.sea_mask_channel_index < x_raw.shape[1]
+        ):
+            sea_mask = x_raw[:, self.sea_mask_channel_index : self.sea_mask_channel_index + 1]
+            sea_mask = torch.nan_to_num(sea_mask, nan=0.0, posinf=0.0, neginf=0.0)
+            sea_mask = sea_mask.clamp(0.0, 1.0)
+            sea_mask = F.avg_pool2d(
+                sea_mask, kernel_size=self.patch_size, stride=self.patch_size
+            )
+            if sea_mask.shape[-2:] != x.shape[-2:]:
+                sea_mask = F.interpolate(
+                    sea_mask, size=x.shape[-2:], mode="nearest"
+                )
+            # Keep a small floor so sparse sea tiles do not collapse token gradients.
+            x = x * (0.1 + 0.9 * sea_mask)
+
+        x = x + self.pos_conv(x)
         Hp, Wp = x.shape[-2:]
 
         # Flatten tokens → [B, Hp*Wp, emb_dim]
@@ -207,7 +240,10 @@ class TransUNetGeo(nn.Module):
         bottleneck_dim=1024,
         patch_size=16,  # must match CNN bottleneck size!
         num_layers=8,
+        num_heads=8,
         use_mdn=False,
+        transformer_use_coord_pos_enc=True,
+        transformer_sea_mask_channel_index=None,
     ):
         super().__init__()
 
@@ -236,6 +272,9 @@ class TransUNetGeo(nn.Module):
             emb_dim=bottleneck_dim,
             patch_size=patch_size,
             num_layers=num_layers,
+            num_heads=num_heads,
+            use_coord_pos_enc=transformer_use_coord_pos_enc,
+            sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
 
         # Fusion conv
@@ -293,6 +332,78 @@ class TransUNetGeo(nn.Module):
             outputs[task] = self.task_heads[task](u1)
 
         # Backward compatibility: single task returns tensor, not dict
+        if len(self.auxiliary_tasks) == 1:
+            return outputs[self.auxiliary_tasks[0]]
+
+        return outputs
+
+
+class SimpleMLPGeo(nn.Module):
+    """
+    Lightweight per-pixel MLP baseline for geospatial fields.
+
+    Applies the same MLP to each pixel independently (shared weights across space),
+    preserving spatial resolution while keeping model complexity low.
+
+    Args:
+        in_channels: Number of input channels
+        out_channels: Number of output channels (kept for compatibility)
+        auxiliary_tasks: Task names, e.g. ['vhm0', 'vtm02']
+        hidden_dim: Hidden width of MLP layers
+        num_layers: Number of Linear+ReLU blocks
+        dropout: Dropout probability applied after hidden activations
+        use_mdn: Whether to use MDN heads per task
+
+    Returns:
+        Single task: tensor [B, 1, H, W]
+        Multi-task: dict {'task_name': tensor [B, 1, H, W]}
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        auxiliary_tasks=None,
+        hidden_dim=128,
+        num_layers=3,
+        dropout=0.0,
+        use_mdn=False,
+    ):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+
+        self.auxiliary_tasks = auxiliary_tasks or ["vhm0"]
+        self.use_mdn = use_mdn
+
+        layers = []
+        in_dim = in_channels
+        for _ in range(num_layers):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden_dim
+        self.mlp = nn.Sequential(*layers)
+
+        # Task-specific heads over shared feature map
+        self.task_heads = nn.ModuleDict()
+        for task in self.auxiliary_tasks:
+            if use_mdn:
+                self.task_heads[task] = MDNHead(hidden_dim, K=3)
+            else:
+                self.task_heads[task] = nn.Conv2d(hidden_dim, 1, kernel_size=1)
+
+    def forward(self, x):
+        # x: [B, C, H, W] -> [B, H, W, C]
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = self.mlp(x)  # [B, H, W, hidden_dim]
+        x = x.permute(0, 3, 1, 2).contiguous()  # [B, hidden_dim, H, W]
+
+        outputs = {}
+        for task in self.auxiliary_tasks:
+            outputs[task] = self.task_heads[task](x)
+
         if len(self.auxiliary_tasks) == 1:
             return outputs[self.auxiliary_tasks[0]]
 

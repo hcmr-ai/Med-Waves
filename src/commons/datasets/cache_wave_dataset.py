@@ -54,6 +54,11 @@ class CachedWaveDataset(Dataset):
         fs=None,
         max_cache_size=20,
         region_filter=None,
+        add_sea_mask_channel=False,
+        predict_residual_to_prior=False,
+        prior_source="none",
+        static_bias_map_path=None,
+        residual_prior_task=None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -72,11 +77,15 @@ class CachedWaveDataset(Dataset):
         self.patch_size = patch_size
         self.subsample_step = subsample_step
         self.predict_bias = predict_bias
+        self.predict_residual_to_prior = predict_residual_to_prior
+        self.prior_source = prior_source
+        self.static_bias_map_path = static_bias_map_path
+        self.residual_prior_task = residual_prior_task
         self.enable_profiler = enable_profiler
         # self.index_map = [
         #     (f_idx, h) for f_idx in range(len(file_paths)) for h in range(24)
         # ]
-        self.H, self.W = 380, 1307
+        self.H, self.W = None, None
         self.C_in = len(self.excluded_columns) + 1  # +1 for target column
         # worker-local cache with LRU eviction
         from collections import OrderedDict
@@ -93,6 +102,43 @@ class CachedWaveDataset(Dataset):
         self.region_filter = (
             region_filter  # Region filter: "atlantic", "mediterranean", or None
         )
+        self.add_sea_mask_channel = add_sea_mask_channel
+        if self.predict_residual_to_prior:
+            if self.residual_prior_task is None:
+                if len(self.target_columns) == 1:
+                    self.residual_prior_task = list(self.target_columns.keys())[0]
+                elif "vhm0" in self.target_columns:
+                    self.residual_prior_task = "vhm0"
+                else:
+                    raise ValueError(
+                        "residual_prior_task must be set for multi-task residual training."
+                    )
+            if self.residual_prior_task not in self.target_columns:
+                raise ValueError(
+                    f"residual_prior_task '{self.residual_prior_task}' not in target_columns: {list(self.target_columns.keys())}"
+                )
+            if self.residual_prior_task != "vhm0":
+                raise ValueError(
+                    "predict_residual_to_prior currently supports residual_prior_task='vhm0' only."
+                )
+        self.static_prior_bias = None
+        self.static_prior_is_cropped = False
+        if self.predict_residual_to_prior:
+            if self.prior_source != "static":
+                raise ValueError(
+                    f"Unsupported prior_source '{self.prior_source}'. Use 'static'."
+                )
+            if not self.static_bias_map_path:
+                raise ValueError(
+                    "static_bias_map_path is required when predict_residual_to_prior=true"
+                )
+            static_map = np.load(self.static_bias_map_path)
+            static_map = np.squeeze(static_map)
+            if static_map.ndim != 2:
+                raise ValueError(
+                    f"Static bias map must be 2D after squeeze, got shape {static_map.shape}"
+                )
+            self.static_prior_bias = torch.from_numpy(static_map.astype(np.float32))
         # S3 filesystem - will be lazy-initialized per worker (not fork-safe)
         self._fs = None
 
@@ -104,12 +150,18 @@ class CachedWaveDataset(Dataset):
             self.is_hourly = sample_tensor.ndim == 3  # 3D=hourly, 4D=daily
             print(f"  Tensor shape: {sample_tensor.shape}")
             print(f"  File type: {'HOURLY' if self.is_hourly else 'DAILY'}")
+            if self.is_hourly:
+                self.H, self.W = sample_tensor.shape[0], sample_tensor.shape[1]
+            else:
+                self.H, self.W = sample_tensor.shape[1], sample_tensor.shape[2]
+            print(f"  Spatial size inferred from data: ({self.H}, {self.W})")
 
             # Precompute spatial crop indices for region filtering
             self.crop_h_indices = None
             self.crop_w_indices = None
             self.cropped_lat_grid = None
             self.cropped_lon_grid = None
+            self.pixel_exclusion_mask = None
             if self.region_filter is not None:
                 lat_idx = sample_feature_cols.index("latitude")
                 lon_idx = sample_feature_cols.index("longitude")
@@ -122,15 +174,18 @@ class CachedWaveDataset(Dataset):
                     lat_data = sample_tensor[0, ..., lat_idx]
                     lon_data = sample_tensor[0, ..., lon_idx]
 
-                # Gibraltar boundary
+                # Gibraltar boundary and Bay of Biscay (Atlantic water above Gibraltar)
                 GIBRALTAR_LON = -5.5
+                BISCAY_LAT = 43.0
+                BISCAY_LON = 0.0
+                biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
 
                 # Find which columns (longitude) and rows (latitude) to keep
                 # For each column, check if ANY pixel in that column is in the target region
                 if self.region_filter == "atlantic":
-                    region_condition = lon_data < GIBRALTAR_LON
+                    region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
                 elif self.region_filter == "mediterranean":
-                    region_condition = lon_data >= GIBRALTAR_LON
+                    region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
                 else:
                     raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -153,6 +208,22 @@ class CachedWaveDataset(Dataset):
                     :, self.crop_w_indices
                 ]
 
+                # Pixel-level exclusion mask for non-region pixels within cropped rectangle
+                # True = pixel to EXCLUDE (set to NaN in __getitem__)
+                self.pixel_exclusion_mask = None
+                if self.region_filter == "mediterranean":
+                    exclude = (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                elif self.region_filter == "atlantic":
+                    is_med = (self.cropped_lon_grid >= GIBRALTAR_LON) & ~(
+                        (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                    )
+                    exclude = is_med
+                else:
+                    exclude = None
+                if exclude is not None and exclude.any():
+                    self.pixel_exclusion_mask = exclude
+                    print(f"  Pixel-level region exclusion: {exclude.sum().item()} pixels masked")
+
                 original_size = lat_data.shape[0] * lat_data.shape[1]
                 cropped_size = len(self.crop_h_indices) * len(self.crop_w_indices)
                 print(
@@ -162,6 +233,43 @@ class CachedWaveDataset(Dataset):
                     f"  Removed {original_size - cropped_size} pixels ({(1 - cropped_size / original_size) * 100:.1f}% reduction)"
                 )
                 print(f"  Keeping only {self.region_filter} region")
+
+            if self.predict_residual_to_prior and self.static_prior_bias is not None:
+                full_shape = (self.H, self.W)
+                cropped_shape = None
+                if self.crop_h_indices is not None and self.crop_w_indices is not None:
+                    cropped_shape = (len(self.crop_h_indices), len(self.crop_w_indices))
+
+                prior_shape = tuple(self.static_prior_bias.shape)
+                if prior_shape == full_shape:
+                    self.static_prior_is_cropped = False
+                elif prior_shape == (full_shape[1], full_shape[0]):
+                    self.static_prior_bias = self.static_prior_bias.T.contiguous()
+                    self.static_prior_is_cropped = False
+                elif cropped_shape is not None and prior_shape == cropped_shape:
+                    self.static_prior_is_cropped = True
+                elif (
+                    cropped_shape is not None
+                    and prior_shape == (cropped_shape[1], cropped_shape[0])
+                ):
+                    self.static_prior_bias = self.static_prior_bias.T.contiguous()
+                    self.static_prior_is_cropped = True
+                else:
+                    raise ValueError(
+                        "Static bias map shape "
+                        f"{prior_shape} incompatible with expected full {full_shape}"
+                        + (
+                            f" or cropped {cropped_shape}"
+                            if cropped_shape is not None
+                            else ""
+                        )
+                    )
+
+                print(
+                    "  Static prior map shape accepted: "
+                    f"{tuple(self.static_prior_bias.shape)} "
+                    f"({'cropped' if self.static_prior_is_cropped else 'full-grid'})"
+                )
 
             self._fs = None  # Reset after sample load
             self._cache.clear()
@@ -184,11 +292,11 @@ class CachedWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
             if self.region_filter == "atlantic":
-                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+                print("  Keeping pixels: lon < -5.5° OR (lat > 43° AND lon < 0°)")
             elif self.region_filter == "mediterranean":
-                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+                print("  Keeping pixels: lon >= -5.5° AND NOT (lat > 43° AND lon < 0°)")
             print("================================\n")
         else:
             print("  No region filtering (using all pixels)")
@@ -350,6 +458,25 @@ class CachedWaveDataset(Dataset):
             # Crop to only include target region (e.g., Mediterranean only)
             hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
 
+        # NaN-out non-region pixels so they are excluded by the mask
+        if self.pixel_exclusion_mask is not None:
+            hour_data = hour_data.clone()
+            hour_data[self.pixel_exclusion_mask] = float("nan")
+
+        prior_bias = None
+        if self.predict_residual_to_prior and self.static_prior_bias is not None:
+            prior_bias = self.static_prior_bias
+            if (
+                self.crop_h_indices is not None
+                and self.crop_w_indices is not None
+                and not self.static_prior_is_cropped
+            ):
+                prior_bias = prior_bias[self.crop_h_indices, :][:, self.crop_w_indices]
+            if self.pixel_exclusion_mask is not None:
+                prior_bias = prior_bias.clone()
+                prior_bias[self.pixel_exclusion_mask] = float("nan")
+            prior_bias = prior_bias.unsqueeze(-1)
+
         # Select input features in FEATURES_ORDER to match scaler's stats_ indices
         # This ensures stats_[c] applies to channel c in X
         # Exclude ALL target columns from input
@@ -382,7 +509,19 @@ class CachedWaveDataset(Dataset):
         # Extract targets for each task
         targets = {}
         for task_name, target_col in self.target_columns.items():
-            if self.predict_bias:
+            if self.predict_residual_to_prior and task_name == self.residual_prior_task:
+                # Residual-to-prior always predicts bias residual for the selected task.
+                corrected = hour_data[
+                    ...,
+                    feature_cols.index(target_col) : feature_cols.index(target_col) + 1,
+                ]
+                uncorr_col = target_col.replace("corrected_", "")
+                uncorr = hour_data[
+                    ...,
+                    feature_cols.index(uncorr_col) : feature_cols.index(uncorr_col) + 1,
+                ]
+                targets[task_name] = corrected - uncorr
+            elif self.predict_bias:
                 # Predict bias: corrected - uncorrected
                 corrected = hour_data[
                     ...,
@@ -410,6 +549,10 @@ class CachedWaveDataset(Dataset):
         if self.subsample_step is not None:
             X = X[:: self.subsample_step, :: self.subsample_step, :]
             vhm0 = vhm0[:: self.subsample_step, :: self.subsample_step, :]
+            if prior_bias is not None:
+                prior_bias = prior_bias[
+                    :: self.subsample_step, :: self.subsample_step, :
+                ]
             for task_name in targets:
                 targets[task_name] = targets[task_name][
                     :: self.subsample_step, :: self.subsample_step, :
@@ -425,8 +568,15 @@ class CachedWaveDataset(Dataset):
                 X = X[i : i + ph, j : j + pw, :]
                 vhm0 = vhm0[i : i + ph, j : j + pw, :]
                 mask = mask[i : i + ph, j : j + pw, :]
+                if prior_bias is not None:
+                    prior_bias = prior_bias[i : i + ph, j : j + pw, :]
                 for task_name in targets:
                     targets[task_name] = targets[task_name][i : i + ph, j : j + pw, :]
+
+        if self.predict_residual_to_prior and prior_bias is not None:
+            for task_name in targets:
+                if task_name == self.residual_prior_task:
+                    targets[task_name] = targets[task_name] - prior_bias
 
         if self.normalizer is not None:
             if self.normalize_target:
@@ -453,12 +603,22 @@ class CachedWaveDataset(Dataset):
             else:
                 X = self.normalizer.transform_torch(X, normalize_target=False)
 
+        # Optional sea mask channel (1=sea, 0=land), appended last.
+        # Append after normalization so normalizer channel stats remain valid.
+        if self.add_sea_mask_channel:
+            sea_mask = (~torch.isnan(vhm0)).float()
+            X = torch.cat([X, sea_mask], dim=-1)
+
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
         vhm0_for_batch = vhm0.permute(2, 0, 1).contiguous()  # Convert to (C, H, W)
         mask = mask.permute(2, 0, 1).contiguous()  # Convert mask to (C, H, W)
         X = torch.nan_to_num(X, nan=0.0)
         vhm0_for_batch = torch.nan_to_num(vhm0_for_batch, nan=0.0)
+        prior_bias_for_batch = None
+        if prior_bias is not None:
+            prior_bias_for_batch = prior_bias.permute(2, 0, 1).contiguous()
+            prior_bias_for_batch = torch.nan_to_num(prior_bias_for_batch, nan=0.0)
 
         # Convert all targets to (C, H, W)
         for task_name in targets:
@@ -469,8 +629,12 @@ class CachedWaveDataset(Dataset):
             # Extract single target using actual task name
             task_name = list(self.target_columns.keys())[0]
             y = targets[task_name]
+            if prior_bias_for_batch is not None:
+                return X, y, mask, vhm0_for_batch, prior_bias_for_batch
             return X, y, mask, vhm0_for_batch
         else:
+            if prior_bias_for_batch is not None:
+                return X, targets, mask, vhm0_for_batch, prior_bias_for_batch
             return X, targets, mask, vhm0_for_batch
 
     def __len__(self):

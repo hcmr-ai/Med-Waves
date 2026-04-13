@@ -93,11 +93,15 @@ def load_coordinates_from_parquet(
             lon_grid: 2D array of longitudes (H, W)
             timestamps: 1D array of timestamps or 2D array (H, W) if available per pixel
     """
+    import os
     import pyarrow.parquet as pq
     import s3fs
 
+    file_path = str(file_path)
     # Check if it's an S3 path (with or without s3:// prefix)
-    is_s3 = file_path.startswith("s3://") or not file_path.startswith("/")
+    is_s3 = file_path.startswith("s3://") or (
+        not os.path.isabs(file_path) and not os.path.exists(file_path)
+    )
 
     if is_s3:
         # Ensure s3:// prefix for s3fs

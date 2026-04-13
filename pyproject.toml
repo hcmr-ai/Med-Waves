@@ -46,6 +46,7 @@ transformers = "^4.57.1"
 lightning = "^2.5.6"
 azure-storage-blob = "^12.28.0"
 opencv-python = "^4.13.0.92"
+fsspec = "2025.12.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.12.1"
@@ -55,9 +56,8 @@ pre-commit = "^4.2.0"
 pytest = "^8.0"
 pytest-cov = "^6.0"
 
-
 [[tool.poetry.source]]
 name = "torch-stable"
-url = "https://download.pytorch.org/whl/torch_stable.html"
+url = "https://download.pytorch.org/whl/cu128"
 priority = "explicit"
 

@@ -92,6 +92,10 @@ class TimestepPatchWaveDataset(Dataset):
 
         self.patch_cfg = patch_cfg or PatchSamplingConfig()
         self.sampling_mode = sampling_mode
+        if self.sampling_mode not in {"random", "stratified", "exhaustive"}:
+            raise ValueError(
+                "sampling_mode must be one of: random, stratified, exhaustive"
+            )
         self.forced_bin_id = forced_bin_id
 
         self.add_sea_mask_channel = add_sea_mask_channel
@@ -122,6 +126,12 @@ class TimestepPatchWaveDataset(Dataset):
 
         # Infer dims from one file
         tensor, feature_cols = self._get_file_tensor(self.file_paths[0])
+        if tensor.dim() != 4:
+            raise ValueError(
+                "TimestepPatchWaveDataset expects daily tensors with shape "
+                f"(hours, H, W, C), got {tuple(tensor.shape)}"
+            )
+        self.hours_per_file = tensor.shape[0]
         self.H, self.W = tensor.shape[1], tensor.shape[2]
         self.feature_cols_ref = feature_cols
 
@@ -142,7 +152,7 @@ class TimestepPatchWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE (TimestepPatchWaveDataset) ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°)")
+            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
 
             # Extract coordinates from first file
             lat_idx = feature_cols.index("latitude")
@@ -152,14 +162,16 @@ class TimestepPatchWaveDataset(Dataset):
 
             # Gibraltar boundary
             GIBRALTAR_LON = -5.5
+            BISCAY_LAT = 43.0
+            BISCAY_LON = 0.0
+            biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
 
             # Find which columns (longitude) and rows (latitude) to keep
+            # For each column, check if ANY pixel in that column is in the target region
             if self.region_filter == "atlantic":
-                region_condition = lon_data < GIBRALTAR_LON
-                print("  Keeping pixels: lon < -5.5° (West of Gibraltar)")
+                region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
             elif self.region_filter == "mediterranean":
-                region_condition = lon_data >= GIBRALTAR_LON
-                print("  Keeping pixels: lon >= -5.5° (East of Gibraltar)")
+                region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
             else:
                 raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -182,6 +194,21 @@ class TimestepPatchWaveDataset(Dataset):
                 :, self.crop_w_indices
             ]
 
+            # Pixel-level exclusion mask for non-region pixels within cropped rectangle
+            self.pixel_exclusion_mask = None
+            if self.region_filter == "mediterranean":
+                exclude = (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+            elif self.region_filter == "atlantic":
+                is_med = (self.cropped_lon_grid >= GIBRALTAR_LON) & ~(
+                    (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
+                )
+                exclude = is_med
+            else:
+                exclude = None
+            if exclude is not None and exclude.any():
+                self.pixel_exclusion_mask = exclude
+                print(f"  Pixel-level region exclusion: {exclude.sum().item()} pixels masked")
+
             # Update H, W to reflect cropped dimensions
             old_H, old_W = self.H, self.W
             self.H = len(self.crop_h_indices)
@@ -197,6 +224,7 @@ class TimestepPatchWaveDataset(Dataset):
         else:
             self.cropped_lat_grid = None
             self.cropped_lon_grid = None
+            self.pixel_exclusion_mask = None
 
         # Build index map (H, W are final after region cropping)
         ph, pw = self.patch_cfg.patch_size
@@ -212,18 +240,22 @@ class TimestepPatchWaveDataset(Dataset):
             self.index_map = [
                 (f_idx, h, t_idx)
                 for f_idx in range(len(self.file_paths))
-                for h in range(24)
+                for h in range(self.hours_per_file)
                 for t_idx in range(n_tiles)
             ]
             coverage = (n_tiles * ph * pw) / (self.H * self.W) * 100
             print(
                 f"[TimestepPatchWaveDataset] Exhaustive tiling: {tile_rows}x{tile_cols} = {n_tiles} tiles/frame"
             )
-            print(f"  Coverage: {coverage:.1f}%  |  Samples/file: {24 * n_tiles}")
+            print(
+                f"  Coverage: {coverage:.1f}%  |  Samples/file: {self.hours_per_file * n_tiles}"
+            )
             print(f"  Total samples: {len(self.index_map)}")
         else:
             self.index_map = [
-                (f_idx, h) for f_idx in range(len(self.file_paths)) for h in range(24)
+                (f_idx, h)
+                for f_idx in range(len(self.file_paths))
+                for h in range(self.hours_per_file)
             ]
 
         # Precompute valid anchors once from a sample frame (land mask is static across time)
@@ -298,6 +330,10 @@ class TimestepPatchWaveDataset(Dataset):
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             hour0 = hour0[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
 
+        if self.pixel_exclusion_mask is not None:
+            hour0 = hour0.clone()
+            hour0[self.pixel_exclusion_mask] = float("nan")
+
         vhm0_idx = feature_cols.index("VHM0")
         vhm0 = hour0[..., vhm0_idx : vhm0_idx + 1]  # (H,W,1)
 
@@ -353,6 +389,17 @@ class TimestepPatchWaveDataset(Dataset):
                 return i
         return len(self.patch_cfg.bin_edges_m)
 
+    def _distance_to_bin(self, score_m: float, bin_id: int) -> float:
+        """Distance in meters from score_m to the requested bin interval."""
+        edges = self.patch_cfg.bin_edges_m
+        lower = float("-inf") if bin_id == 0 else edges[bin_id - 1]
+        upper = float("inf") if bin_id == len(edges) else edges[bin_id]
+        if lower <= score_m < upper:
+            return 0.0
+        if score_m < lower:
+            return lower - score_m
+        return score_m - upper
+
     def _sample_anchor(self) -> Tuple[int, int]:
         if self.valid_anchors is None:
             # fallback random top-left anywhere
@@ -372,14 +419,18 @@ class TimestepPatchWaveDataset(Dataset):
         # Decide target bin
         n_bins = len(self.patch_cfg.bin_edges_m) + 1
         if self.sampling_mode == "stratified":
-            target_bin = forced_bin or self.forced_bin_id
+            target_bin = forced_bin if forced_bin is not None else self.forced_bin_id
             if target_bin is None:
                 target_bin = idx % n_bins
+            if target_bin < 0 or target_bin >= n_bins:
+                raise ValueError(
+                    f"forced_bin must be in [0, {n_bins - 1}], got {target_bin}"
+                )
         else:
             target_bin = None
 
         best_i, best_j, best_bin = 0, 0, 0
-        best_score = -1.0
+        best_distance = float("inf")
 
         # Random sampling without stratification
         if target_bin is None and self.sampling_mode == "random":
@@ -401,9 +452,10 @@ class TimestepPatchWaveDataset(Dataset):
             if b == target_bin:
                 return i0, j0, b
 
-            # best fallback (prefer higher score)
-            if score > best_score:
-                best_score, best_i, best_j, best_bin = score, i0, j0, b
+            # Best fallback is the patch closest to the requested bin interval.
+            distance = self._distance_to_bin(score, target_bin)
+            if distance < best_distance:
+                best_distance, best_i, best_j, best_bin = distance, i0, j0, b
 
         return best_i, best_j, best_bin
 
@@ -427,6 +479,10 @@ class TimestepPatchWaveDataset(Dataset):
         # Apply spatial cropping if region filtering is enabled
         if self.crop_h_indices is not None and self.crop_w_indices is not None:
             hour_data = hour_data[self.crop_h_indices, :, :][:, self.crop_w_indices, :]
+
+        if self.pixel_exclusion_mask is not None:
+            hour_data = hour_data.clone()
+            hour_data[self.pixel_exclusion_mask] = float("nan")
 
         # Input columns: features_order if provided, else all minus excluded/targets
         target_colnames = list(self.target_columns.values())
@@ -475,11 +531,18 @@ class TimestepPatchWaveDataset(Dataset):
             y_full = hour_data[..., tgt_idx : tgt_idx + 1]
             y = y_full[i0 : i0 + ph, j0 : j0 + pw, :]
 
-            if self.predict_log_correction:
-                # z = log(DA+eps) - log(raw+eps)
-                y = torch.log(y + self.eps) - torch.log(vhm0 + self.eps)
-            elif self.predict_bias:
-                y = y - vhm0
+            if self.predict_log_correction or self.predict_bias:
+                # Derive the raw (uncorrected) counterpart per task
+                # e.g. "corrected_VHM0" -> "VHM0", "corrected_VTM02" -> "VTM02"
+                raw_col = tgt_col.replace("corrected_", "")
+                raw_idx = feature_cols.index(raw_col)
+                raw_full = hour_data[..., raw_idx : raw_idx + 1]
+                raw = raw_full[i0 : i0 + ph, j0 : j0 + pw, :]
+
+                if self.predict_log_correction:
+                    y = torch.log(y + self.eps) - torch.log(raw + self.eps)
+                else:
+                    y = y - raw
 
             targets[task_name] = y
 
@@ -488,27 +551,42 @@ class TimestepPatchWaveDataset(Dataset):
         vhm0_filled = torch.nan_to_num(
             vhm0, nan=0.0
         )  # useful for reconstruction / logging
-        if self.add_sea_mask_channel:
-            X = torch.cat([X, sea_mask], dim=-1)
-
-        # Normalize inputs (targets remain masked by NaNs)
+        # Normalize physical inputs before appending sea_mask. This matches
+        # CachedWaveDataset and avoids treating the binary mask as a feature.
         if self.normalizer is not None:
             X = self.normalizer.transform_torch(X, normalize_target=False)
             # If your normalizer might introduce NaNs (shouldn't), clamp again:
             X = torch.nan_to_num(X, nan=0.0)
 
             if self.normalize_target:
-                # Not recommended unless your normalizer supports stable per-target normalization.
+                target_column_map = {
+                    "vhm0": "corrected_VHM0",
+                    "vtm02": "corrected_VTM02",
+                }
                 for task_name, y in targets.items():
+                    target_col = target_column_map.get(
+                        task_name, f"corrected_{task_name.upper()}"
+                    )
+                    if (
+                        self.normalizer.feature_order_ is not None
+                        and target_col in self.normalizer.feature_order_
+                    ):
+                        target_idx = self.normalizer.feature_order_.index(target_col)
+                        if target_idx in self.normalizer.stats_:
+                            self.normalizer.target_stats_ = self.normalizer.stats_[
+                                target_idx
+                            ]
                     _, y_norm = self.normalizer.transform_torch(
                         X.clone(), normalize_target=True, target=y
                     )
                     targets[task_name] = y_norm
 
+        if self.add_sea_mask_channel:
+            X = torch.cat([X, sea_mask], dim=-1)
+
         # Convert to (C,H,W)
         X = X.permute(2, 0, 1).contiguous()
         vhm0_filled = vhm0_filled.permute(2, 0, 1).contiguous()
-        sea_mask.permute(2, 0, 1).contiguous()
         for k in targets:
             targets[k] = targets[k].permute(2, 0, 1).contiguous()
 
