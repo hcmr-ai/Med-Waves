@@ -1,6 +1,7 @@
-"""
-AZURE_STORAGE_KEY='your-key-here' ./scripts/setup_blobfuse_mounts.sh
-"""
+#!/usr/bin/env bash
+# Example (from repo root, with your real account key):
+#   AZURE_STORAGE_KEY='…' ./scripts/azure/setup_blobfuse_mounts.sh
+# Or omit AZURE_STORAGE_KEY to be prompted securely.
 set -euo pipefail
 
 # Reusable provisioning script for blobfuse2 mounts.

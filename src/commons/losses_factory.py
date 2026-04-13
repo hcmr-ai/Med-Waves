@@ -4,6 +4,8 @@ from src.commons.loss_functions.huber_loss import (
     masked_mse_huber_tail_loss,
 )
 from src.commons.loss_functions.l1_loss import (
+    masked_atlantic_low_bin_balanced_smooth_l1,
+    masked_bin_balanced_smooth_l1,
     masked_multi_bin_weighted_smooth_l1,
     masked_smooth_l1_loss,
 )
@@ -179,6 +181,24 @@ def compute_loss(
             raise ValueError("multi_bin_weighted_mse requires vhm0_for_reconstruction")
         return _with_residual_penalty(
             masked_multi_bin_weighted_mse(
+                y_pred, y_true, mask, vhm0_for_reconstruction
+            )
+        )
+
+    elif loss_type == "bin_balanced_smooth_l1":
+        if vhm0_for_reconstruction is None:
+            raise ValueError("bin_balanced_smooth_l1 requires vhm0_for_reconstruction")
+        return _with_residual_penalty(
+            masked_bin_balanced_smooth_l1(y_pred, y_true, mask, vhm0_for_reconstruction)
+        )
+
+    elif loss_type == "atlantic_low_bin_balanced_smooth_l1":
+        if vhm0_for_reconstruction is None:
+            raise ValueError(
+                "atlantic_low_bin_balanced_smooth_l1 requires vhm0_for_reconstruction"
+            )
+        return _with_residual_penalty(
+            masked_atlantic_low_bin_balanced_smooth_l1(
                 y_pred, y_true, mask, vhm0_for_reconstruction
             )
         )
