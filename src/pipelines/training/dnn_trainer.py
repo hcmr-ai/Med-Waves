@@ -221,7 +221,10 @@ def create_callbacks(config: DNNConfig) -> list:
     # Add Comet visualization callback if using Comet
     if config.config["logging"]["use_comet"]:
         logger.info("Adding Comet visualization callback")
-        comet_callback = CometVisualizationCallback(log_every_n_epochs=1)
+        comet_callback = CometVisualizationCallback(
+            log_every_n_epochs=1,
+            log_param_grad_norms=training_config.get("log_param_grad_norms", False),
+        )
         callbacks.append(comet_callback)
 
     if config.config["training"]["use_swa"]:
@@ -421,6 +424,10 @@ def main():
         )
     logger.info(f"Resume path: {resume_path}")
 
+    local_log_train_sea_bin_metrics = config.config["training"].get(
+        "log_train_sea_bin_metrics", False
+    )
+
     finetune_model = config.config["training"]["finetune_model"]
     if finetune_model:
         logger.info("Finetuning model")
@@ -463,6 +470,7 @@ def main():
                 model_config.get("residual_penalty_lambda", 0.0)
             ),
             huber_delta=float(model_config.get("huber_delta", 1.0)),
+            log_train_sea_bin_metrics=local_log_train_sea_bin_metrics,
         )
     else:
         logger.info("Training new model")
@@ -510,6 +518,7 @@ def main():
                 model_config.get("residual_penalty_lambda", 0.0)
             ),
             huber_delta=float(model_config.get("huber_delta", 1.0)),
+            log_train_sea_bin_metrics=local_log_train_sea_bin_metrics,
         )
 
     # Create callbacks
