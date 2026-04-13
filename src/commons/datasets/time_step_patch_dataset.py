@@ -92,6 +92,10 @@ class TimestepPatchWaveDataset(Dataset):
 
         self.patch_cfg = patch_cfg or PatchSamplingConfig()
         self.sampling_mode = sampling_mode
+        if self.sampling_mode not in {"random", "stratified", "exhaustive"}:
+            raise ValueError(
+                "sampling_mode must be one of: random, stratified, exhaustive"
+            )
         self.forced_bin_id = forced_bin_id
 
         self.add_sea_mask_channel = add_sea_mask_channel
@@ -122,6 +126,12 @@ class TimestepPatchWaveDataset(Dataset):
 
         # Infer dims from one file
         tensor, feature_cols = self._get_file_tensor(self.file_paths[0])
+        if tensor.dim() != 4:
+            raise ValueError(
+                "TimestepPatchWaveDataset expects daily tensors with shape "
+                f"(hours, H, W, C), got {tuple(tensor.shape)}"
+            )
+        self.hours_per_file = tensor.shape[0]
         self.H, self.W = tensor.shape[1], tensor.shape[2]
         self.feature_cols_ref = feature_cols
 
@@ -230,18 +240,22 @@ class TimestepPatchWaveDataset(Dataset):
             self.index_map = [
                 (f_idx, h, t_idx)
                 for f_idx in range(len(self.file_paths))
-                for h in range(24)
+                for h in range(self.hours_per_file)
                 for t_idx in range(n_tiles)
             ]
             coverage = (n_tiles * ph * pw) / (self.H * self.W) * 100
             print(
                 f"[TimestepPatchWaveDataset] Exhaustive tiling: {tile_rows}x{tile_cols} = {n_tiles} tiles/frame"
             )
-            print(f"  Coverage: {coverage:.1f}%  |  Samples/file: {24 * n_tiles}")
+            print(
+                f"  Coverage: {coverage:.1f}%  |  Samples/file: {self.hours_per_file * n_tiles}"
+            )
             print(f"  Total samples: {len(self.index_map)}")
         else:
             self.index_map = [
-                (f_idx, h) for f_idx in range(len(self.file_paths)) for h in range(24)
+                (f_idx, h)
+                for f_idx in range(len(self.file_paths))
+                for h in range(self.hours_per_file)
             ]
 
         # Precompute valid anchors once from a sample frame (land mask is static across time)
@@ -375,6 +389,17 @@ class TimestepPatchWaveDataset(Dataset):
                 return i
         return len(self.patch_cfg.bin_edges_m)
 
+    def _distance_to_bin(self, score_m: float, bin_id: int) -> float:
+        """Distance in meters from score_m to the requested bin interval."""
+        edges = self.patch_cfg.bin_edges_m
+        lower = float("-inf") if bin_id == 0 else edges[bin_id - 1]
+        upper = float("inf") if bin_id == len(edges) else edges[bin_id]
+        if lower <= score_m < upper:
+            return 0.0
+        if score_m < lower:
+            return lower - score_m
+        return score_m - upper
+
     def _sample_anchor(self) -> Tuple[int, int]:
         if self.valid_anchors is None:
             # fallback random top-left anywhere
@@ -394,14 +419,18 @@ class TimestepPatchWaveDataset(Dataset):
         # Decide target bin
         n_bins = len(self.patch_cfg.bin_edges_m) + 1
         if self.sampling_mode == "stratified":
-            target_bin = forced_bin or self.forced_bin_id
+            target_bin = forced_bin if forced_bin is not None else self.forced_bin_id
             if target_bin is None:
                 target_bin = idx % n_bins
+            if target_bin < 0 or target_bin >= n_bins:
+                raise ValueError(
+                    f"forced_bin must be in [0, {n_bins - 1}], got {target_bin}"
+                )
         else:
             target_bin = None
 
         best_i, best_j, best_bin = 0, 0, 0
-        best_score = -1.0
+        best_distance = float("inf")
 
         # Random sampling without stratification
         if target_bin is None and self.sampling_mode == "random":
@@ -423,9 +452,10 @@ class TimestepPatchWaveDataset(Dataset):
             if b == target_bin:
                 return i0, j0, b
 
-            # best fallback (prefer higher score)
-            if score > best_score:
-                best_score, best_i, best_j, best_bin = score, i0, j0, b
+            # Best fallback is the patch closest to the requested bin interval.
+            distance = self._distance_to_bin(score, target_bin)
+            if distance < best_distance:
+                best_distance, best_i, best_j, best_bin = distance, i0, j0, b
 
         return best_i, best_j, best_bin
 
@@ -521,10 +551,8 @@ class TimestepPatchWaveDataset(Dataset):
         vhm0_filled = torch.nan_to_num(
             vhm0, nan=0.0
         )  # useful for reconstruction / logging
-        if self.add_sea_mask_channel:
-            X = torch.cat([X, sea_mask], dim=-1)
-
-        # Normalize inputs (targets remain masked by NaNs)
+        # Normalize physical inputs before appending sea_mask. This matches
+        # CachedWaveDataset and avoids treating the binary mask as a feature.
         if self.normalizer is not None:
             X = self.normalizer.transform_torch(X, normalize_target=False)
             # If your normalizer might introduce NaNs (shouldn't), clamp again:
@@ -553,10 +581,12 @@ class TimestepPatchWaveDataset(Dataset):
                     )
                     targets[task_name] = y_norm
 
+        if self.add_sea_mask_channel:
+            X = torch.cat([X, sea_mask], dim=-1)
+
         # Convert to (C,H,W)
         X = X.permute(2, 0, 1).contiguous()
         vhm0_filled = vhm0_filled.permute(2, 0, 1).contiguous()
-        sea_mask.permute(2, 0, 1).contiguous()
         for k in targets:
             targets[k] = targets[k].permute(2, 0, 1).contiguous()
 

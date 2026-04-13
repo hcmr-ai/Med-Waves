@@ -36,6 +36,24 @@ FEATURE_COLS = [
 EXCLUDED = ["time", "latitude", "longitude", "timestamp", "corrected_VTM02", "WDIR", "VMDR"]
 
 
+class DummyNormalizer:
+    def __init__(self, n_features):
+        self.mode = "zscore"
+        self.feature_order_ = None
+        self.stats_ = {i: (10.0, 2.0) for i in range(n_features)}
+        self.target_stats_ = None
+        self.target_feature_name_ = None
+
+    def transform_torch(self, X, normalize_target=False, target=None, target_channel_index=0):
+        X_out = X.clone()
+        for i in range(X.shape[-1]):
+            mean, std = self.stats_[i]
+            X_out[..., i] = (X_out[..., i] - mean) / std
+        if normalize_target and target is not None:
+            return X_out, target
+        return X_out
+
+
 def _make_synthetic_tensor(H=76, W=262):
     """Create a synthetic (24, H, W, C) tensor mimicking real data."""
     C = len(FEATURE_COLS)
@@ -357,6 +375,26 @@ class TestTimestepPatchWaveDataset:
         X, y, mask, vhm0, patch_bin, (i0, j0) = ds[(0, 1)]
         assert X.ndim == 3, "Should return valid tensor even with forced bin"
 
+    def test_stratified_mode_respects_forced_bin_zero(self, synthetic_pt_files):
+        patch_cfg = PatchSamplingConfig(
+            patch_size=(32, 96),
+            bin_edges_m=(10.0, 20.0),
+            max_tries=5,
+            min_valid_fraction=0.0,
+        )
+        ds = TimestepPatchWaveDataset(
+            file_paths=synthetic_pt_files,
+            target_columns={"vhm0": "corrected_VHM0"},
+            excluded_columns=EXCLUDED,
+            predict_bias=True,
+            predict_log_correction=False,
+            sampling_mode="stratified",
+            patch_cfg=patch_cfg,
+            return_coords=True,
+        )
+        _, _, _, _, patch_bin, _ = ds[(1, 0)]
+        assert patch_bin == 0, "Explicit forced_bin=0 should not fall back to idx % n_bins"
+
     def test_sea_mask_channel(self, synthetic_pt_files):
         ds_with = TimestepPatchWaveDataset(
             file_paths=synthetic_pt_files,
@@ -380,3 +418,21 @@ class TestTimestepPatchWaveDataset:
         assert X_with.shape[0] == X_without.shape[0] + 1, (
             "Sea mask channel should add exactly 1 channel"
         )
+
+    def test_sea_mask_channel_is_not_normalized(self, synthetic_pt_files):
+        input_cols = [
+            name for name in FEATURE_COLS
+            if name not in EXCLUDED and name != "corrected_VHM0"
+        ]
+        ds = TimestepPatchWaveDataset(
+            file_paths=synthetic_pt_files,
+            target_columns={"vhm0": "corrected_VHM0"},
+            excluded_columns=EXCLUDED,
+            normalizer=DummyNormalizer(len(input_cols)),
+            predict_bias=True,
+            predict_log_correction=False,
+            add_sea_mask_channel=True,
+        )
+        X, *_ = ds[0]
+        mask_channel = X[-1]
+        assert set(torch.unique(mask_channel).tolist()).issubset({0.0, 1.0})
