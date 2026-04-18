@@ -24,6 +24,19 @@ from src.commons.loss_functions.ssim import SSIMLoss
 from src.commons.losses_factory import compute_loss
 from src.commons.scheduler_factory import create_scheduler
 
+_VAL_SEA_BINS = [
+    {"name": "calm",        "label": "0–1m",  "min": 0.0,  "max": 1.0},
+    {"name": "light",       "label": "1–2m",  "min": 1.0,  "max": 2.0},
+    {"name": "moderate",    "label": "2–3m",  "min": 2.0,  "max": 3.0},
+    {"name": "rough",       "label": "3–4m",  "min": 3.0,  "max": 4.0},
+    {"name": "high",        "label": "4–5m",  "min": 4.0,  "max": 5.0},
+    {"name": "extreme_5_6", "label": "5–6m",  "min": 5.0,  "max": 6.0},
+    {"name": "extreme_6_7", "label": "6–7m",  "min": 6.0,  "max": 7.0},
+    {"name": "extreme_7_8", "label": "7–8m",  "min": 7.0,  "max": 8.0},
+    {"name": "extreme_8_9", "label": "8–9m",  "min": 8.0,  "max": 9.0},
+    {"name": "extreme_9p",  "label": "≥9m",   "min": 9.0,  "max": float("inf")},
+]
+
 
 class WaveBiasCorrector(pl.LightningModule):
     """
@@ -177,6 +190,11 @@ class WaveBiasCorrector(pl.LightningModule):
         self._val_gate_sample = None
         # Per-month gate weight accumulator (reset each val epoch).
         self._val_month_gate_accum = {m: {"sum": None, "count": 0} for m in range(12)}
+        # Sea-bin error accumulators for epoch-end bar chart (reset each val epoch).
+        self._val_sea_bin_accum = {
+            b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "count": 0}
+            for b in _VAL_SEA_BINS
+        }
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
@@ -1198,6 +1216,28 @@ class WaveBiasCorrector(pl.LightningModule):
                             baseline_prefix,
                         )
 
+        # Accumulate sea-bin errors for vhm0 (primary task) for epoch-end bar chart.
+        with torch.no_grad():
+            if vhm0_for_reconstruction is not None:
+                y_pred_vhm0 = (
+                    metric_predictions["vhm0"]
+                    if isinstance(metric_predictions, dict)
+                    else metric_predictions
+                )
+                y_true_vhm0 = (
+                    metric_targets["vhm0"]
+                    if isinstance(metric_targets, dict)
+                    else metric_targets
+                )
+                y_pred_vhm0 = self._denormalize_bias_prediction(y_pred_vhm0, "vhm0")
+                y_true_vhm0 = self._denormalize_bias_prediction(y_true_vhm0, "vhm0")
+                if self.predict_bias or self.predict_residual_to_prior:
+                    y_pred_vhm0 = vhm0_for_reconstruction + y_pred_vhm0
+                    y_true_vhm0 = vhm0_for_reconstruction + y_true_vhm0
+                self._accumulate_sea_bin_errors(
+                    y_pred_vhm0, y_true_vhm0, mask, vhm0_for_reconstruction
+                )
+
         return {"loss": loss, "pred": predictions}
 
     def on_train_start(self) -> None:
@@ -1230,6 +1270,58 @@ class WaveBiasCorrector(pl.LightningModule):
         if hasattr(self, "scheduler_info"):
             for key, value in self.scheduler_info.items():
                 _log_metadata_item(key, value)
+
+    def _log_sea_bin_chart(self):
+        """Render RMSE/MAE per sea-state bin and log as an image. Resets accumulator."""
+        import io
+        import matplotlib.pyplot as plt
+
+        labels, rmse_vals, mae_vals = [], [], []
+        for b in _VAL_SEA_BINS:
+            acc = self._val_sea_bin_accum[b["name"]]
+            if acc["count"] == 0:
+                continue
+            labels.append(b["label"])
+            rmse_vals.append(np.sqrt(acc["sum_sq"] / acc["count"]))
+            mae_vals.append(acc["sum_abs"] / acc["count"])
+
+        # Reset for next epoch
+        self._val_sea_bin_accum = {
+            b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "count": 0}
+            for b in _VAL_SEA_BINS
+        }
+
+        if not labels:
+            return
+
+        x = np.arange(len(labels))
+        fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+        fig.suptitle(f"Val sea-bin performance — epoch {self.current_epoch}", fontsize=11)
+
+        for ax, vals, title, color in zip(
+            axes,
+            [rmse_vals, mae_vals],
+            ["RMSE (m)", "MAE (m)"],
+            ["steelblue", "darkorange"], strict=False,
+        ):
+            ax.bar(x, vals, color=color, alpha=0.8)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+            ax.set_title(title)
+            ax.set_ylabel("m")
+            ax.grid(True, axis="y", alpha=0.3)
+            for i, v in enumerate(vals):
+                ax.text(i, v + max(vals) * 0.01, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        img = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+        from PIL import Image
+        img = np.array(Image.open(io.BytesIO(buf.getvalue())))[:, :, :3]
+        self._log_image("val/sea_bin_performance", img)
 
     def _log_image(self, name: str, array):
         """Log a (H, W) or (H, W, 3) uint8 numpy array to Comet or TensorBoard."""
@@ -1284,6 +1376,9 @@ class WaveBiasCorrector(pl.LightningModule):
 
         self._val_gate_sample = None
 
+        # Sea-bin performance bar chart
+        self._log_sea_bin_chart()
+
         # Month-bin gate usage logging
         _MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun",
                         "Jul","Aug","Sep","Oct","Nov","Dec"]
@@ -1321,6 +1416,31 @@ class WaveBiasCorrector(pl.LightningModule):
                 on_epoch=True,
                 prog_bar=False,
             )
+
+    def _accumulate_sea_bin_errors(self, y_pred: torch.Tensor, y_true: torch.Tensor,
+                                    mask: torch.Tensor, vhm0_raw: torch.Tensor):
+        """Accumulate squared and absolute errors per sea-state bin (validation only)."""
+        min_h = min(y_pred.shape[-2], y_true.shape[-2], mask.shape[-2], vhm0_raw.shape[-2])
+        min_w = min(y_pred.shape[-1], y_true.shape[-1], mask.shape[-1], vhm0_raw.shape[-1])
+        pred = y_pred[:, 0, :min_h, :min_w].detach().cpu().numpy()
+        true = y_true[:, 0, :min_h, :min_w].detach().cpu().numpy()
+        raw  = vhm0_raw[:, 0, :min_h, :min_w].detach().cpu().numpy()
+        valid = mask[:, 0, :min_h, :min_w].bool().cpu().numpy()
+
+        err  = pred[valid] - true[valid]
+        raw_v = raw[valid]
+
+        for b in _VAL_SEA_BINS:
+            if b["max"] == float("inf"):
+                sel = raw_v >= b["min"]
+            else:
+                sel = (raw_v >= b["min"]) & (raw_v < b["max"])
+            if not sel.any():
+                continue
+            acc = self._val_sea_bin_accum[b["name"]]
+            acc["sum_sq"]  += float(np.sum(err[sel] ** 2))
+            acc["sum_abs"] += float(np.sum(np.abs(err[sel])))
+            acc["count"]   += int(sel.sum())
 
     def _log_sea_bin_metrics(
         self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str
