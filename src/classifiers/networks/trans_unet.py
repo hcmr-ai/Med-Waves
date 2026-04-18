@@ -355,9 +355,7 @@ class MoETransUNetGeo(nn.Module):
     plus auxiliary tensors for diagnostics and regularization losses:
         - gate_weights      : softmax-normalized routing weights  [B, K, H, W]
         - gate_logits       : raw gate scores                     [B, K, H, W]
-        - gate_entropy      : mean spatial gate entropy (scalar) — high = uniform routing
-        - load_balance_loss : router load-balance penalty (scalar) — minimise to avoid collapse
-        - expert_diversity_loss : pairwise cosine-sim penalty on expert weights (scalar)
+        - expert_diversity_loss : pairwise cosine-sim penalty on expert weights (scalar, None unless model.compute_diversity=True)
         - uncertainty       : 1 - max_k(gate_weight_k)           [B, H, W]
         - expert_outputs    : raw per-expert predictions
 
@@ -405,6 +403,8 @@ class MoETransUNetGeo(nn.Module):
             "input_channels" if gate_input_mode == "vhm0_only" else gate_input_mode
         )
         self.return_gate_maps = return_gate_maps
+        # Computed on demand — set True by trainer when expert_diversity_weight > 0.
+        self.compute_diversity = False
 
         # Physics-informed gate channels (multi-channel support)
         if gate_input_channels is not None:
@@ -509,22 +509,21 @@ class MoETransUNetGeo(nn.Module):
             return prediction
 
         # ── Auxiliary losses & diagnostics ──────────────────────────────────
-        # Load-balance loss: penalises gate collapse toward one expert
-        load = gate_weights.mean(dim=[0, 2, 3])  # [K]
-        load_balance_loss = self.num_experts * (load * load).sum()
+        # NOTE: load_balance_loss and gate_entropy are computed by the trainer from
+        # gate_weights with proper sea masking — no need to recompute here.
 
-        # Gate entropy: high = uniform routing (good early in training)
-        gate_entropy = -(gate_weights * gate_weights.clamp(min=1e-8).log()).sum(dim=1).mean()
-
-        # Expert diversity loss: penalises pairwise cosine similarity of expert weights
-        weight_tensors = torch.stack(
-            [w.flatten() for w in self._expert_weight_tensors()], dim=0
-        )  # [K*T, D]
-        weight_tensors = F.normalize(weight_tensors, dim=1)
-        sim = weight_tensors @ weight_tensors.T  # [K*T, K*T]
-        K = weight_tensors.shape[0]
-        off_diag = ~torch.eye(K, dtype=torch.bool, device=weight_tensors.device)
-        expert_diversity_loss = sim[off_diag].mean()
+        # Expert diversity loss: only when explicitly enabled (expensive on every step).
+        if self.compute_diversity:
+            weight_tensors = torch.stack(
+                [w.flatten() for w in self._expert_weight_tensors()], dim=0
+            )  # [K*T, D]
+            weight_tensors = F.normalize(weight_tensors, dim=1)
+            sim = weight_tensors @ weight_tensors.T  # [K*T, K*T]
+            K = weight_tensors.shape[0]
+            off_diag = ~torch.eye(K, dtype=torch.bool, device=weight_tensors.device)
+            expert_diversity_loss = sim[off_diag].mean()
+        else:
+            expert_diversity_loss = None
 
         # Uncertainty: low max gate weight → ambiguous regime
         uncertainty = 1.0 - gate_weights.max(dim=1).values  # [B, H, W]
@@ -534,8 +533,6 @@ class MoETransUNetGeo(nn.Module):
             "expert_outputs": expert_outputs,
             "gate_logits": gate_logits,
             "gate_weights": gate_weights,
-            "gate_entropy": gate_entropy,
-            "load_balance_loss": load_balance_loss,
             "expert_diversity_loss": expert_diversity_loss,
             "uncertainty": uncertainty,
         }
@@ -686,8 +683,7 @@ if __name__ == "__main__":
     print(f"  prediction:           {out['prediction'].shape}")
     print(f"  gate_weights:         {out['gate_weights'].shape}")
     print(f"  uncertainty:          {out['uncertainty'].shape}")
-    print(f"  gate_entropy:         {out['gate_entropy'].item():.4f}")
-    print(f"  load_balance_loss:    {out['load_balance_loss'].item():.4f}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss']}")
     print(f"  expert_diversity_loss:{out['expert_diversity_loss'].item():.4f}")
 
     print("\n" + "=" * 60)
@@ -709,6 +705,5 @@ if __name__ == "__main__":
         print(f"  → {task_name}: {pred.shape}")
     print(f"  gate_weights:         {out['gate_weights'].shape}")
     print(f"  uncertainty:          {out['uncertainty'].shape}")
-    print(f"  gate_entropy:         {out['gate_entropy'].item():.4f}")
-    print(f"  load_balance_loss:    {out['load_balance_loss'].item():.4f}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss']}")
     print(f"  expert_diversity_loss:{out['expert_diversity_loss'].item():.4f}")

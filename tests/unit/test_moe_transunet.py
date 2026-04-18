@@ -23,9 +23,7 @@ def test_moe_transunet_forward_shapes():
     assert out["expert_outputs"].shape == (2, 3, 1, 64, 128)
     assert out["gate_weights"].shape == (2, 3, 64, 128)
     assert out["uncertainty"].shape == (2, 64, 128)
-    assert out["gate_entropy"].ndim == 0        # scalar
-    assert out["load_balance_loss"].ndim == 0   # scalar
-    assert out["expert_diversity_loss"].ndim == 0
+    assert out["expert_diversity_loss"] is None  # compute_diversity=False by default
     assert torch.allclose(
         out["gate_weights"].sum(dim=1), torch.ones(2, 64, 128), atol=1e-5
     )

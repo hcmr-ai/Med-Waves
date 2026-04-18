@@ -178,6 +178,9 @@ class WaveBiasCorrector(pl.LightningModule):
             return_gate_maps=return_gate_maps,
         )
 
+        if self.expert_diversity_weight > 0 and hasattr(self.model, "compute_diversity"):
+            self.model.compute_diversity = True
+
         self.lr_scheduler_config = lr_scheduler_config or {}
         self.predict_bias = predict_bias
         self.predict_residual_to_prior = predict_residual_to_prior
