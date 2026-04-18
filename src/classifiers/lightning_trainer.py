@@ -175,6 +175,8 @@ class WaveBiasCorrector(pl.LightningModule):
         self.normalize_target = normalize_target
         # Holds one sample of gate maps from the first val batch for image logging.
         self._val_gate_sample = None
+        # Per-month gate weight accumulator (reset each val epoch).
+        self._val_month_gate_accum = {m: {"sum": None, "count": 0} for m in range(12)}
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
@@ -305,6 +307,36 @@ class WaveBiasCorrector(pl.LightningModule):
         log_probs = torch.log(gates.clamp_min(1e-8))
         selected = log_probs.gather(1, labels.unsqueeze(1))
         return -selected[valid].mean()
+
+    def _month_from_sincos(self, X):
+        """Return integer month (0-11) per batch item from sin/cos_month channels."""
+        if X.shape[1] < 22:
+            return None
+        H, W = X.shape[-2:]
+        sin_m = X[:, 20, H // 2, W // 2].detach().float()
+        cos_m = X[:, 21, H // 2, W // 2].detach().float()
+        return (torch.atan2(sin_m, cos_m).mul(6.0 / torch.pi).round().long() % 12).tolist()
+
+    def _accumulate_gate_by_month(self, gate_weights, mask, X):
+        """Accumulate masked-mean gate weights per calendar month (validation only)."""
+        months = self._month_from_sincos(X)
+        if months is None:
+            return
+        min_h = min(gate_weights.shape[-2], mask.shape[-2])
+        min_w = min(gate_weights.shape[-1], mask.shape[-1])
+        gates = gate_weights[:, :, :min_h, :min_w].detach().cpu()   # [B, K, H, W]
+        valid = mask[:, 0, :min_h, :min_w].bool().cpu()              # [B, H, W]
+        for b, m in enumerate(months):
+            if not valid[b].any():
+                continue
+            usage = gates[b].permute(1, 2, 0)[valid[b]].mean(dim=0)  # [K]
+            acc = self._val_month_gate_accum[m]
+            if acc["sum"] is None:
+                acc["sum"] = usage.clone()
+                acc["count"] = 1
+            else:
+                acc["sum"] += usage
+                acc["count"] += 1
 
     def _log_gate_usage_by_raw_bin(self, moe_aux, raw_vhm0, mask, prefix):
         if moe_aux is None or raw_vhm0 is None or "gate_weights" not in moe_aux:
@@ -991,6 +1023,10 @@ class WaveBiasCorrector(pl.LightningModule):
                     if k in moe_aux
                 }
 
+            # Accumulate gate weights by calendar month (decoded from X).
+            if moe_aux is not None and "gate_weights" in moe_aux:
+                self._accumulate_gate_by_month(moe_aux["gate_weights"], mask, X)
+
             gate_aux_loss = self._compute_gate_auxiliary_loss(
                 moe_aux,
                 mask,
@@ -1247,6 +1283,22 @@ class WaveBiasCorrector(pl.LightningModule):
                 self._log_image(f"moe/val_gate_expert_{k}", w_img)
 
         self._val_gate_sample = None
+
+        # Month-bin gate usage logging
+        _MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun",
+                        "Jul","Aug","Sep","Oct","Nov","Dec"]
+        for m_idx, acc in self._val_month_gate_accum.items():
+            if acc["count"] == 0 or acc["sum"] is None:
+                continue
+            mean_usage = acc["sum"] / acc["count"]  # [K]
+            for k, val in enumerate(mean_usage):
+                self.log(
+                    f"val_moe/month_{_MONTH_NAMES[m_idx]}_expert_{k}",
+                    val.item(),
+                    on_epoch=True,
+                )
+        # Reset for next epoch
+        self._val_month_gate_accum = {m: {"sum": None, "count": 0} for m in range(12)}
 
     def on_train_epoch_end(self) -> None:
         if self.model_type == "transunet_gan":
