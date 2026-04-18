@@ -117,11 +117,13 @@ model:
   # MoE TransUNet knobs (used only when model_type: "moe_transunet")
   num_experts: 3
   gate_temperature: 1.0
-  gate_input_mode: "features" # "features" or "vhm0_only"
+  gate_input_mode: "features"   # "features" | "input_channels" (physics-informed)
+  gate_input_channels: null       # e.g. [0, 1] for VHM0 + wind speed; used when gate_input_mode="input_channels"
   gate_entropy_weight: 0.0
   gate_balance_weight: 0.0
   gate_prior_weight: 0.0
   gate_bin_edges: [1.0, 3.0]
+  expert_diversity_weight: 0.0   # penalise pairwise cosine-similarity of expert heads
   expert_dropout: 0.0
   return_gate_maps: true
   # Learning rate scheduler configuration

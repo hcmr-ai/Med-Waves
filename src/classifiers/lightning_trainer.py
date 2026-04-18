@@ -73,6 +73,8 @@ class WaveBiasCorrector(pl.LightningModule):
         gate_prior_weight=0.0,
         gate_bin_edges=None,
         gate_input_mode="features",
+        gate_input_channels=None,
+        expert_diversity_weight=0.0,
         expert_dropout=0.0,
         return_gate_maps=True,
         normalizer=None,
@@ -118,6 +120,7 @@ class WaveBiasCorrector(pl.LightningModule):
         self.gate_entropy_weight = float(gate_entropy_weight)
         self.gate_balance_weight = float(gate_balance_weight)
         self.gate_prior_weight = float(gate_prior_weight)
+        self.expert_diversity_weight = float(expert_diversity_weight)
         self.gate_bin_edges = gate_bin_edges or [1.0, 3.0]
         # Multi-task or single-task configuration: infer auxiliary_tasks from tasks_config
         # Use provided tasks_config and ensure each task has a loss_type
@@ -157,6 +160,7 @@ class WaveBiasCorrector(pl.LightningModule):
             num_experts=num_experts,
             gate_temperature=gate_temperature,
             gate_input_mode=gate_input_mode,
+            gate_input_channels=gate_input_channels,
             expert_dropout=expert_dropout,
             return_gate_maps=return_gate_maps,
         )
@@ -169,6 +173,8 @@ class WaveBiasCorrector(pl.LightningModule):
         self.huber_delta = float(huber_delta)
         self.normalizer = normalizer
         self.normalize_target = normalize_target
+        # Holds one sample of gate maps from the first val batch for image logging.
+        self._val_gate_sample = None
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
@@ -269,6 +275,17 @@ class WaveBiasCorrector(pl.LightningModule):
                 on_epoch=True,
             )
             total = total + self.gate_prior_weight * prior_loss
+
+        # Expert diversity loss is weight-based (no masking needed); use pre-computed value.
+        if self.expert_diversity_weight > 0 and "expert_diversity_loss" in moe_aux:
+            div_loss = moe_aux["expert_diversity_loss"]
+            self.log(
+                f"{prefix}/expert_diversity_loss",
+                div_loss.detach(),
+                on_step=on_step,
+                on_epoch=True,
+            )
+            total = total + self.expert_diversity_weight * div_loss
 
         return total
 
@@ -966,6 +983,14 @@ class WaveBiasCorrector(pl.LightningModule):
                     predictions, targets, mask, vhm0_for_reconstruction
                 )
 
+            # Stash first batch gate maps for epoch-end image logging.
+            if batch_idx == 0 and moe_aux is not None:
+                self._val_gate_sample = {
+                    k: moe_aux[k][0].detach().cpu()
+                    for k in ("gate_weights", "uncertainty")
+                    if k in moe_aux
+                }
+
             gate_aux_loss = self._compute_gate_auxiliary_loss(
                 moe_aux,
                 mask,
@@ -1169,6 +1194,59 @@ class WaveBiasCorrector(pl.LightningModule):
         if hasattr(self, "scheduler_info"):
             for key, value in self.scheduler_info.items():
                 _log_metadata_item(key, value)
+
+    def _log_image(self, name: str, array):
+        """Log a (H, W) or (H, W, 3) uint8 numpy array to Comet or TensorBoard."""
+        if self.logger is None:
+            return
+        experiment = getattr(self.logger, "experiment", None)
+        if experiment is None:
+            return
+        step = self.current_epoch
+        if hasattr(experiment, "log_image"):
+            # Comet
+            experiment.log_image(array, name=name, step=step)
+        elif hasattr(experiment, "add_image"):
+            # TensorBoard: expects (C, H, W) float in [0, 1]
+            import torch as _t
+            t = _t.from_numpy(array).float() / 255.0
+            if t.ndim == 2:
+                t = t.unsqueeze(0)
+            else:
+                t = t.permute(2, 0, 1)
+            experiment.add_image(name, t, global_step=step)
+
+    def on_validation_epoch_end(self) -> None:
+        sample = self._val_gate_sample
+        if sample is None:
+            return
+
+        import numpy as np
+        from matplotlib.cm import get_cmap
+
+
+        # Uncertainty map — [H, W] float → grayscale uint8
+        if "uncertainty" in sample:
+            u = sample["uncertainty"].numpy()          # [H, W]
+            u_img = (u * 255).clip(0, 255).astype(np.uint8)
+            self._log_image("moe/val_uncertainty", u_img)
+
+        # Dominant-expert map — argmax over K → coloured by expert index
+        if "gate_weights" in sample:
+            gw = sample["gate_weights"].numpy()        # [K, H, W]
+            dominant = gw.argmax(axis=0).astype(np.float32)  # [H, W]
+            # Normalise to [0, 1] then apply a qualitative colormap
+            dominant_norm = dominant / max(gw.shape[0] - 1, 1)
+            cmap = get_cmap("tab10")
+            rgb = (cmap(dominant_norm)[:, :, :3] * 255).astype(np.uint8)  # [H, W, 3]
+            self._log_image("moe/val_dominant_expert", rgb)
+
+            # Per-expert gate weight maps
+            for k in range(gw.shape[0]):
+                w_img = (gw[k] * 255).clip(0, 255).astype(np.uint8)
+                self._log_image(f"moe/val_gate_expert_{k}", w_img)
+
+        self._val_gate_sample = None
 
     def on_train_epoch_end(self) -> None:
         if self.model_type == "transunet_gan":

@@ -34,6 +34,7 @@ def create_model(
     num_experts: int = 3,
     gate_temperature: float = 1.0,
     gate_input_mode: str = "features",
+    gate_input_channels: list | None = None,
     expert_dropout: float = 0.0,
     return_gate_maps: bool = True,
 ):
@@ -122,6 +123,7 @@ def create_model(
             num_experts=num_experts,
             gate_temperature=gate_temperature,
             gate_input_mode=gate_input_mode,
+            gate_input_channels=gate_input_channels,
             vhm0_channel_index=vhm0_channel_index,
             expert_dropout=expert_dropout,
             return_gate_maps=return_gate_maps,
