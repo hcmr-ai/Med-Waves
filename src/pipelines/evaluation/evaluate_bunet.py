@@ -9,7 +9,7 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import joblib
 import lightning as pl
@@ -126,6 +126,8 @@ class ModelEvaluator:
         prior_fallback_target: str = "prior",
         low_bin_affine_params: List[dict] = None,
         low_bin_affine_source: str = "raw",
+        sampled_points_csv: Optional[str] = None,
+        timestamps_csv: Optional[str] = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -343,6 +345,13 @@ class ModelEvaluator:
         # Add spatial accumulators for RMSE maps
         self.spatial_errors_model = []  # Store (error_map, count_map) for each batch
         self.spatial_errors_baseline = []
+
+        # Sampled grid-point time-series recording
+        self.sampled_points_csv = sampled_points_csv
+        self.timestamps_csv = timestamps_csv
+        self._grid_point_indices: Optional[List[dict]] = None  # set by _setup_grid_point_sampling
+        self._grid_point_records: List[dict] = []
+        self._gp_ts_map: dict = self._load_ts_map(timestamps_csv)
 
         # Initialize accumulators for incremental computation
         self._reset_accumulators()
@@ -1626,8 +1635,228 @@ class ModelEvaluator:
         offset = dnn_mean - self.static_domain_mean
         return dnn_bias - offset
 
+    # ------------------------------------------------------------------
+    # Sampled grid-point time-series
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_ts_map(timestamps_csv: Optional[str]) -> dict:
+        """Load the pt_stem × hour_idx → datetime map produced by build_pt_timestamp_map.py.
+
+        Returns a dict keyed by (pt_stem, hour_idx) → datetime, or an empty dict
+        if no CSV is provided.
+        """
+        if timestamps_csv is None:
+            return {}
+
+        import csv as _csv
+        from datetime import datetime, timezone
+
+        ts_map: dict = {}
+        with open(timestamps_csv, newline="") as fh:
+            for row in _csv.DictReader(fh):
+                key = (row["pt_stem"], int(row["hour_idx"]))
+                ts_map[key] = datetime.fromisoformat(row["timestamp"]).replace(
+                    tzinfo=timezone.utc
+                )
+        logger.info(f"Loaded {len(ts_map):,} timestamp entries from '{timestamps_csv}'")
+        return ts_map
+
+    def _setup_grid_point_sampling(self) -> None:
+        """Read the sampled-points CSV and map each lat/lon to a grid (row, col).
+
+        Also pre-builds a timestamp array (one entry per dataset item) from the
+        .pt filename pattern WAVEAN{year}{month}{day} + hour_idx so that every
+        recorded row has a proper datetime even when no Parquet timestamps exist.
+        """
+        if self.sampled_points_csv is None:
+            return
+
+        import csv as _csv
+
+        dataset = self.test_loader.dataset
+        if not hasattr(dataset, "get_coordinates"):
+            logger.warning("Dataset has no get_coordinates(); grid-point sampling disabled.")
+            return
+
+        lat_grid, lon_grid = dataset.get_coordinates()
+        lat_grid = np.asarray(lat_grid, dtype=np.float64)
+        lon_grid = np.asarray(lon_grid, dtype=np.float64)
+
+        sampled = []
+        with open(self.sampled_points_csv, newline="") as fh:
+            for row in _csv.DictReader(fh):
+                sampled.append({"region": row["region"],
+                                 "lat": float(row["latitude"]),
+                                 "lon": float(row["longitude"])})
+
+        # Tolerance for exact coordinate matching (1e-5 deg ≈ 1 m — survives CSV
+        # round-trip at 4–6 decimal places while staying well within one grid cell).
+        COORD_TOL = 1e-5
+
+        indices = []
+        unmatched = []
+        for pt in sampled:
+            match = np.where(
+                (np.abs(lat_grid - pt["lat"]) < COORD_TOL)
+                & (np.abs(lon_grid - pt["lon"]) < COORD_TOL)
+            )
+            if len(match[0]) == 0:
+                unmatched.append(pt)
+                logger.warning(
+                    f"Sampled point ({pt['lat']:.6f}, {pt['lon']:.6f}) has no exact match "
+                    f"in the coordinate grid (tol={COORD_TOL}); skipping."
+                )
+                continue
+            # If multiple cells match (shouldn't happen on a regular grid), take the first.
+            r, c = int(match[0][0]), int(match[1][0])
+            indices.append({
+                "region":        pt["region"],
+                "requested_lat": pt["lat"],
+                "requested_lon": pt["lon"],
+                "grid_lat":      float(lat_grid[r, c]),
+                "grid_lon":      float(lon_grid[r, c]),
+                "row":           r,
+                "col":           c,
+            })
+            logger.debug(
+                f"  ({pt['lat']:.6f}, {pt['lon']:.6f}) → grid cell [row={r}, col={c}]"
+            )
+
+        if unmatched:
+            logger.error(
+                f"{len(unmatched)} sampled point(s) could not be matched to the grid. "
+                "Make sure the CSV was produced from the same dataset used for evaluation."
+            )
+
+        # ------------------------------------------------------------------
+        # Guard: timestamp mapping requires sequential iteration.
+        # Shuffling during evaluation doesn't affect metrics but breaks the
+        # dataset-index → timestamp lookup below.
+        # ------------------------------------------------------------------
+        from torch.utils.data import RandomSampler
+        if isinstance(self.test_loader.sampler, RandomSampler):
+            raise ValueError(
+                "test_loader uses shuffle=True, which breaks grid-point timestamp "
+                "mapping. Set shuffle=False for evaluation."
+            )
+
+        # ------------------------------------------------------------------
+        # Pre-build a flat item_ts[dataset_index] → datetime array using the
+        # external timestamp map CSV (pt_stem, hour_idx → timestamp).
+        # A running counter (_gp_sample_counter) advances by B each batch so
+        # _update_grid_point_records can do item_ts[counter + b] safely.
+        # ------------------------------------------------------------------
+        self._gp_item_ts: Optional[List] = None
+        self._gp_sample_counter: int = 0
+
+        if self.sampled_points_csv and hasattr(dataset, "index_map") and hasattr(dataset, "file_paths"):
+            if self._gp_ts_map:
+                item_ts: List = []
+                for file_idx, hour_idx in dataset.index_map:
+                    pt_stem = Path(dataset.file_paths[file_idx]).stem
+                    item_ts.append(self._gp_ts_map.get((pt_stem, hour_idx)))
+                self._gp_item_ts = item_ts
+                n_resolved = sum(t is not None for t in item_ts)
+                logger.info(
+                    f"Grid-point timestamps resolved: {n_resolved}/{len(item_ts)} "
+                    f"from timestamp map"
+                )
+            else:
+                logger.warning(
+                    "No timestamp map loaded; timestamps will be None in grid_point_timeseries.csv. "
+                    "Pass --timestamps-csv to enable."
+                )
+
+        self._grid_point_indices = indices
+        self._grid_point_records = []
+        logger.info(
+            f"Grid-point sampling ready: {len(indices)}/{len(sampled)} points matched "
+            f"from '{self.sampled_points_csv}'"
+        )
+
+    def _update_grid_point_records(
+        self,
+        y_true_4d: torch.Tensor,
+        y_pred_4d: torch.Tensor,
+        y_base_4d: Optional[torch.Tensor],
+        batch_idx: int,
+    ) -> None:
+        """Extract reference / uncorrected / corrected values at sampled grid points.
+
+        Parameters
+        ----------
+        y_true_4d  : (B, 1, H, W) ground-truth wave heights
+        y_pred_4d  : (B, 1, H, W) model-corrected wave heights
+        y_base_4d  : (B, 1, H, W) uncorrected (raw) wave heights, or None
+        batch_idx  : int, index of this batch in the DataLoader loop
+        """
+        if self._grid_point_indices is None:
+            return
+
+        y_true_np = y_true_4d.detach().cpu().numpy()   # (B, 1, H, W)
+        y_pred_np = y_pred_4d.detach().cpu().numpy()
+        y_base_np = y_base_4d.detach().cpu().numpy() if y_base_4d is not None else None
+
+        B = y_true_np.shape[0]
+
+        # Resolve one timestamp per batch item via the sequential counter.
+        def _ts(b):
+            if self._gp_item_ts is not None:
+                idx = self._gp_sample_counter + b
+                t = self._gp_item_ts[idx] if idx < len(self._gp_item_ts) else None
+                return t.isoformat() if t is not None else None
+            return None
+
+        for b in range(B):
+            ts = _ts(b)
+            for pt in self._grid_point_indices:
+                r, c = pt["row"], pt["col"]
+                H, W = y_true_np.shape[2], y_true_np.shape[3]
+                if r >= H or c >= W:
+                    continue  # point outside padded region
+                self._grid_point_records.append({
+                    "timestamp":     ts,
+                    "batch_idx":     batch_idx,
+                    "sample_in_batch": b,
+                    "region":        pt["region"],
+                    "requested_lat": pt["requested_lat"],
+                    "requested_lon": pt["requested_lon"],
+                    "grid_lat":      pt["grid_lat"],
+                    "grid_lon":      pt["grid_lon"],
+                    "reference":     float(y_true_np[b, 0, r, c]),
+                    "uncorrected":   float(y_base_np[b, 0, r, c]) if y_base_np is not None else None,
+                    "corrected":     float(y_pred_np[b, 0, r, c]),
+                })
+
+    def _save_grid_point_csv(self) -> None:
+        """Write the accumulated grid-point time-series records to CSV."""
+        if not self._grid_point_records:
+            return
+
+        import csv as _csv
+
+        out_path = self.output_dir / "grid_point_timeseries.csv"
+        fieldnames = [
+            "timestamp", "batch_idx", "sample_in_batch",
+            "region", "requested_lat", "requested_lon", "grid_lat", "grid_lon",
+            "reference", "uncorrected", "corrected",
+        ]
+        with open(out_path, "w", newline="") as fh:
+            writer = _csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self._grid_point_records)
+
+        logger.info(
+            f"Saved grid-point time-series ({len(self._grid_point_records)} rows) → {out_path}"
+        )
+        print(f"  Grid-point CSV saved → {out_path}")
+
+    # ------------------------------------------------------------------
+
     def _process_batch(
-        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None
+        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None,
+        batch_idx: int = 0, timestamps_raw=None,
     ):
         """Process a single batch and update accumulators.
 
@@ -1734,6 +1963,15 @@ class ModelEvaluator:
             y_base_4d=y_base_wave_4d,
             valid_mask_4d=combined_mask,
         )
+
+        # Extract values at sampled grid points (no-op when sampled_points_csv is None)
+        self._update_grid_point_records(
+            y_true_4d=y_true_wave_4d,
+            y_pred_4d=y_pred_wave_4d,
+            y_base_4d=y_base_wave_4d,
+            batch_idx=batch_idx,
+        )
+        self._gp_sample_counter += y_true_wave_4d.shape[0]
         count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
@@ -2115,6 +2353,8 @@ class ModelEvaluator:
         print("Running inference on test set...")
         self.model.eval()
         self._reset_accumulators()
+        self._gp_sample_counter = 0
+        self._setup_grid_point_sampling()
 
         def pad_to_multiple(x, multiple=16, mode="reflect"):
             import torch.nn.functional as F
@@ -2168,6 +2408,7 @@ class ModelEvaluator:
 
                 # Load timestamps from test files for seasonal analysis
                 timestamps = None
+                timestamps_raw = None
                 if self.test_files and len(self.test_files) > 0:
                     try:
                         # Get file index for this batch (cycle through files)
@@ -2501,6 +2742,8 @@ class ModelEvaluator:
                     timestamps,
                     confidence,
                     prior_bias_batch,
+                    batch_idx=batch_idx,
+                    timestamps_raw=timestamps_raw,
                 )
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
@@ -3334,6 +3577,8 @@ class ModelEvaluator:
         self._save_low_bin_diagnostics(sea_bin_metrics)
         print("Saving coastal-distance diagnostics...")
         self._save_coastal_distance_diagnostics()
+        print("Saving grid-point time-series CSV...")
+        self._save_grid_point_csv()
 
         # Create plots using samples
         print("Creating plots...")
@@ -3406,6 +3651,28 @@ def main():
         default=None,
         choices=["atlantic", "mediterranean"],
         help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
+    )
+    parser.add_argument(
+        "--sampled-points-csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to CSV produced by sample_grid_points.py "
+            "(columns: region, latitude, longitude). "
+            "When provided, records reference / uncorrected / corrected values at each "
+            "sampled grid point for every time step and writes grid_point_timeseries.csv "
+            "to the output directory."
+        ),
+    )
+    parser.add_argument(
+        "--timestamps-csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to CSV produced by build_pt_timestamp_map.py "
+            "(columns: pt_stem, hour_idx, timestamp). "
+            "Required for correct timestamps in grid_point_timeseries.csv."
+        ),
     )
     args = parser.parse_args()
 
@@ -3738,6 +4005,8 @@ def main():
             prior_fallback_target=data_config.get("prior_fallback_target", "prior"),
             low_bin_affine_params=data_config.get("low_bin_affine_params", None),
             low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
+            sampled_points_csv=args.sampled_points_csv,
+            timestamps_csv=args.timestamps_csv,
         )
 
         evaluator.evaluate()

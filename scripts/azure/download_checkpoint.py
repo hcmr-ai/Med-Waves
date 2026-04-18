@@ -17,12 +17,6 @@ from pathlib import Path
 
 from azure.storage.blob import BlobServiceClient
 
-CONN_STR = (
-    "DefaultEndpointsProtocol=https;"
-    "AccountName=medwavdatastorageneu;"
-    "AccountKey="
-    "EndpointSuffix=core.windows.net"
-)
 CONTAINER = "medwav-data"
 CHECKPOINTS_PREFIX = "checkpoints/"
 
@@ -106,7 +100,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    client = BlobServiceClient.from_connection_string(CONN_STR)
+    conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn_str:
+        raise SystemExit(
+            "Set AZURE_STORAGE_CONNECTION_STRING (full Azure Storage connection string)."
+        )
+    client = BlobServiceClient.from_connection_string(conn_str)
     container = client.get_container_client(CONTAINER)
 
     if args.list:
