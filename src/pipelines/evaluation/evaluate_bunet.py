@@ -128,6 +128,7 @@ class ModelEvaluator:
         low_bin_affine_source: str = "raw",
         sampled_points_csv: Optional[str] = None,
         timestamps_csv: Optional[str] = None,
+        eval_task: Optional[str] = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -300,9 +301,18 @@ class ModelEvaluator:
         self.use_mdn = use_mdn
         self.target_columns = target_columns
 
-        # For backward compatibility and single-task evaluation, use first target
-        self.target_column = list(self.target_columns.values())[0]
-        self.task_name = list(self.target_columns.keys())[0]
+        # Which task to score (default: first key in dict / YAML order)
+        if eval_task is not None:
+            if eval_task not in self.target_columns:
+                raise ValueError(
+                    f"eval_task {eval_task!r} not in target_columns "
+                    f"{list(self.target_columns.keys())}"
+                )
+            self.task_name = eval_task
+            self.target_column = self.target_columns[eval_task]
+        else:
+            self.target_column = list(self.target_columns.values())[0]
+            self.task_name = list(self.target_columns.keys())[0]
         if residual_prior_task is None:
             if "vhm0" in self.target_columns:
                 residual_prior_task = "vhm0"
@@ -3587,7 +3597,7 @@ class ModelEvaluator:
         self.plot_rmse_maps()
         self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
-        # self.plot_vhm0_distributions()
+        self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         self.plot_vhm0_distributions(vhm0_range=(11, 12))
@@ -3628,6 +3638,15 @@ def main():
         type=str,
         default="src/configs/config_dnn.yaml",
         help="Configuration file",
+    )
+    parser.add_argument(
+        "--eval-task",
+        type=str,
+        default=None,
+        help=(
+            "Task name to evaluate (must be a key in data.target_columns). "
+            "Use when multiple targets are configured; overrides the default first key."
+        ),
     )
     parser.add_argument(
         "--apply-binwise-correction",
@@ -3699,6 +3718,13 @@ def main():
         target_column = data_config.get("target_column", "corrected_VHM0")
         target_columns = {"vhm0": target_column}
 
+    if args.eval_task is not None:
+        if args.eval_task not in target_columns:
+            raise ValueError(
+                f"--eval-task {args.eval_task!r} is not in data.target_columns "
+                f"{list(target_columns.keys())}"
+            )
+
     # Get file list (same as training)
     files = get_file_list(
         data_config["data_path"], data_config["file_pattern"], data_config["max_files"]
@@ -3764,19 +3790,23 @@ def main():
 
     # CRITICAL: Set target_stats_ for the target column we're evaluating
     # Without this, inverse_transform_torch falls back to the last channel!
-    first_target_col = list(target_columns.values())[0]
-    if first_target_col in normalizer.feature_order_:
-        target_idx = normalizer.feature_order_.index(first_target_col)
+    eval_target_col = (
+        target_columns[args.eval_task]
+        if args.eval_task
+        else list(target_columns.values())[0]
+    )
+    if eval_target_col in normalizer.feature_order_:
+        target_idx = normalizer.feature_order_.index(eval_target_col)
         if target_idx in normalizer.stats_:
             normalizer.target_stats_ = normalizer.stats_[target_idx]
             logger.info(
-                f"Set normalizer target_stats_ for '{first_target_col}' (index {target_idx})"
+                f"Set normalizer target_stats_ for '{eval_target_col}' (index {target_idx})"
             )
         else:
             logger.warning(f"Target index {target_idx} not found in normalizer stats!")
     else:
         logger.warning(
-            f"Target column '{first_target_col}' not found in normalizer feature_order!"
+            f"Target column '{eval_target_col}' not found in normalizer feature_order!"
         )
 
     # Create test dataset (same parameters as training)
@@ -3991,6 +4021,7 @@ def main():
             apply_bilateral_filter=False,
             apply_delta_corrector_flag=args.apply_delta_corrector_flag,
             region_filter=region_filter,
+            eval_task=args.eval_task,
             low_wave_ckpt=config.config["checkpoint"]["low_wave_ckpt"],
             high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
             static_bias_map_path=data_config.get("static_bias_map_path", None),
