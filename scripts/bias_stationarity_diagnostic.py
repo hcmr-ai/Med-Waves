@@ -22,6 +22,9 @@ import glob
 from collections import defaultdict
 from pathlib import Path
 
+import cartopy.crs as ccrs
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -155,7 +158,14 @@ def main():
         "0-1m", "1-2m", "2-3m", "3-4m", "4-5m", "5-6m", "6-7m",
         "7-8m", "8-9m", "9-10m", "10-11m", "11-12m", "12m+",
     ]
+    bin_labels = [
+        "0.0-1.0m", "1.0-2.0m", "2.0-3.0m", "3.0-4.0m", "4.0-5.0m",
+        "5.0-6.0m", "6.0-7.0m", "7.0-8.0m", "8.0-9.0m", "9.0-10.0m",
+        "10.0-11.0m", "11.0-12.0m", "12.0m+",
+    ]
     year_bin_sum = {}
+    year_bin_sq_sum = {}
+    year_bin_abs_sum = {}
     year_bin_count = {}
 
     # Per-season accumulators: {year: {season: {"sum": ..., "count": ...}}}
@@ -173,17 +183,23 @@ def main():
     year_relbin_sum = {}
     year_relbin_count = {}
 
+    # Per-pixel absolute bias accumulator (for spatial MAE maps)
+    year_abs_sum = {}
+
     for year in years:
         year_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_sq_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_count[year] = np.zeros((H, W), dtype=np.float64)
         year_raw_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_bin_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_bin_sq_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_bin_abs_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_bin_count[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_season_sum[year] = {s: np.zeros((H, W), dtype=np.float64) for s in ["winter", "spring", "summer", "autumn"]}
         year_season_count[year] = {s: np.zeros((H, W), dtype=np.float64) for s in ["winter", "spring", "summer", "autumn"]}
         year_relbin_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_relbin_count[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_abs_sum[year] = np.zeros((H, W), dtype=np.float64)
 
     for year in years:
         file_list = files_by_year[year]
@@ -208,6 +224,7 @@ def main():
                 bias_filled = np.where(valid, bias_hw, 0.0)
                 year_sum[year] += bias_filled
                 year_sq_sum[year] += np.where(valid, bias_hw**2, 0.0)
+                year_abs_sum[year] += np.where(valid, np.abs(bias_hw), 0.0)
                 year_count[year] += valid.astype(np.float64)
                 year_raw_sum[year] += np.where(valid, raw_hw, 0.0)
 
@@ -217,6 +234,8 @@ def main():
                     lo, hi = bin_edges[bi], bin_edges[bi+1]
                     in_bin = valid & (raw_hw >= lo) & (raw_hw < hi)
                     year_bin_sum[year][bin_names[bi]] += np.where(in_bin, bias_hw, 0.0)
+                    year_bin_sq_sum[year][bin_names[bi]] += np.where(in_bin, bias_hw**2, 0.0)
+                    year_bin_abs_sum[year][bin_names[bi]] += np.where(in_bin, np.abs(bias_hw), 0.0)
                     year_bin_count[year][bin_names[bi]] += in_bin.astype(np.float64)
                     year_relbin_sum[year][bin_names[bi]] += np.where(in_bin, rel_bias_hw, 0.0)
                     year_relbin_count[year][bin_names[bi]] += in_bin.astype(np.float64)
@@ -584,6 +603,272 @@ def main():
     fig2.tight_layout()
     fig2.savefig(output_dir / "07b_relative_bias_per_bin.png", dpi=150)
     plt.close(fig2)
+
+    # ================================================================
+    # ANALYSIS 8 / PLOT 8: Sea-bin performance (matches evaluate_bunet style)
+    # Metrics pooled across all years; binned by raw VHM0 value
+    # ================================================================
+    print("\n=== Analysis 8: Sea-bin performance (bias RMSE / MAE / mean by wave-height bin) ===")
+
+    # Pool across years
+    pool_bin_sum = {b: sum(year_bin_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_sq_sum = {b: sum(year_bin_sq_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_abs_sum = {b: sum(year_bin_abs_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_count = {b: sum(year_bin_count[y][b] for y in years) for b in bin_names}
+
+    sb_rmse, sb_mae, sb_mean_bias, sb_count, sb_pct = [], [], [], [], []
+    sb_labels_plot = []
+    total_sea_count = sum(
+        float(pool_bin_count[b][sea_mask].sum()) for b in bin_names
+    )
+
+    for bi, bname in enumerate(bin_names):
+        cnt_map = pool_bin_count[bname]
+        n = float(cnt_map[sea_mask].sum())
+        if n == 0:
+            continue
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rmse_map = np.where(
+                cnt_map > 0,
+                np.sqrt(pool_bin_sq_sum[bname] / cnt_map),
+                np.nan,
+            )
+            mae_map = np.where(
+                cnt_map > 0,
+                pool_bin_abs_sum[bname] / cnt_map,
+                np.nan,
+            )
+            mean_map = np.where(
+                cnt_map > 0,
+                pool_bin_sum[bname] / cnt_map,
+                np.nan,
+            )
+
+        rmse_val = float(np.nanmean(rmse_map[sea_mask & (cnt_map > 0)]))
+        mae_val = float(np.nanmean(mae_map[sea_mask & (cnt_map > 0)]))
+        mean_val = float(np.nanmean(mean_map[sea_mask & (cnt_map > 0)]))
+
+        sb_rmse.append(rmse_val)
+        sb_mae.append(mae_val)
+        sb_mean_bias.append(mean_val)
+        sb_count.append(int(n))
+        sb_pct.append(100.0 * n / total_sea_count if total_sea_count > 0 else 0.0)
+        sb_labels_plot.append(bin_labels[bi])
+
+        print(
+            f"  {bin_labels[bi]:<14s}: RMSE={rmse_val:.4f}m  MAE={mae_val:.4f}m  "
+            f"mean_bias={mean_val:+.4f}m  n={int(n):,}  ({sb_pct[-1]:.1f}%)"
+        )
+
+    # Plot 8: 2×2 sea-bin performance figure
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    fig.suptitle(
+        "Sea-Bin Bias Performance (bias = corrected − raw, pooled across all years)",
+        fontsize=16,
+        fontweight="bold",
+    )
+
+    x = np.arange(len(sb_labels_plot))
+    width = 0.5
+
+    # Panel [0,0]: RMSE of bias per sea bin
+    axes[0, 0].bar(x, sb_rmse, width, color="steelblue", alpha=0.8)
+    axes[0, 0].set_title("Bias RMSE by Sea State", fontweight="bold")
+    axes[0, 0].set_ylabel("RMSE (m)")
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[0, 0].grid(True, alpha=0.3, axis="y")
+    for i, v in enumerate(sb_rmse):
+        if v > 0:
+            axes[0, 0].text(
+                i, v + max(sb_rmse) * 0.01, f"{v:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+
+    # Panel [0,1]: MAE of bias per sea bin
+    axes[0, 1].bar(x, sb_mae, width, color="lightcoral", alpha=0.8)
+    axes[0, 1].set_title("Bias MAE by Sea State", fontweight="bold")
+    axes[0, 1].set_ylabel("MAE (m)")
+    axes[0, 1].set_xticks(x)
+    axes[0, 1].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[0, 1].grid(True, alpha=0.3, axis="y")
+    for i, v in enumerate(sb_mae):
+        if v > 0:
+            axes[0, 1].text(
+                i, v + max(sb_mae) * 0.01, f"{v:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+
+    # Panel [1,0]: Mean bias per sea bin (signed — shows under/over-correction)
+    colors_bias = ["green" if v >= 0 else "red" for v in sb_mean_bias]
+    axes[1, 0].bar(x, sb_mean_bias, width, color=colors_bias, alpha=0.7)
+    axes[1, 0].axhline(y=0, color="black", linestyle="--", linewidth=1)
+    axes[1, 0].set_title("Mean Bias by Sea State\n(+= over-correction, −= under-correction)", fontweight="bold")
+    axes[1, 0].set_ylabel("Mean Bias (m)")
+    axes[1, 0].set_xticks(x)
+    axes[1, 0].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[1, 0].grid(True, alpha=0.3, axis="y")
+    bias_range = max(sb_mean_bias) - min(sb_mean_bias)
+    for i, v in enumerate(sb_mean_bias):
+        axes[1, 0].text(
+            i,
+            v + bias_range * 0.02 if v >= 0 else v - bias_range * 0.02,
+            f"{v:+.3f}",
+            ha="center", va="bottom" if v >= 0 else "top", fontsize=8,
+        )
+
+    # Panel [1,1]: Sample distribution per sea bin
+    axes[1, 1].bar(x, sb_pct, width, color="gold", alpha=0.7)
+    axes[1, 1].set_title("Sample Distribution by Sea State", fontweight="bold")
+    axes[1, 1].set_ylabel("Percentage of Sea Samples (%)")
+    axes[1, 1].set_xticks(x)
+    axes[1, 1].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[1, 1].grid(True, alpha=0.3, axis="y")
+    for i, (v, cnt) in enumerate(zip(sb_pct, sb_count)):
+        axes[1, 1].text(
+            i,
+            v + max(sb_pct) * 0.02,
+            f"{v:.1f}%\n({cnt:,})",
+            ha="center", va="bottom", fontsize=8,
+        )
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "08_sea_bin_performance.png", dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved → {output_dir / '08_sea_bin_performance.png'}")
+
+    # ================================================================
+    # PLOT 9: Spatial RMSE / MAE / improvement maps (evaluate_bunet style)
+    #
+    # "Reference"  = raw VHM0 used as-is  → error = bias itself
+    # "Corrector"  = static grand-mean correction applied per pixel
+    #                → residual = bias − grand_mean_bias
+    # Maps produced (one file each, matching evaluate_bunet naming):
+    #   09a_rmse_reference.png         sqrt(mean(bias²))      per pixel
+    #   09b_rmse_static_corrector.png  sqrt(Var(bias))        per pixel
+    #   09c_rmse_improvement.png       ref_rmse − corr_rmse   per pixel
+    #   09d_rmse_improvement_binary.png  same, blue/red binary cmap
+    #   09e_mae_reference.png          mean(|bias|)           per pixel
+    #   09f_mean_bias.png              grand_mean_bias        per pixel
+    # ================================================================
+    print("\n=== Plot 9: Spatial RMSE / MAE / improvement maps ===")
+
+    # --- lat/lon grids (from first file, hour 0) --------------------------
+    t0_hw = data0["tensor"][0]          # (H, W, C)
+    lat_grid = t0_hw[..., lat_idx].numpy()   # (H, W)
+    lon_grid = t0_hw[..., lon_idx].numpy()   # (H, W)
+
+    # --- pool pixel-level accumulators across all years -------------------
+    total_sq_bias  = sum(year_sq_sum[y]  for y in years)   # sum of bias²
+    total_abs_bias = sum(year_abs_sum[y] for y in years)   # sum of |bias|
+    # total_count and total_sum already computed above
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rmse_ref = np.where(total_count > 0,
+                            np.sqrt(total_sq_bias / total_count), np.nan)
+        mae_ref  = np.where(total_count > 0,
+                            total_abs_bias / total_count, np.nan)
+        # Static corrector residual RMSE = sqrt(mean((bias - grand_mean)²))
+        #   = sqrt(mean(bias²) - grand_mean²)  [when count is large]
+        #   equivalently = sqrt(total_var) which is already computed
+        rmse_corr = np.where(~np.isnan(total_var) & (total_count > 0),
+                             np.sqrt(np.maximum(total_var, 0.0)), np.nan)
+
+    improvement = rmse_ref - rmse_corr   # >0 means correction helps
+
+    # --- helper: one cartopy pcolormesh figure ----------------------------
+    def _save_geo_map(data, save_path, title, cmap, vmin, vmax, cbar_label, norm=None):
+        fig = plt.figure(figsize=(12, 7))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        ax.coastlines(resolution="10m", linewidth=0.5)
+        ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False,
+                     linewidth=0.5, alpha=0.5)
+        im = ax.pcolormesh(
+            lon_grid, lat_grid, data,
+            cmap=cmap,
+            vmin=vmin if norm is None else None,
+            vmax=vmax if norm is None else None,
+            norm=norm,
+            transform=ccrs.PlateCarree(),
+            shading="auto",
+        )
+        valid_lons = lon_grid[~np.isnan(lon_grid)]
+        valid_lats = lat_grid[~np.isnan(lat_grid)]
+        ax.set_extent([valid_lons.min(), valid_lons.max(),
+                       valid_lats.min(), valid_lats.max()],
+                      crs=ccrs.PlateCarree())
+        plt.colorbar(im, ax=ax, orientation="vertical",
+                     label=cbar_label, pad=0.05, shrink=0.8)
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved → {save_path}")
+
+    cmap_jet = plt.get_cmap("jet").copy()
+    cmap_jet.set_bad("white")
+
+    vmax_rmse = np.nanpercentile(rmse_ref[sea_mask], 98)
+    vmax_mae  = np.nanpercentile(mae_ref[sea_mask],  98)
+
+    # 09a: Reference RMSE
+    _save_geo_map(
+        rmse_ref,
+        output_dir / "09a_rmse_reference.png",
+        title="Reference RMSE — sqrt(mean(bias²))  [raw VHM0 as predictor]",
+        cmap=cmap_jet, vmin=0, vmax=vmax_rmse, cbar_label="RMSE (m)",
+    )
+
+    # 09b: Static-corrector residual RMSE
+    vmax_corr = np.nanpercentile(rmse_corr[sea_mask & ~np.isnan(rmse_corr)], 98)
+    _save_geo_map(
+        rmse_corr,
+        output_dir / "09b_rmse_static_corrector.png",
+        title="Static-Corrector Residual RMSE — sqrt(Var(bias))  [after removing grand mean]",
+        cmap=cmap_jet, vmin=0, vmax=max(vmax_rmse, vmax_corr), cbar_label="RMSE (m)",
+    )
+
+    # 09c: RMSE improvement — symmetric diverging colormap
+    imp_abs_max = np.nanpercentile(np.abs(improvement[sea_mask & ~np.isnan(improvement)]), 98)
+    _save_geo_map(
+        improvement,
+        output_dir / "09c_rmse_improvement.png",
+        title="RMSE Improvement (Reference − Static Corrector)\n+red = correction helps, −blue = correction hurts",
+        cmap="RdBu", vmin=-imp_abs_max, vmax=imp_abs_max, cbar_label="ΔRMSE (m)",
+    )
+
+    # 09d: RMSE improvement — binary blue/red (exact match to evaluate_bunet)
+    cmap_binary = mcolors.LinearSegmentedColormap.from_list(
+        "improvement_binary", ["#0000FF", "#FF0000"], N=256
+    )
+    cmap_binary.set_bad("white")
+    norm_binary = mcolors.BoundaryNorm(
+        boundaries=[-imp_abs_max, 0, imp_abs_max], ncolors=256, clip=True
+    )
+    _save_geo_map(
+        improvement,
+        output_dir / "09d_rmse_improvement_binary.png",
+        title="RMSE Improvement binary (red = static correction better, blue = worse)",
+        cmap=cmap_binary, vmin=-imp_abs_max, vmax=imp_abs_max,
+        cbar_label="ΔRMSE (m)", norm=norm_binary,
+    )
+
+    # 09e: MAE reference
+    _save_geo_map(
+        mae_ref,
+        output_dir / "09e_mae_reference.png",
+        title="Reference MAE — mean(|bias|)  [raw VHM0 as predictor]",
+        cmap=cmap_jet, vmin=0, vmax=vmax_mae, cbar_label="MAE (m)",
+    )
+
+    # 09f: Grand mean bias (stationary component)
+    bias_abs_max = np.nanpercentile(np.abs(grand_mean_bias[sea_mask]), 98)
+    _save_geo_map(
+        grand_mean_bias,
+        output_dir / "09f_mean_bias.png",
+        title="Grand Mean Bias — mean(corrected − raw)  [stationary component]",
+        cmap="RdBu_r", vmin=-bias_abs_max, vmax=bias_abs_max, cbar_label="Bias (m)",
+    )
 
     print(f"\nDone. Check the output directory for plots.")
 
