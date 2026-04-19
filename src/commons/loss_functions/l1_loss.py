@@ -95,7 +95,7 @@ def masked_bin_balanced_smooth_l1(
     vhm0,
     bin_thresholds=None,
     bin_weights=None,
-    beta=0.3,
+    beta=0.05,
     epsilon=1e-6,
 ):
     """
