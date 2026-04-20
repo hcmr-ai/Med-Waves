@@ -121,6 +121,7 @@ class TransformerBranch(nn.Module):
         num_layers=6,
         num_heads=8,
         mlp_ratio=4.0,
+        dropout=0.0,
         use_coord_pos_enc=True,
         sea_mask_channel_index=None,
     ):
@@ -144,6 +145,7 @@ class TransformerBranch(nn.Module):
             d_model=emb_dim,
             nhead=num_heads,
             dim_feedforward=int(emb_dim * mlp_ratio),
+            dropout=dropout,
             activation="gelu",
             batch_first=True,
         )
@@ -242,6 +244,7 @@ class TransUNetGeo(nn.Module):
         num_layers=8,
         num_heads=8,
         use_mdn=False,
+        transformer_dropout=0.0,
         transformer_use_coord_pos_enc=True,
         transformer_sea_mask_channel_index=None,
     ):
@@ -273,6 +276,7 @@ class TransUNetGeo(nn.Module):
             patch_size=patch_size,
             num_layers=num_layers,
             num_heads=num_heads,
+            dropout=transformer_dropout,
             use_coord_pos_enc=transformer_use_coord_pos_enc,
             sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
@@ -381,6 +385,7 @@ class MoETransUNetGeo(nn.Module):
         gate_input_channels=None,
         vhm0_channel_index=0,
         expert_dropout=0.0,
+        transformer_dropout=0.0,
         return_gate_maps=True,
         transformer_use_coord_pos_enc=True,
         transformer_sea_mask_channel_index=None,
@@ -424,6 +429,7 @@ class MoETransUNetGeo(nn.Module):
             num_layers=num_layers,
             num_heads=num_heads,
             use_mdn=False,
+            transformer_dropout=transformer_dropout,
             transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
             transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
         )

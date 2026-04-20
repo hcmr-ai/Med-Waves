@@ -91,6 +91,7 @@ class WaveBiasCorrector(pl.LightningModule):
         gate_input_channels=None,
         expert_diversity_weight=0.0,
         expert_dropout=0.0,
+        transformer_dropout=0.0,
         return_gate_maps=True,
         normalizer=None,
         normalize_target=False,
@@ -177,6 +178,7 @@ class WaveBiasCorrector(pl.LightningModule):
             gate_input_mode=gate_input_mode,
             gate_input_channels=gate_input_channels,
             expert_dropout=expert_dropout,
+            transformer_dropout=transformer_dropout,
             return_gate_maps=return_gate_maps,
         )
 

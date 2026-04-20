@@ -36,6 +36,7 @@ def create_model(
     gate_input_mode: str = "features",
     gate_input_channels: list | None = None,
     expert_dropout: float = 0.0,
+    transformer_dropout: float = 0.0,
     return_gate_maps: bool = True,
 ):
     """
@@ -104,6 +105,7 @@ def create_model(
             num_layers=transunet_num_layers,
             num_heads=transunet_num_heads,
             use_mdn=use_mdn,
+            transformer_dropout=transformer_dropout,
             transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
             transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
@@ -126,6 +128,7 @@ def create_model(
             gate_input_channels=gate_input_channels,
             vhm0_channel_index=vhm0_channel_index,
             expert_dropout=expert_dropout,
+            transformer_dropout=transformer_dropout,
             return_gate_maps=return_gate_maps,
             transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
             transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
