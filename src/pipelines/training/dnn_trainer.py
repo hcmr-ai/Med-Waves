@@ -385,7 +385,7 @@ def main():
             "Consider setting num_workers=0 or pre-downloading data locally."
         )
 
-    train_loader, val_loader, normalizer = create_data_loaders(config, fs)
+    train_loader, val_loader, eval_loader, normalizer = create_data_loaders(config, fs)
 
     # Create model
     model_config = config.config["model"]
@@ -626,21 +626,33 @@ def main():
     logger.info(
         f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches"
     )
+    run_eval_each_epoch = training_config.get("run_eval_each_epoch", False)
+    val_dataloaders = (
+        [val_loader, eval_loader]
+        if run_eval_each_epoch and eval_loader is not None
+        else val_loader
+    )
+    if run_eval_each_epoch and eval_loader is not None:
+        logger.info("Eval-at-epoch-end enabled with %d eval batches", len(eval_loader))
 
     # Only pass ckpt_path if we actually have a checkpoint to resume from
     if config.config["training"]["finetune_model"]:
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(
+            model, train_dataloaders=train_loader, val_dataloaders=val_dataloaders
+        )
     elif resume_path is not None:
         logger.info(f"Resuming from checkpoint: {resume_path}")
         trainer.fit(
             model,
             train_dataloaders=train_loader,
-            val_dataloaders=val_loader,
+            val_dataloaders=val_dataloaders,
             ckpt_path=resume_path,
         )
     else:
         logger.info("Training from scratch (no checkpoint)")
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(
+            model, train_dataloaders=train_loader, val_dataloaders=val_dataloaders
+        )
 
     logger.info("Training completed!")
 

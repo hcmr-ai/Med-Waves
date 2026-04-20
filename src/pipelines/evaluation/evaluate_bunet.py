@@ -2376,6 +2376,39 @@ class ModelEvaluator:
                 x = F.pad(x, (0, pad_w, 0, pad_h), mode=mode)
             return x, (H, W)
 
+        def _extract_task_tensor(value, value_name):
+            """Normalize nested multi-task payloads to a tensor for current eval task."""
+            unwrap_order = (self.task_name, "target", "targets", "prediction", "y")
+            max_unwrap_depth = 8
+
+            for _ in range(max_unwrap_depth):
+                if isinstance(value, dict):
+                    selected_key = next((k for k in unwrap_order if k in value), None)
+                    if selected_key is None:
+                        raise KeyError(
+                            f"{value_name} is dict but has no recognized tensor key. "
+                            f"Expected one of {list(unwrap_order)}; available keys: {list(value.keys())}"
+                        )
+                    value = value[selected_key]
+                    continue
+
+                if isinstance(value, (list, tuple)) and len(value) == 1:
+                    value = value[0]
+                    continue
+
+                if hasattr(value, "shape"):
+                    return value
+
+                raise TypeError(
+                    f"{value_name} could not be converted to tensor. "
+                    f"Got type: {type(value)}"
+                )
+
+            raise RuntimeError(
+                f"{value_name} exceeded max nested unwrap depth ({max_unwrap_depth}). "
+                "Check batch/model output structure."
+            )
+
         # If binwise correction is enabled, compute biases from bias_loader first
         if self.apply_binwise_correction_flag:
             if self.bias_loader is None:
@@ -2400,7 +2433,7 @@ class ModelEvaluator:
                 # If y is a dict (multi-task), extract the target for the task we're evaluating
                 if isinstance(y, dict):
                     # Multi-task: extract the specific target we're evaluating
-                    y = y[self.task_name]
+                    y = _extract_task_tensor(y, "target batch")
 
                 X, orig_size = pad_to_multiple(X, multiple=16)
 
@@ -2693,14 +2726,9 @@ class ModelEvaluator:
                     else:
                         y_pred = self.model(X)
 
-                # Handle multi-task predictions (for non-bin-routed case)
-                # If y_pred is a dict (multi-task model), extract the prediction for the task we're evaluating
-                if isinstance(y_pred, dict):
-                    y_pred = (
-                        y_pred["prediction"]
-                        if "prediction" in y_pred
-                        else y_pred[self.task_name]
-                    )
+                # Normalize multi-task payloads to tensors before alignment.
+                y_pred = _extract_task_tensor(y_pred, "model prediction")
+                y = _extract_task_tensor(y, "target batch")
 
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])
@@ -3597,7 +3625,7 @@ class ModelEvaluator:
         self.plot_rmse_maps()
         self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
-        # self.plot_vhm0_distributions()
+        self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         # self.plot_vhm0_distributions(vhm0_range=(11, 12))

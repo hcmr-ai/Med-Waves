@@ -195,11 +195,96 @@ class WaveBiasCorrector(pl.LightningModule):
         self._val_gate_sample = None
         # Per-month gate weight accumulator (reset each val epoch).
         self._val_month_gate_accum = {m: {"sum": None, "count": 0} for m in range(12)}
-        # Sea-bin error accumulators for epoch-end bar chart (reset each val epoch).
-        self._val_sea_bin_accum = {
+        # Sea-bin error accumulators for epoch-end bar charts (reset each val epoch).
+        self._sea_bin_epoch_accum = {
+            "val": self._empty_sea_bin_accum(),
+            "eval": self._empty_sea_bin_accum(),
+        }
+        # Train metric accumulators (reset each train epoch).
+        self._train_metric_accum = {}
+        self._reset_train_metric_accum()
+
+    def _empty_sea_bin_accum(self):
+        return {
             b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "count": 0}
             for b in _VAL_SEA_BINS
         }
+
+    def _reset_train_metric_accum(self):
+        self._train_metric_accum = {
+            task_name: {
+                "abs_err_sum": None,
+                "sq_err_sum": None,
+                "err_sum": None,
+                "err_min": None,
+                "err_max": None,
+                "target_sum": None,
+                "target_sq_sum": None,
+                "pred_sum": None,
+                "pred_sq_sum": None,
+                "count": 0,
+            }
+            for task_name in self.auxiliary_tasks
+        }
+
+    def _accumulate_train_task_metrics(self, predictions, targets, mask):
+        # Handle backward compatibility: single task
+        if not isinstance(predictions, dict):
+            task_name = self.auxiliary_tasks[0]
+            predictions = {task_name: predictions}
+            targets = {task_name: targets}
+
+        for task_name in self.auxiliary_tasks:
+            y_pred = predictions[task_name]
+            y_true = targets[task_name]
+
+            # Align shapes
+            min_h = min(y_pred.shape[2], y_true.shape[2])
+            min_w = min(y_pred.shape[3], y_true.shape[3])
+            y_pred = y_pred[:, :, :min_h, :min_w]
+            y_true = y_true[:, :, :min_h, :min_w]
+            mask_crop = mask[:, :, :min_h, :min_w]
+
+            errors = (y_pred - y_true)[mask_crop].detach()
+            if errors.numel() == 0:
+                continue
+
+            y_true_valid = y_true[mask_crop].detach()
+            y_pred_valid = y_pred[mask_crop].detach()
+            acc = self._train_metric_accum[task_name]
+
+            abs_err_sum = errors.abs().sum()
+            sq_err_sum = (errors ** 2).sum()
+            err_sum = errors.sum()
+            err_min = errors.min()
+            err_max = errors.max()
+            target_sum = y_true_valid.sum()
+            target_sq_sum = (y_true_valid ** 2).sum()
+            pred_sum = y_pred_valid.sum()
+            pred_sq_sum = (y_pred_valid ** 2).sum()
+
+            if acc["abs_err_sum"] is None:
+                acc["abs_err_sum"] = abs_err_sum
+                acc["sq_err_sum"] = sq_err_sum
+                acc["err_sum"] = err_sum
+                acc["err_min"] = err_min
+                acc["err_max"] = err_max
+                acc["target_sum"] = target_sum
+                acc["target_sq_sum"] = target_sq_sum
+                acc["pred_sum"] = pred_sum
+                acc["pred_sq_sum"] = pred_sq_sum
+            else:
+                acc["abs_err_sum"] = acc["abs_err_sum"] + abs_err_sum
+                acc["sq_err_sum"] = acc["sq_err_sum"] + sq_err_sum
+                acc["err_sum"] = acc["err_sum"] + err_sum
+                acc["err_min"] = torch.minimum(acc["err_min"], err_min)
+                acc["err_max"] = torch.maximum(acc["err_max"], err_max)
+                acc["target_sum"] = acc["target_sum"] + target_sum
+                acc["target_sq_sum"] = acc["target_sq_sum"] + target_sq_sum
+                acc["pred_sum"] = acc["pred_sum"] + pred_sum
+                acc["pred_sq_sum"] = acc["pred_sq_sum"] + pred_sq_sum
+
+            acc["count"] += int(errors.numel())
 
     @classmethod
     def load_from_checkpoint(cls, checkpoint_path, *args, **kwargs):
@@ -606,6 +691,11 @@ class WaveBiasCorrector(pl.LightningModule):
             mask: Valid pixel mask
             prefix: Logging prefix (train/val)
         """
+        # For training, accumulate metrics and log once in on_train_epoch_end.
+        if prefix.startswith("train"):
+            self._accumulate_train_task_metrics(predictions, targets, mask)
+            return
+
         # Handle backward compatibility: single task
         if not isinstance(predictions, dict):
             # Use actual task name instead of hardcoding 'vhm0'
@@ -980,11 +1070,13 @@ class WaveBiasCorrector(pl.LightningModule):
     def on_validation_epoch_start(self):
         print(f"\n>>> ON_VALIDATION_EPOCH_START CALLED - Epoch {self.current_epoch}")
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """Validation step with multi-task support."""
+        split_prefix = "eval" if dataloader_idx == 1 else "val"
         if batch_idx == 0:
             print(
-                f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, Batch {batch_idx}"
+                f"\n>>> VALIDATION STEP CALLED - Epoch {self.current_epoch}, "
+                f"Loader {dataloader_idx}, Batch {batch_idx}"
             )
 
         try:
@@ -1049,7 +1141,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 )
 
             # Stash first batch gate maps for epoch-end image logging.
-            if batch_idx == 0 and moe_aux is not None:
+            if batch_idx == 0 and dataloader_idx == 0 and moe_aux is not None:
                 self._val_gate_sample = {
                     k: moe_aux[k][0].detach().cpu()
                     for k in ("gate_weights", "uncertainty")
@@ -1057,26 +1149,29 @@ class WaveBiasCorrector(pl.LightningModule):
                 }
 
             # Accumulate gate weights by calendar month (decoded from X).
-            if moe_aux is not None and "gate_weights" in moe_aux:
+            if dataloader_idx == 0 and moe_aux is not None and "gate_weights" in moe_aux:
                 self._accumulate_gate_by_month(moe_aux["gate_weights"], mask, X)
 
             gate_aux_loss = self._compute_gate_auxiliary_loss(
                 moe_aux,
                 mask,
                 vhm0_for_reconstruction,
-                prefix="val_moe",
+                prefix=f"{split_prefix}_moe",
                 on_step=False,
             )
             if gate_aux_loss is not None:
                 loss = loss + gate_aux_loss
                 self.log(
-                    "val_moe/gate_aux_loss",
+                    f"{split_prefix}_moe/gate_aux_loss",
                     gate_aux_loss.detach(),
                     on_step=False,
                     on_epoch=True,
                 )
                 self._log_gate_usage_by_raw_bin(
-                    moe_aux, vhm0_for_reconstruction, mask, prefix="val_moe"
+                    moe_aux,
+                    vhm0_for_reconstruction,
+                    mask,
+                    prefix=f"{split_prefix}_moe",
                 )
 
             # GAN-specific validation: log discriminator metrics
@@ -1103,13 +1198,19 @@ class WaveBiasCorrector(pl.LightningModule):
 
                     # Log discriminator metrics
                     self.log(
-                        "val_D_real_mean", D_real.mean(), on_step=False, on_epoch=True
+                        f"{split_prefix}_D_real_mean",
+                        D_real.mean(),
+                        on_step=False,
+                        on_epoch=True,
                     )
                     self.log(
-                        "val_D_fake_mean", D_fake.mean(), on_step=False, on_epoch=True
+                        f"{split_prefix}_D_fake_mean",
+                        D_fake.mean(),
+                        on_step=False,
+                        on_epoch=True,
                     )
                     self.log(
-                        "val_D_diff",
+                        f"{split_prefix}_D_diff",
                         (D_real - D_fake).mean(),
                         on_step=False,
                         on_epoch=True,
@@ -1122,14 +1223,20 @@ class WaveBiasCorrector(pl.LightningModule):
             traceback.print_exc()
             raise
 
-        # Log total loss
-        self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        # Keep val_loss monitor for checkpoint/early stopping on main validation loader only.
+        if dataloader_idx == 0:
+            self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        else:
+            self.log("eval_loss", loss, prog_bar=False, on_step=False, on_epoch=True)
 
         # Log individual task losses
         for task_name, task_loss in task_losses.items():
             if self.is_multi_task:
                 self.log(
-                    f"val_loss_{task_name}", task_loss, on_step=False, on_epoch=True
+                    f"{split_prefix}_loss_{task_name}",
+                    task_loss,
+                    on_step=False,
+                    on_epoch=True,
                 )
 
         # Compute and log per-task metrics
@@ -1138,9 +1245,9 @@ class WaveBiasCorrector(pl.LightningModule):
                 predictions, targets, prior_bias
             )
             self._compute_and_log_task_metrics(
-                metric_predictions, metric_targets, mask, prefix="val"
+                metric_predictions, metric_targets, mask, prefix=split_prefix
             )
-            self.log("val_valid_pixels", mask.sum().float(), on_epoch=True)
+            self.log(f"{split_prefix}_valid_pixels", mask.sum().float(), on_epoch=True)
 
             # Log sea-bin metrics for validation
             # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
@@ -1179,12 +1286,14 @@ class WaveBiasCorrector(pl.LightningModule):
 
                 # Create task-specific prefix for multi-task logging
                 prefix = (
-                    f"val_{task_name}" if isinstance(metric_predictions, dict) else "val"
+                    f"{split_prefix}_{task_name}"
+                    if isinstance(metric_predictions, dict)
+                    else split_prefix
                 )
                 baseline_prefix = (
-                    f"val_baseline_{task_name}"
+                    f"{split_prefix}_baseline_{task_name}"
                     if isinstance(metric_predictions, dict)
-                    else "val_baseline"
+                    else f"{split_prefix}_baseline"
                 )
 
                 if (
@@ -1250,7 +1359,11 @@ class WaveBiasCorrector(pl.LightningModule):
                     y_pred_vhm0 = vhm0_for_reconstruction + y_pred_vhm0
                     y_true_vhm0 = vhm0_for_reconstruction + y_true_vhm0
                 self._accumulate_sea_bin_errors(
-                    y_pred_vhm0, y_true_vhm0, mask, vhm0_for_reconstruction
+                    y_pred_vhm0,
+                    y_true_vhm0,
+                    mask,
+                    vhm0_for_reconstruction,
+                    split=split_prefix,
                 )
 
         return {"loss": loss, "pred": predictions}
@@ -1286,14 +1399,17 @@ class WaveBiasCorrector(pl.LightningModule):
             for key, value in self.scheduler_info.items():
                 _log_metadata_item(key, value)
 
-    def _log_sea_bin_chart(self):
-        """Render RMSE/MAE per sea-state bin and log as an image. Resets accumulator."""
+    def _log_sea_bin_chart(self, split: str = "val"):
+        """Render RMSE/MAE per sea-state bin and log images. Resets accumulator."""
         import io
         import matplotlib.pyplot as plt
 
+        if split not in self._sea_bin_epoch_accum:
+            return
+        accum = self._sea_bin_epoch_accum[split]
         labels, rmse_vals, mae_vals = [], [], []
         for b in _VAL_SEA_BINS:
-            acc = self._val_sea_bin_accum[b["name"]]
+            acc = accum[b["name"]]
             if acc["count"] == 0:
                 continue
             labels.append(b["label"])
@@ -1301,17 +1417,17 @@ class WaveBiasCorrector(pl.LightningModule):
             mae_vals.append(acc["sum_abs"] / acc["count"])
 
         # Reset for next epoch
-        self._val_sea_bin_accum = {
-            b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "count": 0}
-            for b in _VAL_SEA_BINS
-        }
+        self._sea_bin_epoch_accum[split] = self._empty_sea_bin_accum()
 
         if not labels:
             return
 
         x = np.arange(len(labels))
         fig, axes = plt.subplots(1, 2, figsize=(16, 5))
-        fig.suptitle(f"Val sea-bin performance — epoch {self.current_epoch}", fontsize=11)
+        fig.suptitle(
+            f"{split.capitalize()} sea-bin performance — epoch {self.current_epoch}",
+            fontsize=11,
+        )
 
         for ax, vals, title, color in zip(
             axes,
@@ -1336,7 +1452,7 @@ class WaveBiasCorrector(pl.LightningModule):
         img = np.frombuffer(buf.getvalue(), dtype=np.uint8)
         from PIL import Image
         img = np.array(Image.open(io.BytesIO(buf.getvalue())))[:, :, :3]
-        self._log_image("val/sea_bin_performance", img)
+        self._log_image(f"{split}/sea_bin_performance", img)
 
     def _log_image(self, name: str, array):
         """Log a (H, W) or (H, W, 3) uint8 numpy array to Comet or TensorBoard."""
@@ -1361,56 +1477,106 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         sample = self._val_gate_sample
-        if sample is None:
-            return
+        if sample is not None:
+            import numpy as np
+            from matplotlib.cm import get_cmap
 
-        import numpy as np
-        from matplotlib.cm import get_cmap
+            # Uncertainty map — [H, W] float → grayscale uint8
+            if "uncertainty" in sample:
+                u = sample["uncertainty"].numpy()          # [H, W]
+                u_img = (u * 255).clip(0, 255).astype(np.uint8)
+                self._log_image("moe/val_uncertainty", u_img)
 
+            # Dominant-expert map — argmax over K → coloured by expert index
+            if "gate_weights" in sample:
+                gw = sample["gate_weights"].numpy()        # [K, H, W]
+                dominant = gw.argmax(axis=0).astype(np.float32)  # [H, W]
+                # Normalise to [0, 1] then apply a qualitative colormap
+                dominant_norm = dominant / max(gw.shape[0] - 1, 1)
+                cmap = get_cmap("tab10")
+                rgb = (cmap(dominant_norm)[:, :, :3] * 255).astype(np.uint8)  # [H, W, 3]
+                self._log_image("moe/val_dominant_expert", rgb)
 
-        # Uncertainty map — [H, W] float → grayscale uint8
-        if "uncertainty" in sample:
-            u = sample["uncertainty"].numpy()          # [H, W]
-            u_img = (u * 255).clip(0, 255).astype(np.uint8)
-            self._log_image("moe/val_uncertainty", u_img)
+                # Per-expert gate weight maps
+                for k in range(gw.shape[0]):
+                    w_img = (gw[k] * 255).clip(0, 255).astype(np.uint8)
+                    self._log_image(f"moe/val_gate_expert_{k}", w_img)
 
-        # Dominant-expert map — argmax over K → coloured by expert index
-        if "gate_weights" in sample:
-            gw = sample["gate_weights"].numpy()        # [K, H, W]
-            dominant = gw.argmax(axis=0).astype(np.float32)  # [H, W]
-            # Normalise to [0, 1] then apply a qualitative colormap
-            dominant_norm = dominant / max(gw.shape[0] - 1, 1)
-            cmap = get_cmap("tab10")
-            rgb = (cmap(dominant_norm)[:, :, :3] * 255).astype(np.uint8)  # [H, W, 3]
-            self._log_image("moe/val_dominant_expert", rgb)
-
-            # Per-expert gate weight maps
-            for k in range(gw.shape[0]):
-                w_img = (gw[k] * 255).clip(0, 255).astype(np.uint8)
-                self._log_image(f"moe/val_gate_expert_{k}", w_img)
+            # Month-bin gate usage logging (MoE only)
+            _MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun",
+                            "Jul","Aug","Sep","Oct","Nov","Dec"]
+            for m_idx, acc in self._val_month_gate_accum.items():
+                if acc["count"] == 0 or acc["sum"] is None:
+                    continue
+                mean_usage = acc["sum"] / acc["count"]  # [K]
+                for k, val in enumerate(mean_usage):
+                    self.log(
+                        f"val_moe/month_{_MONTH_NAMES[m_idx]}_expert_{k}",
+                        val.item(),
+                        on_epoch=True,
+                    )
 
         self._val_gate_sample = None
-
-        # Sea-bin performance bar chart
-        self._log_sea_bin_chart()
-
-        # Month-bin gate usage logging
-        _MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun",
-                        "Jul","Aug","Sep","Oct","Nov","Dec"]
-        for m_idx, acc in self._val_month_gate_accum.items():
-            if acc["count"] == 0 or acc["sum"] is None:
-                continue
-            mean_usage = acc["sum"] / acc["count"]  # [K]
-            for k, val in enumerate(mean_usage):
-                self.log(
-                    f"val_moe/month_{_MONTH_NAMES[m_idx]}_expert_{k}",
-                    val.item(),
-                    on_epoch=True,
-                )
-        # Reset for next epoch
+        # Always reset for next epoch (safe for non-MoE models as well).
         self._val_month_gate_accum = {m: {"sum": None, "count": 0} for m in range(12)}
 
+        # Sea-bin performance bar chart for both validation and eval loaders.
+        self._log_sea_bin_chart("val")
+        self._log_sea_bin_chart("eval")
+
+    def on_train_epoch_start(self) -> None:
+        self._reset_train_metric_accum()
+
     def on_train_epoch_end(self) -> None:
+        # Log aggregated train metrics once per epoch.
+        for task_name in self.auxiliary_tasks:
+            acc = self._train_metric_accum.get(task_name)
+            if acc is None or acc["count"] == 0 or acc["abs_err_sum"] is None:
+                continue
+
+            count = float(acc["count"])
+            count_t = acc["abs_err_sum"].new_tensor(count)
+
+            mae = acc["abs_err_sum"] / count_t
+            mse = acc["sq_err_sum"] / count_t
+            rmse = torch.sqrt(mse)
+            err_mean = acc["err_sum"] / count_t
+            y_mean = acc["target_sum"] / count_t
+            pred_mean = acc["pred_sum"] / count_t
+
+            y_var = (acc["target_sq_sum"] / count_t) - (y_mean ** 2)
+            pred_var = (acc["pred_sq_sum"] / count_t) - (pred_mean ** 2)
+            y_std = torch.sqrt(torch.clamp(y_var, min=0.0))
+            pred_std = torch.sqrt(torch.clamp(pred_var, min=0.0))
+
+            task_suffix = f"_{task_name}" if self.is_multi_task else ""
+            self.log(f"train_mae{task_suffix}", mae, on_step=False, on_epoch=True)
+            self.log(f"train_mse{task_suffix}", mse, on_step=False, on_epoch=True)
+            self.log(f"train_rmse{task_suffix}", rmse, on_step=False, on_epoch=True)
+            self.log(
+                f"train_error_min{task_suffix}",
+                acc["err_min"],
+                on_step=False,
+                on_epoch=True,
+            )
+            self.log(
+                f"train_error_max{task_suffix}",
+                acc["err_max"],
+                on_step=False,
+                on_epoch=True,
+            )
+            self.log(
+                f"train_error_mean{task_suffix}", err_mean, on_step=False, on_epoch=True
+            )
+            self.log(f"train_y_mean{task_suffix}", y_mean, on_step=False, on_epoch=True)
+            self.log(f"train_y_std{task_suffix}", y_std, on_step=False, on_epoch=True)
+            self.log(
+                f"train_pred_mean{task_suffix}", pred_mean, on_step=False, on_epoch=True
+            )
+            self.log(
+                f"train_pred_std{task_suffix}", pred_std, on_step=False, on_epoch=True
+            )
+
         if self.model_type == "transunet_gan":
             # Manual optimization - get first optimizer (generator)
             lr = self.trainer.optimizers[0].param_groups[0]["lr"]
@@ -1432,9 +1598,17 @@ class WaveBiasCorrector(pl.LightningModule):
                 prog_bar=False,
             )
 
-    def _accumulate_sea_bin_errors(self, y_pred: torch.Tensor, y_true: torch.Tensor,
-                                    mask: torch.Tensor, vhm0_raw: torch.Tensor):
+    def _accumulate_sea_bin_errors(
+        self,
+        y_pred: torch.Tensor,
+        y_true: torch.Tensor,
+        mask: torch.Tensor,
+        vhm0_raw: torch.Tensor,
+        split: str = "val",
+    ):
         """Accumulate squared and absolute errors per sea-state bin (validation only)."""
+        if split not in self._sea_bin_epoch_accum:
+            return
         min_h = min(y_pred.shape[-2], y_true.shape[-2], mask.shape[-2], vhm0_raw.shape[-2])
         min_w = min(y_pred.shape[-1], y_true.shape[-1], mask.shape[-1], vhm0_raw.shape[-1])
         pred = y_pred[:, 0, :min_h, :min_w].detach().cpu().numpy()
@@ -1452,7 +1626,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 sel = (raw_v >= b["min"]) & (raw_v < b["max"])
             if not sel.any():
                 continue
-            acc = self._val_sea_bin_accum[b["name"]]
+            acc = self._sea_bin_epoch_accum[split][b["name"]]
             acc["sum_sq"]  += float(np.sum(err[sel] ** 2))
             acc["sum_abs"] += float(np.sum(np.abs(err[sel])))
             acc["count"]   += int(sel.sum())
