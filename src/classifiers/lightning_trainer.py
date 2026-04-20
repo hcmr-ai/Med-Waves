@@ -34,7 +34,9 @@ _VAL_SEA_BINS = [
     {"name": "extreme_6_7", "label": "6–7m",  "min": 6.0,  "max": 7.0},
     {"name": "extreme_7_8", "label": "7–8m",  "min": 7.0,  "max": 8.0},
     {"name": "extreme_8_9", "label": "8–9m",  "min": 8.0,  "max": 9.0},
-    {"name": "extreme_9p",  "label": "≥9m",   "min": 9.0,  "max": float("inf")},
+    {"name": "extreme_9_10",  "label": "9-10",   "min": 9.0,  "max": 10.0},
+    {"name": "extreme_10_11", "label": "10-11",  "min": 10.0, "max": 11.0},
+    {"name": "extreme_11_12", "label": "11-12",  "min": 11.0, "max": 12.0},
 ]
 
 
@@ -1441,7 +1443,7 @@ class WaveBiasCorrector(pl.LightningModule):
         valid = mask[:, 0, :min_h, :min_w].bool().cpu().numpy()
 
         err  = pred[valid] - true[valid]
-        raw_v = raw[valid]
+        raw_v = true[valid]
 
         for b in _VAL_SEA_BINS:
             if b["max"] == float("inf"):
