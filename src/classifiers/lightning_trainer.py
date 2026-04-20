@@ -460,11 +460,11 @@ class WaveBiasCorrector(pl.LightningModule):
         if moe_aux is None or raw_vhm0 is None or "gate_weights" not in moe_aux:
             return
 
-        gate_weights = moe_aux["gate_weights"]
+        gate_weights = moe_aux["gate_weights"].detach()
         min_h = min(gate_weights.shape[-2], raw_vhm0.shape[-2], mask.shape[-2])
         min_w = min(gate_weights.shape[-1], raw_vhm0.shape[-1], mask.shape[-1])
         gates = gate_weights[:, :, :min_h, :min_w]
-        raw = raw_vhm0[:, 0, :min_h, :min_w]
+        raw = raw_vhm0[:, 0, :min_h, :min_w].detach()
         valid = mask[:, 0, :min_h, :min_w].bool()
         if not valid.any():
             return
@@ -1613,7 +1613,7 @@ class WaveBiasCorrector(pl.LightningModule):
         min_w = min(y_pred.shape[-1], y_true.shape[-1], mask.shape[-1], vhm0_raw.shape[-1])
         pred = y_pred[:, 0, :min_h, :min_w].detach().cpu().numpy()
         true = y_true[:, 0, :min_h, :min_w].detach().cpu().numpy()
-        raw  = vhm0_raw[:, 0, :min_h, :min_w].detach().cpu().numpy()
+        vhm0_raw[:, 0, :min_h, :min_w].detach().cpu().numpy()
         valid = mask[:, 0, :min_h, :min_w].bool().cpu().numpy()
 
         err  = pred[valid] - true[valid]
