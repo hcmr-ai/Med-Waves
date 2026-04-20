@@ -331,11 +331,21 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def _month_from_sincos(self, X):
         """Return integer month (0-11) per batch item from sin/cos_month channels."""
-        if X.shape[1] < 22:
+        # Derive indices dynamically from FEATURES_ORDER minus excluded columns.
+        try:
+            from src.commons.constants import FEATURES_ORDER
+            excluded = set(self.hparams.get("excluded_columns", []) if hasattr(self, "hparams") else [])
+            active = [f for f in FEATURES_ORDER if f not in excluded
+                      and f not in ("corrected_VHM0", "corrected_VTM02")]
+            sin_idx = active.index("sin_month")
+            cos_idx = active.index("cos_month")
+        except (ImportError, ValueError):
+            return None
+        if X.shape[1] <= max(sin_idx, cos_idx):
             return None
         H, W = X.shape[-2:]
-        sin_m = X[:, 20, H // 2, W // 2].detach().float()
-        cos_m = X[:, 21, H // 2, W // 2].detach().float()
+        sin_m = X[:, sin_idx, H // 2, W // 2].detach().float()
+        cos_m = X[:, cos_idx, H // 2, W // 2].detach().float()
         return (torch.atan2(sin_m, cos_m).mul(6.0 / torch.pi).round().long() % 12).tolist()
 
     def _accumulate_gate_by_month(self, gate_weights, mask, X):
