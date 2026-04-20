@@ -3625,7 +3625,7 @@ class ModelEvaluator:
         self.plot_rmse_maps()
         self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
-        self.plot_vhm0_distributions()
+        # self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         # self.plot_vhm0_distributions(vhm0_range=(11, 12))

@@ -202,6 +202,9 @@ class WaveBiasCorrector(pl.LightningModule):
             "val": self._empty_sea_bin_accum(),
             "eval": self._empty_sea_bin_accum(),
         }
+        # Per-prefix sea-bin accumulators for global/count-weighted epoch metrics.
+        # Structure: {"val": {"val_vhm0": {...}}, "eval": {"eval_vhm0": {...}}}
+        self._sea_bin_metric_epoch_accum = {"val": {}, "eval": {}}
         # Train metric accumulators (reset each train epoch).
         self._train_metric_accum = {}
         self._reset_train_metric_accum()
@@ -210,6 +213,29 @@ class WaveBiasCorrector(pl.LightningModule):
         return {
             b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "count": 0}
             for b in _VAL_SEA_BINS
+        }
+
+    def _empty_extended_sea_bin_accum(self):
+        sea_bins = [
+            {"name": "calm_0_1", "min": 0.0, "max": 1.0},
+            {"name": "light_1_2", "min": 1.0, "max": 2.0},
+            {"name": "moderate_2_3", "min": 2.0, "max": 3.0},
+            {"name": "rough_3_4", "min": 3.0, "max": 4.0},
+            {"name": "very_rough_4_5", "min": 4.0, "max": 5.0},
+            {"name": "extreme_5_6", "min": 5.0, "max": 6.0},
+            {"name": "extreme_6_7", "min": 6.0, "max": 7.0},
+            {"name": "extreme_7_8", "min": 7.0, "max": 8.0},
+            {"name": "extreme_8_9", "min": 8.0, "max": 9.0},
+            {"name": "extreme_9_10", "min": 9.0, "max": 10.0},
+            {"name": "extreme_10_11", "min": 10.0, "max": 11.0},
+            {"name": "extreme_11_12", "min": 11.0, "max": 12.0},
+            {"name": "extreme_12_13", "min": 12.0, "max": 13.0},
+            {"name": "extreme_13_14", "min": 13.0, "max": 14.0},
+            {"name": "extreme_14plus", "min": 14.0, "max": float("inf")},
+        ]
+        return {
+            b["name"]: {"sum_sq": 0.0, "sum_abs": 0.0, "sum_err": 0.0, "count": 0}
+            for b in sea_bins
         }
 
     def _reset_train_metric_accum(self):
@@ -1071,6 +1097,8 @@ class WaveBiasCorrector(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         print(f"\n>>> ON_VALIDATION_EPOCH_START CALLED - Epoch {self.current_epoch}")
+        # Reset epoch accumulators for global/count-weighted per-bin metrics.
+        self._sea_bin_metric_epoch_accum = {"val": {}, "eval": {}}
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """Validation step with multi-task support."""
@@ -1227,9 +1255,23 @@ class WaveBiasCorrector(pl.LightningModule):
 
         # Keep val_loss monitor for checkpoint/early stopping on main validation loader only.
         if dataloader_idx == 0:
-            self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+            self.log(
+                "val_loss",
+                loss,
+                prog_bar=True,
+                on_step=False,
+                on_epoch=True,
+                add_dataloader_idx=False,
+            )
         else:
-            self.log("eval_loss", loss, prog_bar=False, on_step=False, on_epoch=True)
+            self.log(
+                "eval_loss",
+                loss,
+                prog_bar=False,
+                on_step=False,
+                on_epoch=True,
+                add_dataloader_idx=False,
+            )
 
         # Log individual task losses
         for task_name, task_loss in task_losses.items():
@@ -1239,6 +1281,7 @@ class WaveBiasCorrector(pl.LightningModule):
                     task_loss,
                     on_step=False,
                     on_epoch=True,
+                    add_dataloader_idx=False,
                 )
 
         # Compute and log per-task metrics
@@ -1249,7 +1292,12 @@ class WaveBiasCorrector(pl.LightningModule):
             self._compute_and_log_task_metrics(
                 metric_predictions, metric_targets, mask, prefix=split_prefix
             )
-            self.log(f"{split_prefix}_valid_pixels", mask.sum().float(), on_epoch=True)
+            self.log(
+                f"{split_prefix}_valid_pixels",
+                mask.sum().float(),
+                on_epoch=True,
+                add_dataloader_idx=False,
+            )
 
             # Log sea-bin metrics for validation
             # For multi-task, log sea-bins for ALL tasks (with task-specific prefixes)
@@ -1526,6 +1574,41 @@ class WaveBiasCorrector(pl.LightningModule):
         self._log_sea_bin_chart("val")
         self._log_sea_bin_chart("eval")
 
+        # Flush globally-aggregated per-bin val/eval scalar metrics.
+        for split in ("val", "eval"):
+            for prefix, bins_acc in self._sea_bin_metric_epoch_accum[split].items():
+                for bin_name, acc in bins_acc.items():
+                    if acc["count"] <= 0:
+                        continue
+                    count = float(acc["count"])
+                    mae = acc["sum_abs"] / count
+                    rmse = float(np.sqrt(acc["sum_sq"] / count))
+                    bias = acc["sum_err"] / count
+                    self.log(
+                        f"{prefix}_{bin_name}_mae",
+                        mae,
+                        on_epoch=True,
+                        add_dataloader_idx=False,
+                    )
+                    self.log(
+                        f"{prefix}_{bin_name}_rmse",
+                        rmse,
+                        on_epoch=True,
+                        add_dataloader_idx=False,
+                    )
+                    self.log(
+                        f"{prefix}_{bin_name}_bias",
+                        bias,
+                        on_epoch=True,
+                        add_dataloader_idx=False,
+                    )
+                    self.log(
+                        f"{prefix}_{bin_name}_count",
+                        int(acc["count"]),
+                        on_epoch=True,
+                        add_dataloader_idx=False,
+                    )
+
     def on_train_epoch_start(self) -> None:
         self._reset_train_metric_accum()
 
@@ -1636,7 +1719,7 @@ class WaveBiasCorrector(pl.LightningModule):
     def _log_sea_bin_metrics(
         self, y_true: torch.Tensor, y_pred: torch.Tensor, prefix: str
     ):
-        """Log sea-bin metrics for different wave height ranges."""
+        """Log or accumulate sea-bin metrics for different wave height ranges."""
         # Convert to numpy for sea-bin calculation
         y_true_np = y_true.cpu().numpy()
         y_pred_np = y_pred.cpu().numpy()
@@ -1683,12 +1766,28 @@ class WaveBiasCorrector(pl.LightningModule):
                 mse = np.mean((bin_y_pred - bin_y_true) ** 2)
                 rmse = np.sqrt(mse)
                 bias = np.mean(bin_y_pred - bin_y_true)
-
-                # Log metrics with bin-specific names
-                self.log(f"{prefix}_{bin_name}_mae", mae, on_epoch=True)
-                self.log(f"{prefix}_{bin_name}_rmse", rmse, on_epoch=True)
-                self.log(f"{prefix}_{bin_name}_bias", bias, on_epoch=True)
-                self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
+                is_eval_or_val = prefix.startswith("val") or prefix.startswith("eval")
+                if is_eval_or_val:
+                    # For val/eval use epoch-global/count-weighted aggregation:
+                    # RMSE = sqrt(sum_sq / count), MAE = sum_abs / count.
+                    split = "eval" if prefix.startswith("eval") else "val"
+                    if prefix not in self._sea_bin_metric_epoch_accum[split]:
+                        self._sea_bin_metric_epoch_accum[split][
+                            prefix
+                        ] = self._empty_extended_sea_bin_accum()
+                    acc = self._sea_bin_metric_epoch_accum[split][prefix][bin_name]
+                    abs_err = np.abs(bin_y_pred - bin_y_true)
+                    err = bin_y_pred - bin_y_true
+                    acc["sum_abs"] += float(np.sum(abs_err))
+                    acc["sum_sq"] += float(np.sum(err**2))
+                    acc["sum_err"] += float(np.sum(err))
+                    acc["count"] += int(bin_count)
+                else:
+                    # Keep historical behavior for train prefixes.
+                    self.log(f"{prefix}_{bin_name}_mae", mae, on_epoch=True)
+                    self.log(f"{prefix}_{bin_name}_rmse", rmse, on_epoch=True)
+                    self.log(f"{prefix}_{bin_name}_bias", bias, on_epoch=True)
+                    self.log(f"{prefix}_{bin_name}_count", bin_count, on_epoch=True)
 
     def _build_scheduler(self, optimizer):
         """Build scheduler using scheduler factory"""
