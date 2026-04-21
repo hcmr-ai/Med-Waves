@@ -107,25 +107,25 @@ model:
   discriminator_lr_multiplier: 2.0 # Multiplier for discriminator learning rate (e.g., 2.0 = 2x generator LR)
   residual_penalty_lambda: 0.0 # L2 penalty weight on predicted residual (active only in residual mode)
   # TransUNet-specific knobs (used only when model_type: "transunet")
-  transunet_base_channels: 24
-  transunet_bottleneck_dim: 256
+  transunet_base_channels: 16
+  transunet_bottleneck_dim: 128
   transunet_patch_size: 15
-  transunet_num_layers: 2
+  transunet_num_layers: 1
   transunet_num_heads: 4
-  transformer_dropout: 0.0
+  transformer_dropout: 0.2
   transformer_use_coord_pos_enc: true
   # Set this to sea-mask channel index only when add_sea_mask_channel=true and in_channels includes it.
   transformer_sea_mask_channel_index: 15
   # MoE TransUNet knobs (used only when model_type: "moe_transunet")
   num_experts: 3
   gate_temperature: 1.0
-  gate_input_mode: "features"   # "features" | "input_channels" (physics-informed)
-  gate_input_channels: null       # e.g. [0, 1] for VHM0 + wind speed; used when gate_input_mode="input_channels"
+  gate_input_mode: "features" # "features" | "input_channels" (physics-informed)
+  gate_input_channels: null # e.g. [0, 1] for VHM0 + wind speed; used when gate_input_mode="input_channels"
   gate_entropy_weight: 0.0
-  gate_balance_weight: 0.01
+  gate_balance_weight: 0.0
   gate_prior_weight: 0.0
   gate_bin_edges: [1.0, 3.0]
-  expert_diversity_weight: 0.0   # penalise pairwise cosine-similarity of expert heads
+  expert_diversity_weight: 0.0 # penalise pairwise cosine-similarity of expert heads
   expert_dropout: 0.0
   return_gate_maps: true
   # Learning rate scheduler configuration
@@ -189,8 +189,8 @@ checkpoint:
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered/epoch=14-val_loss=0.04.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_atlantic/epoch=02-val_loss=0.16.ckpt
-  resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_pos_enc_sea_mask_18-21_mse_48_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean/epoch=02-val_loss=0.01.ckpt
-  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_24_256_beta_0.05_gate_balance
+  resume_from_checkpoint: null
+  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
   s3_sync_dir: null # s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
@@ -199,8 +199,8 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_moe_transunet_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_24_256_beta_0.05_gate_balance
-  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_transunet_pos_enc_sea_mask_18-21_mse_48_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean
+  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
+  experiment_name: checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
   use_comet: true
   comet_tags:
     [
@@ -215,4 +215,4 @@ logging:
       "mediterranean",
       "cosine_annealing_lr",
     ]
-  comet_notes: "DNN training for wave height correction using MoE TransUNet architecture with Bin-Balanced Smooth L1 loss and LambdaLR scheduler for Mediterranean region with bias_correction features and multitask training for VHM0 and VTM02 and beta 0.05"
+  comet_notes: "MoE TransUNet smaller: base_ch=16, bottleneck=128, 1 transformer layer, dropout=0.1, gate_balance=0 — testing whether reduced capacity fixes best_epoch=0 overfitting"
