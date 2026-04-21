@@ -129,6 +129,7 @@ class ModelEvaluator:
         sampled_points_csv: Optional[str] = None,
         timestamps_csv: Optional[str] = None,
         eval_task: Optional[str] = None,
+        save_predictions: bool = False,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -359,6 +360,7 @@ class ModelEvaluator:
         # Sampled grid-point time-series recording
         self.sampled_points_csv = sampled_points_csv
         self.timestamps_csv = timestamps_csv
+        self.save_predictions = save_predictions
         self._grid_point_indices: Optional[List[dict]] = None  # set by _setup_grid_point_sampling
         self._grid_point_records: List[dict] = []
         self._gp_ts_map: dict = self._load_ts_map(timestamps_csv)
@@ -3618,6 +3620,17 @@ class ModelEvaluator:
         print("Saving grid-point time-series CSV...")
         self._save_grid_point_csv()
 
+        # Save raw prediction samples for offline plot experimentation
+        if self.save_predictions:
+            predictions_path = self.output_dir / "plot_samples.npz"
+            np.savez_compressed(
+                predictions_path,
+                y_true=np.array(self.plot_samples["y_true"]),
+                y_pred=np.array(self.plot_samples["y_pred"]),
+                vhm0=np.array(self.plot_samples["vhm0"]),
+            )
+            print(f"  Prediction samples saved → {predictions_path}")
+
         # Create plots using samples
         print("Creating plots...")
         self.plot_sea_bin_metrics(sea_bin_metrics)
@@ -3720,6 +3733,12 @@ def main():
             "(columns: pt_stem, hour_idx, timestamp). "
             "Required for correct timestamps in grid_point_timeseries.csv."
         ),
+    )
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        default=False,
+        help="Save plot_samples (y_true, y_pred, vhm0) to plot_samples.npz in the output dir",
     )
     args = parser.parse_args()
 
@@ -4066,6 +4085,7 @@ def main():
             low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
             sampled_points_csv=args.sampled_points_csv,
             timestamps_csv=args.timestamps_csv,
+            save_predictions=args.save_predictions,
         )
 
         evaluator.evaluate()
