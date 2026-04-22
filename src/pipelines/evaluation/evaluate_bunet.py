@@ -697,6 +697,11 @@ class ModelEvaluator:
             for bin_config in self.sea_bins
         }
 
+        # Bin-conditional spatial error accumulators keyed by (lo, hi) true-wave bin
+        self.bin_spatial_accumulators = {
+            (b["min"], b["max"]): {"error_sq": [], "count": []}
+            for b in self.sea_bins
+        }
         self.spatial_rmse_accumulators = {}
         self.low_bin_spatial_accumulators = {
             f"{lo:.1f}_{hi:.1f}": {
@@ -2051,6 +2056,18 @@ class ModelEvaluator:
                     "count": count_map.sum(axis=(0, 1)),  # (H, W)
                 }
             )
+
+        # Bin-conditional spatial accumulators (binned by true wave height)
+        if self.eval_in_bias_mode and vhm0 is not None:
+            true_wave_np = (y + vhm0).cpu().numpy()  # (N, C, H, W)
+            for (lo, hi), acc in self.bin_spatial_accumulators.items():
+                bin_mask = ((true_wave_np >= lo) & (true_wave_np < hi)).astype(np.float32)
+                bin_mask = bin_mask * count_map
+                if bin_mask.sum() > 0:
+                    acc["error_sq"].append(
+                        (error_map * bin_mask).sum(axis=(0, 1))  # (H, W)
+                    )
+                    acc["count"].append(bin_mask.sum(axis=(0, 1)))  # (H, W)
 
         # Apply mask (including Atlantic exclusion)
         mask_combined = mask.clone()
@@ -3437,6 +3454,32 @@ class ModelEvaluator:
             dataset_coords=dataset_coords,
         )
 
+    def plot_bin_spatial_rmse_maps(self):
+        """Plot spatial RMSE maps conditioned on true wave height bin."""
+        import matplotlib.pyplot as plt
+
+        output_dir = self.output_dir / "bin_spatial_rmse"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for (lo, hi), acc in self.bin_spatial_accumulators.items():
+            if not acc["error_sq"]:
+                continue
+            sum_sq = np.sum(acc["error_sq"], axis=0)   # (H, W)
+            count  = np.sum(acc["count"],    axis=0)   # (H, W)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rmse = np.where(count > 0, np.sqrt(sum_sq / count), np.nan)
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            im = ax.imshow(rmse, origin="upper", cmap="YlOrRd", aspect="auto")
+            plt.colorbar(im, ax=ax, label="RMSE (m)")
+            hi_label = f"{hi:.0f}" if hi < float("inf") else "∞"
+            ax.set_title(f"Spatial RMSE | true wave {lo:.0f}–{hi_label}m  (n={int(count.sum()):,})")
+            ax.axis("off")
+            fname = f"spatial_rmse_true_{lo:.0f}_{hi_label}m.png"
+            fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"Saved bin spatial RMSE map → {output_dir / fname}")
+
     def plot_low_bin_spatial_maps(self):
         """Plot spatial diagnostics for ultra-calm true-wave sub-bins."""
         dataset_coords = None
@@ -3686,6 +3729,7 @@ class ModelEvaluator:
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_bin_spatial_rmse_maps()
         self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
         # self.plot_vhm0_distributions()
