@@ -7,7 +7,7 @@ data:
   file_pattern: "WAVEAN*.pt"
   # diagnostics_parquet_data_path: "/mnt/blobstorage/parquet/hourly/year=2023/"
   # diagnostics_parquet_file_pattern: "WAVEAN2023*.parquet"
-  train_year: [2018, 2019, 2020, 2021]
+  train_year: [2017, 2018, 2019, 2020, 2021]
   val_year: [2022]
   val_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   test_year: [2023]
@@ -36,9 +36,10 @@ data:
   # Post-processing: soft blend DNN bias with static bias map during evaluation
   static_bias_map_path: /mnt/blobstorage/diagnostics/static_baseline/mediterranean/static_bias_map_mediterranean.npy
   blend_sigma: null #0.05 # 0.30 # 0.20 # 0.0001 #0.20 #0.10  # meters; controls pull toward static map (lower = more aggressive)
+  uncertainty_blend_sigma: null # meters; controls pull toward static map (lower = more aggressive)
   domain_mean_recalibration: false # re-anchor DNN domain-average to static map level per timestep
   # Optional post-processing: blend DNN bias with EDCDF-implied bias (dynamic prior)
-  edcdf_model_path: /mnt/blobstorage/diagnostics/edcdf_regional/atlantic/edcdf_atlantic_train_2018-2019-2020-2021_test_2017-2022-2023/models/edcdf_atlantic_train_2018-2019-2020-2021_test_2017-2022-2023.joblib # e.g. /mnt/blobstorage/edcdf_regional/atlantic/.../models/...joblib
+  edcdf_model_path: /mnt/blobstorage/diagnostics/edcdf_regional/mediterranean/edcdf_mediterranean_train_2018-2019-2020-2021_test_2017-2022-2023/models/edcdf_mediterranean_train_2018-2019-2020-2021_test_2017-2022-2023.joblib # e.g. /mnt/blobstorage/edcdf_regional/atlantic/.../models/...joblib
   edcdf_blend_sigma: null #0.05  # meters; Gaussian trust sigma for DNN-vs-EDCDF bias blending
   # Optional hard fallback: in these raw-wave bins, replace DNN bias with EDCDF bias (100%)
   edcdf_hard_fallback_bins: null #[[0.0, 1.0], [1.0, 2.0]] # [[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
@@ -49,6 +50,9 @@ data:
   # calm(0-1m): a=0.98145, c=-0.06786; light(1-2m): a=0.99852, c=-0.08003
   low_bin_affine_source: "raw" # "true" is eval-only diagnostic; use "raw" for deployment-safe runs
   low_bin_affine_params: null
+  # prior_hard_fallback_bins: [[0.0, 1.0]]
+  # prior_fallback_bin_source: "true"
+  # prior_fallback_target: "raw"
   # Uncomment to enable the fitted low-bin affine calibration:
   # low_bin_affine_params:
   #   - min: 0.0
@@ -63,7 +67,7 @@ data:
   # target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
   target_columns: # Multi-task: {task_name: column_name}. Single-task: {task_name: column_name}
     vhm0: "corrected_VHM0"
-    vtm02: "corrected_VTM02"
+    # vtm02: "corrected_VTM02"
 
   excluded_columns: [
       "time",
@@ -71,7 +75,7 @@ data:
       "longitude",
       "timestamp",
       # "VTM02",
-      # "corrected_VHM0",
+      "corrected_VHM0",
       "corrected_VTM02", # now a target in target_columns
       "WDIR",
       "VMDR",
@@ -149,8 +153,8 @@ model:
   tasks_config:
     - name: "vhm0"
       weight: 1.0
-    - name: "vtm02"
-      weight: 1.0
+    # - name: "vtm02"
+    #   weight: 1.0
 # Training configuration
 training:
   batch_size: 32
@@ -189,8 +193,8 @@ checkpoint:
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered/epoch=14-val_loss=0.04.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_atlantic/epoch=02-val_loss=0.16.ckpt
-  resume_from_checkpoint: null
-  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
+  resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_beta_0.05/epoch=02-val_loss=0.22.ckpt
+  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_17-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05
   s3_sync_dir: null # s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
@@ -199,8 +203,8 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
-  experiment_name: checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.1_beta_0.05
+  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_17-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05
+  experiment_name: checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_beta_0.05
   use_comet: true
   comet_tags:
     [
@@ -212,7 +216,7 @@ logging:
       "vhm0",
       "vtm02",
       "region_filter",
-      "mediterranean",
+      "atlantic",
       "cosine_annealing_lr",
     ]
   comet_notes: "MoE TransUNet smaller: base_ch=16, bottleneck=128, 1 transformer layer, dropout=0.1, gate_balance=0 — testing whether reduced capacity fixes best_epoch=0 overfitting"
