@@ -703,6 +703,8 @@ class ModelEvaluator:
             for b in self.sea_bins
         }
         self.spatial_rmse_accumulators = {}
+        # Per-pixel relative improvement accumulator: (|base_err| - |model_err|) / |base_err| * 100
+        self._rel_improvement_samples = []
         self.low_bin_spatial_accumulators = {
             f"{lo:.1f}_{hi:.1f}": {
                 "sum_delta_abs_err": None,
@@ -2068,6 +2070,14 @@ class ModelEvaluator:
                         (error_map * bin_mask).sum(axis=(0, 1))  # (H, W)
                     )
                     acc["count"].append(bin_mask.sum(axis=(0, 1)))  # (H, W)
+
+        # Per-pixel relative improvement accumulation
+        if error_map_baseline is not None:
+            eps = 1e-6
+            model_err_flat = np.sqrt(error_map[count_map > 0])
+            base_err_flat  = np.sqrt(error_map_baseline[count_map > 0])
+            rel_imp = (base_err_flat - model_err_flat) / (base_err_flat + eps) * 100.0
+            self._rel_improvement_samples.append(rel_imp.astype(np.float32))
 
         # Apply mask (including Atlantic exclusion)
         mask_combined = mask.clone()
@@ -3587,6 +3597,27 @@ class ModelEvaluator:
             vhm0_range=vhm0_range,
         )
 
+    def compute_per_point_improvement_stats(self, epsilon_m: float = 0.01) -> Dict:
+        """Compute per-pixel relative improvement statistics.
+
+        epsilon_m: minimum absolute improvement (m) to count as genuinely improved.
+        """
+        if not self._rel_improvement_samples:
+            return {}
+        all_vals = np.concatenate(self._rel_improvement_samples)
+        finite = all_vals[np.isfinite(all_vals)]
+        if len(finite) == 0:
+            return {}
+        improved = np.sum(finite > (epsilon_m * 100 / 1.0))  # epsilon as relative %
+        return {
+            "mean_pct": float(np.mean(finite)),
+            "median_pct": float(np.median(finite)),
+            "std_pct": float(np.std(finite)),
+            "pct_improved": float(100.0 * improved / len(finite)),
+            "n_pixels": int(len(finite)),
+            "epsilon_m": epsilon_m,
+        }
+
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
         print("\n" + "=" * 80)
@@ -3616,6 +3647,14 @@ class ModelEvaluator:
                 print(
                     f"  RMSE Improvement:     {overall_metrics['rmse_improvement_pct']:.2f}%"
                 )
+
+        per_point = self.compute_per_point_improvement_stats()
+        if per_point:
+            print("\n=== Per-point Relative Improvement (%) ===")
+            print(f"  Mean:              {per_point['mean_pct']:.2f}%")
+            print(f"  Median:            {per_point['median_pct']:.2f}%")
+            print(f"  Std:               {per_point['std_pct']:.2f}%")
+            print(f"  Improved samples:  {per_point['pct_improved']:.2f}%  (ε={per_point['epsilon_m']}m)")
 
         print("\nSea-Bin Metrics:")
         print(
@@ -3691,12 +3730,14 @@ class ModelEvaluator:
         category_breakdown = self.compute_category_breakdown()
 
         # Save metrics
+        per_point_stats = self.compute_per_point_improvement_stats()
         with open(self.output_dir / "metrics.json", "w") as f:
             json.dump(
                 {
                     "overall": overall_metrics,
                     "sea_bins": sea_bin_metrics,
-                    "category_breakdown": category_breakdown,  # NEW: Add breakdown
+                    "category_breakdown": category_breakdown,
+                    "per_point_improvement": per_point_stats,
                 },
                 f,
                 indent=2,
