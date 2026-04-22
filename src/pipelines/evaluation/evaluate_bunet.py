@@ -116,6 +116,7 @@ class ModelEvaluator:
         high_wave_ckpt: str = None,
         static_bias_map_path: str = None,
         blend_sigma: float = None,
+        uncertainty_blend_sigma: float = None,
         domain_mean_recalibration: bool = False,
         edcdf_model_path: str = None,
         edcdf_blend_sigma: float = None,
@@ -385,8 +386,13 @@ class ModelEvaluator:
         self.static_bias_valid = None
         self.static_domain_mean = None
         self.blend_sigma = blend_sigma
+        self.uncertainty_blend_sigma = uncertainty_blend_sigma
         self.domain_mean_recalibration = domain_mean_recalibration
-        if static_bias_map_path and (blend_sigma is not None or domain_mean_recalibration):
+        if static_bias_map_path and (
+            blend_sigma is not None
+            or uncertainty_blend_sigma is not None
+            or domain_mean_recalibration
+        ):
             self._load_static_bias_map(static_bias_map_path)
 
         # Optional EDCDF prior for Gaussian trust blending of predicted bias
@@ -1469,6 +1475,30 @@ class ModelEvaluator:
         blended = trust * dnn_bias + (1 - trust) * static
         return torch.where(valid, blended, dnn_bias)
 
+    def _apply_uncertainty_blend(
+        self, dnn_bias: torch.Tensor, uncertainty: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Blend DNN bias toward static map using MoE gate uncertainty as trust signal.
+
+        trust = exp(-uncertainty^2 / (2*sigma^2))
+        blended = trust * dnn_bias + (1-trust) * static_bias
+
+        For K=3 experts, uncertainty ∈ [0, 0.67]; calibrate sigma in that range.
+        """
+        if (
+            self.static_bias_map is None
+            or self.uncertainty_blend_sigma is None
+            or uncertainty is None
+        ):
+            return dnn_bias
+        h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+        static = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0)
+        valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0)
+        u = uncertainty[:, :h, :w].unsqueeze(1)  # [B, 1, H, W]
+        trust = torch.exp(-u ** 2 / (2 * self.uncertainty_blend_sigma ** 2))
+        blended = trust * dnn_bias + (1 - trust) * static
+        return torch.where(valid, blended, dnn_bias)
+
     def _apply_edcdf_blend(
         self,
         dnn_bias: torch.Tensor,
@@ -1868,7 +1898,7 @@ class ModelEvaluator:
 
     def _process_batch(
         self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None,
-        batch_idx: int = 0, timestamps_raw=None,
+        batch_idx: int = 0, timestamps_raw=None, moe_uncertainty=None,
     ):
         """Process a single batch and update accumulators.
 
@@ -1917,6 +1947,7 @@ class ModelEvaluator:
         if self.eval_in_bias_mode:
             y_pred = self._recalibrate_domain_mean(y_pred, mask)
             y_pred = self._apply_static_blend(y_pred)
+            y_pred = self._apply_uncertainty_blend(y_pred, moe_uncertainty)
             y_pred = self._apply_low_bin_affine_calibration(
                 y_pred, vhm0, y_true_bias=y
             )
@@ -2728,6 +2759,11 @@ class ModelEvaluator:
                     else:
                         y_pred = self.model(X)
 
+                # Extract MoE uncertainty before the dict is consumed.
+                moe_uncertainty = None
+                if isinstance(y_pred, dict) and "uncertainty" in y_pred:
+                    moe_uncertainty = y_pred["uncertainty"].detach()  # [B, H, W]
+
                 # Normalize multi-task payloads to tensors before alignment.
                 y_pred = _extract_task_tensor(y_pred, "model prediction")
                 y = _extract_task_tensor(y, "target batch")
@@ -2750,6 +2786,8 @@ class ModelEvaluator:
 
                 if confidence is not None:
                     confidence = confidence[:, :min_h, :min_w]
+                if moe_uncertainty is not None:
+                    moe_uncertainty = moe_uncertainty[:, :min_h, :min_w]
 
                 # Unnormalize if needed
                 if self.normalize_target and self.normalizer is not None:
@@ -2784,6 +2822,7 @@ class ModelEvaluator:
                     prior_bias_batch,
                     batch_idx=batch_idx,
                     timestamps_raw=timestamps_raw,
+                    moe_uncertainty=moe_uncertainty,
                 )
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
@@ -4073,6 +4112,7 @@ def main():
             high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
             static_bias_map_path=data_config.get("static_bias_map_path", None),
             blend_sigma=data_config.get("blend_sigma", None),
+            uncertainty_blend_sigma=data_config.get("uncertainty_blend_sigma", None),
             domain_mean_recalibration=data_config.get("domain_mean_recalibration", False),
             edcdf_model_path=data_config.get("edcdf_model_path", None),
             edcdf_blend_sigma=data_config.get("edcdf_blend_sigma", None),
