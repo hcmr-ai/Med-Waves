@@ -392,6 +392,7 @@ class ModelEvaluator:
             blend_sigma is not None
             or uncertainty_blend_sigma is not None
             or domain_mean_recalibration
+            or (prior_hard_fallback_bins and prior_fallback_target == "static")
         ):
             self._load_static_bias_map(static_bias_map_path)
 
@@ -444,7 +445,7 @@ class ModelEvaluator:
             if prior_fallback_target is not None
             else "prior"
         )
-        if self.prior_fallback_target not in {"prior", "raw"}:
+        if self.prior_fallback_target not in {"prior", "raw", "static"}:
             logger.warning(
                 f"Unknown prior_fallback_target='{prior_fallback_target}', using 'prior'"
             )
@@ -1619,8 +1620,9 @@ class ModelEvaluator:
         """Replace DNN bias with configured fallback target in selected bins.
 
         prior_fallback_target:
-          - "prior": replace with static prior bias
-          - "raw": replace with raw baseline in wave space (bias=0)
+          - "raw":    zero correction (bias=0, corrected = raw vhm0)
+          - "static": static bias map (requires static_bias_map_path to be set)
+          - "prior":  residual prior bias (only in predict_residual_to_prior mode)
         """
         if not self.prior_hard_fallback_bins or raw_uncorrected is None:
             return dnn_bias
@@ -1639,6 +1641,15 @@ class ModelEvaluator:
         if self.prior_fallback_target == "raw":
             replacement_bias = torch.zeros_like(dnn_bias)
             valid = torch.isfinite(raw_uncorrected)
+        elif self.prior_fallback_target == "static":
+            if self.static_bias_map is None:
+                logger.warning(
+                    "prior_fallback_target='static' requires static_bias_map_path; skipping fallback."
+                )
+                return dnn_bias
+            h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+            replacement_bias = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0).expand_as(dnn_bias)
+            valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0).expand_as(dnn_bias)
         else:
             if prior_bias is None:
                 return dnn_bias
