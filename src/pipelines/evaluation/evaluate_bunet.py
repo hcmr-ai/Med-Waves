@@ -376,7 +376,19 @@ class ModelEvaluator:
             "y_pred": [],
             "y_uncorrected": [],
             "vhm0": [],
+            "lat": [],
+            "lon": [],
         }
+
+        # Load coordinate grids once for plot_samples coordinate accumulation
+        self._coord_lat_grid: Optional[np.ndarray] = None
+        self._coord_lon_grid: Optional[np.ndarray] = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                self._coord_lat_grid, self._coord_lon_grid = dataset.get_coordinates()
+        except Exception as e:
+            logger.warning(f"Could not load coordinate grids for plot_samples: {e}")
 
         # Timestamp cache for seasonal analysis
         self._timestamps_cache = {}
@@ -2329,6 +2341,20 @@ class ModelEvaluator:
             else:
                 self.plot_samples["vhm0"].extend(y_true_np)
 
+            # Accumulate coordinates aligned to the same mask
+            if self._coord_lat_grid is not None and self._coord_lon_grid is not None:
+                h = mask_combined.shape[2]
+                w = mask_combined.shape[3]
+                B = mask_combined.shape[0]
+                lat_crop = self._coord_lat_grid[:h, :w]  # (H, W)
+                lon_crop = self._coord_lon_grid[:h, :w]
+                # tile B times to match (B, 1, H, W) flatten layout
+                lat_tiled = np.tile(lat_crop[np.newaxis, np.newaxis], (B, 1, 1, 1)).flatten()
+                lon_tiled = np.tile(lon_crop[np.newaxis, np.newaxis], (B, 1, 1, 1)).flatten()
+                mask_np = mask_combined.flatten().cpu().numpy().astype(bool)
+                self.plot_samples["lat"].extend(lat_tiled[mask_np])
+                self.plot_samples["lon"].extend(lon_tiled[mask_np])
+
     def _update_category_stats(
         self, bin_name, category, features, y_true, y_pred, timestamps, confidence
     ):
@@ -3762,6 +3788,8 @@ class ModelEvaluator:
                 y_true=np.array(self.plot_samples["y_true"]),
                 y_pred=np.array(self.plot_samples["y_pred"]),
                 vhm0=np.array(self.plot_samples["vhm0"]),
+                lat=np.array(self.plot_samples["lat"]),
+                lon=np.array(self.plot_samples["lon"]),
             )
             print(f"  Prediction samples saved → {predictions_path}")
 
