@@ -3820,7 +3820,9 @@ class ModelEvaluator:
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
 
 
-def main():
+def main(evaluator_class=None):
+    if evaluator_class is None:
+        evaluator_class = ModelEvaluator
     parser = argparse.ArgumentParser(description="Evaluate WaveBiasCorrector model")
     parser.add_argument(
         "--checkpoint",
@@ -4207,7 +4209,7 @@ def main():
                 )
 
         # Create evaluator and run evaluation
-        evaluator = ModelEvaluator(
+        evaluator = evaluator_class(
             model=model,
             test_loader=test_loader,
             output_dir=Path(args.output_dir)
