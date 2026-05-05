@@ -1,0 +1,507 @@
+import pandas as pd
+import os
+import copy
+import seaborn as sns
+import matplotlib
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+
+
+matplotlib.use("Agg")
+
+
+
+def get_stats(x):
+    return np.mean(x), np.std(x), np.median(x), np.percentile(x, 95)
+
+def rmse(x, y):
+    return np.sqrt(np.mean((x - y) ** 2))
+
+def plot_map(data_type):
+    plt.figure(figsize=(10, 5))
+    ax = plt.axes(projection=ccrs.PlateCarree())
+
+    # ---- symmetric color scale ----
+    if metric == "impr":
+        vmax = 35.146782
+    else:
+        vmax = np.nanpercentile(np.abs(Z.values), 99)  # more robust than max
+    # vmax = np.nanpercentile(np.abs(Z.values), 99)  # more robust than max
+
+    im = ax.pcolormesh(
+        Lon, Lat, Z.values,
+        cmap="RdBu",  # cleaner than RdYlBu
+        vmin=-vmax,
+        vmax=vmax,
+        shading="auto",
+        transform=ccrs.PlateCarree(),
+        zorder=1
+    )
+
+    # ---- map styling ----
+    ax.set_extent([-6, 36, 30, 46])
+
+    ax.add_feature(cfeature.LAND, facecolor="#f0f0f0", zorder=0)
+    ax.add_feature(cfeature.OCEAN, facecolor="#ffffff", zorder=0)
+
+    ax.coastlines(resolution="10m", linewidth=0.6, color="black", zorder=2)
+    ax.contour(
+        Lon, Lat, Z.values,
+        levels=8,
+        colors="black",
+        linewidths=0.3,
+        alpha=0.3
+    )
+    # subtle gridlines
+    gl = ax.gridlines(
+        draw_labels=True,
+        linewidth=0.3,
+        color="gray",
+        alpha=0.4,
+        linestyle="--"
+    )
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.xlabel_style = {"size": 9}
+    gl.ylabel_style = {"size": 9}
+
+    # ---- colorbar ----
+    cbar = plt.colorbar(im, ax=ax, orientation="vertical", pad=0.02, shrink=0.9)
+
+    cbar.set_label(
+        "Relative RMSE improvement (%)",
+        fontsize=11,
+        fontweight="bold",
+    )
+
+    cbar.ax.tick_params(labelsize=9)
+
+    plt.tight_layout()
+    plt.savefig(f"{out_dir}/rmse_{metric}_{data_type}_map.pdf", dpi=300, bbox_inches="tight")
+    plt.close()
+
+def get_lat_lon_Z(dframe):
+    rmse_unc = dframe.groupby(["lat", "lon"]).apply(
+        lambda g: rmse(g["y_true"], g["y_unco"])
+    ).reset_index(name="rmse_unc")
+    rmse_cor = dframe.groupby(["lat", "lon"]).apply(
+        lambda g: rmse(g["y_true"], g["y_pred"])
+    ).reset_index(name="rmse_cor")
+
+    # merge
+    d = rmse_unc.merge(rmse_cor, on=["lat", "lon"])
+
+    # difference (what your plot shows)
+    d["rmse_diff"] = d["rmse_unc"] - d["rmse_cor"]
+    d["rmse_impr"] = 100 * ((d["rmse_unc"] - d["rmse_cor"]) / d["rmse_unc"])
+
+    # unique grid
+    lats_unique = np.sort(d["lat"].unique())
+    lons_unique = np.sort(d["lon"].unique())
+
+    # pivot to grid
+    Z = d.pivot(index="lat", columns="lon", values=f"rmse_{metric}")
+
+    # align axes
+    Z = Z.reindex(index=lats_unique, columns=lons_unique)
+
+    Lon, Lat = np.meshgrid(lons_unique, lats_unique)
+
+    f.write("\nMean Relative Per point statistics per location:\n")
+    f.write(f'{d[d[f"rmse_{metric}"] > 0][f"rmse_{metric}"].describe()}\n')
+    improved_locations = len(d[d[f"rmse_{metric}"] > 0][f"rmse_{metric}"])
+    f.write(f"\nImproved locations (locations_only): {improved_locations}\n"
+            f"Improvement: {100 * (improved_locations / len(d))}\n")
+
+    return Lat, Lon, Z
+
+def filter_area(data_full, lat_min, lon_min, lat_max, lon_max):
+    df_filtered = data_full[
+        (data_full["lon"] >= lon_min) & (data_full["lon"] <= lon_max) &
+        (data_full["lat"] >= lat_min) & (data_full["lat"] <= lat_max)
+        ]
+    return df_filtered
+
+def evaluate(dataset, denoise):
+    df = copy.deepcopy(dataset)
+
+    # ---- Per-sample squared error improvement ----
+    df["err_unc"] = (df["y_unco"] - df["y_true"]) ** 2
+    df["err_pred"] = (df["y_pred"] - df["y_true"]) ** 2
+
+    df["delta"] = df["err_unc"] - df["err_pred"]  # >0 means improvement
+
+    if denoise:
+        abs_th = denoise
+        sq_th = abs_th ** 2
+        mask = df["err_unc"] > sq_th
+        f.write(f"\nDenoising: \nabs err > {abs_th:.2f} m  ->  sq err > {sq_th:.4g}  ->  coverage {100 * np.mean(mask):.2f}%\n")
+
+        df = df[mask]
+        # improvement_pct = (df["err_unc"][mask] - df["err_pred"][mask]) / df["err_unc"][mask] * 100
+
+    lat, lon, z = get_lat_lon_Z (df)
+    rmse_y_unco = rmse(df["y_unco"], df["y_true"])
+    rmse_y_pred = rmse(df["y_pred"], df["y_true"])
+    global_rmse = 100 * ((rmse_y_unco - rmse_y_pred) / rmse_y_unco)
+    f.write(f"Global RMSE (samples level): {global_rmse}\n\n")
+
+    improved_samples = np.sum(df["delta"] > 0)
+    improvement = 100 * (improved_samples / len(df))
+    f.write(f"Per point squared improvement stats:\n{df["delta"].describe()}\n\n"
+            f"(y_unc - y_true)^2 - (y_pred-y_true)^2 Globally: doesn't group by per location to count the improvement of the location\n\n"
+            f"Improved samples (including hours): {improved_samples}\n"
+            f"Improvement (samples percentage): {improvement}\n"
+            f"Mean Improvement (mean_delta): {df['delta'].mean()},s={df['delta'].std()}\n")
+
+    #----- Per sample relative improvement ----- #
+    eps = 1e-8
+    improvement_pct = (df["delta"] / (df["err_unc"] + eps)) * 100
+    bad_mask = improvement_pct < 0
+    bad_improvements = improvement_pct[bad_mask]
+
+    # ---- Stats ----
+    mean_improvement = np.mean(improvement_pct)
+    median_improvement = np.median(improvement_pct)
+    std_improvement = np.std(improvement_pct)
+    count_improved = np.sum(improvement_pct > 0)
+    percentage_improved = 100 * count_improved / len(improvement_pct)
+
+    f.write("\n=== Per-sample Relative Improvement (%) ===\n")
+    f.write(f"Mean: {mean_improvement:.2f}%\n")
+    f.write(f"Std: {std_improvement:.2f}%\n")
+    f.write(f"Median: {median_improvement:.2f}%\n")
+    f.write(f"Improved samples: {percentage_improved:.2f}%\n\n")
+
+    f.write("=== Degraded samples (model worse) ===\n")
+    f.write(f"Count: {len(bad_improvements)} ({100 * len(bad_improvements) / len(improvement_pct):.2f}%)\n")
+    f.write(f"Mean: {np.mean(bad_improvements):.2f}%\n")
+    f.write(f"Std: {np.std(bad_improvements):.2f}%\n")
+    f.write(f"Median: {np.median(bad_improvements):.2f}%\n")
+
+    y_bad = df["y_true"][bad_mask]
+
+    f.write("\n=== Wave height (bad samples) ===\n")
+    f.write(f"Mean Hs: {np.mean(y_bad):.2f}\n")
+    f.write(f"Std Hs: {np.std(y_bad):.2f}\n")
+    f.write(f"Median Hs: {np.median(y_bad):.2f}\n")
+    f.write(f"P90 Hs: {np.percentile(y_bad, 90):.2f}\n")
+
+    return lat, lon, z, df
+
+def plot_dist(dfd, path):
+    ref_color = "#4285f4"
+    trans_color = "#eb9999"
+    uncor_color = '#484848'#"#a4c2f4"
+
+    fig, ax = plt.subplots(figsize=(10, 7))  # Αυξήσαμε ελαφρώς το figsize για να χωρέσουν τα μεγαλύτερα γράμματα
+    label_ref = "Reference"
+    label_tr = "TransUNet"
+    label_unc = "Uncorrected"
+
+    sns.kdeplot(dfd["y_true"], ax=ax, label=label_ref, color=ref_color, linewidth=2.5, bw_adjust=0.7)
+    sns.kdeplot(dfd["y_pred"], ax=ax, label=label_tr, color=trans_color, linewidth=1.5, bw_adjust=0.7, linestyle="--")
+    sns.kdeplot(dfd["y_unco"], ax=ax, label=label_unc, color=uncor_color, linewidth=1.5, bw_adjust=0.7, alpha=0.5)
+    ax.set_xlim(0, 3)
+    ax.legend(
+        loc="upper right",
+        # bbox_to_anchor=(0.5, 1.25),  # Τοποθέτηση πάνω από το γράφημα
+        ncol=1,  # Χωρισμός σε 2 στήλες για να απλωθεί σε πλάτος
+        columnspacing=1.0,  # Αυξάνει την απόσταση μεταξύ των στηλών
+        fontsize=10,
+        frameon=True
+    )
+
+    plt.tight_layout()
+
+    # Αποθήκευση σε PDF
+    plt.savefig(path, format="pdf", dpi=300, bbox_inches="tight")
+
+def plot_scatter(dfs, save_path):
+    err_pred = dfs["err_pred"]
+    err_unc = dfs["err_unc"]
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Boolean masks
+    better = err_pred < err_unc  # improvement → below diagonal
+    worse = err_pred >= err_unc  # worse → above diagonal
+
+    # Scatter
+    ax.scatter(err_unc[better], err_pred[better], label="Improved", alpha=0.5)
+    ax.scatter(err_unc[worse], err_pred[worse], label="Worse", alpha=0.5)
+
+    # Diagonal
+    min_val = min(err_unc.min(), err_pred.min())
+    max_val = max(err_unc.max(), err_pred.max())
+    ax.plot([min_val, max_val], [min_val, max_val], linestyle='--')
+
+    # Labels
+    ax.set_xlabel("err_unc")
+    ax.set_ylabel("err_pred")
+    ax.set_title("Error comparison (per point)")
+    ax.legend()
+
+    ax.set_aspect('equal', adjustable='box')
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=300)
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+
+def plot_scatter_per_wave_bin(dfs, save_path, label):
+    bin_width = 1.0
+    err_pred = dfs["err_pred"].values
+    err_unc = dfs["err_unc"].values
+
+    wave = dfs["y_true"].values  # or y_unco depending on your definition
+
+    max_wave = wave.max()
+    # define bins
+    bins = np.arange(0, max_wave + bin_width, bin_width)
+    n_bins = len(bins) - 1
+
+    ncols = 3
+    nrows = int(np.ceil(n_bins / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows))
+    axes = axes.flatten()
+
+    for i in range(n_bins):
+        ax = axes[i]
+
+        bmin, bmax = bins[i], bins[i + 1]
+
+        mask = (wave >= bmin) & (wave < bmax)
+
+        if mask.sum() == 0:
+            ax.set_visible(False)
+            continue
+
+        e_unc = err_unc[mask]
+        e_pred = err_pred[mask]
+
+        better = e_pred < e_unc
+        worse = e_pred >= e_unc
+
+        labelb = f"{100*(better.sum()/len(e_pred)):.2f}% Improved"
+        labelw = f"{100*(worse.sum()/len(e_pred)):.2f}% Degraded"
+
+        # scatter
+        ax.scatter(e_unc[better], e_pred[better], label=labelb,
+                   color="#2ca25f", alpha=0.5, s=10)
+
+        ax.scatter(e_unc[worse], e_pred[worse],
+                   color="#d73027", alpha=0.5, s=10, label=labelw)
+
+        ax.legend(
+            loc="upper left",
+            # bbox_to_anchor=(0.5, 1.25),  # Τοποθέτηση πάνω από το γράφημα
+            ncol=1,  # Χωρισμός σε 2 στήλες για να απλωθεί σε πλάτος
+            columnspacing=1.0,  # Αυξάνει την απόσταση μεταξύ των στηλών
+            fontsize=10,
+            frameon=True
+        )
+        # diagonal
+        min_val = min(e_unc.min(), e_pred.min())
+        max_val = max(e_unc.max(), e_pred.max())
+        ax.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=1)
+
+        ax.set_title(f"{bmin:.0f}–{bmax:.0f} m\n(n={mask.sum()})")
+
+        ax.set_aspect('equal', adjustable='box')
+
+        if i == 0:
+            ax.set_ylabel("err_pred")
+        if i >= (nrows - 1) * ncols:
+            ax.set_xlabel("err_unc")
+
+    # remove empty axes
+    for j in range(n_bins, len(axes)):
+        axes[j].set_visible(False)
+
+    # shared legend
+    handles, labels = axes[0].get_legend_handles_labels()
+    # fig.legend(handles, labels, loc="upper center", ncol=2)
+
+    fig.suptitle(f"Error comparison per wave regime in {label} ", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path:
+        fig.savefig(save_path, dpi=300)
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+if __name__ == "__main__":
+    model = "transunet"
+    # metric = "diff"
+    metric = "impr"
+    # model = "mlp"
+    path = f"{model}_coords.npz"
+    data = np.load(f'data/{path}')
+
+    out_dir = f"results/{model}"
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(f"{out_dir}/statistics.txt", "w") as f:
+        f.write(f"Model: {model}\n"
+                f"Metric: {metric}\n"
+                f"==================\n\n")
+        y_true = data['y_true']
+        y_pred = data['y_pred']
+        y_unco = data["vhm0"]
+        y_lat = data['lat']
+        y_lon = data['lon']
+
+        df = pd.DataFrame({
+            "lat": y_lat,
+            "lon": y_lon,
+            "y_true": y_true,
+            "y_pred": y_pred,
+            "y_unco": y_unco
+        })
+
+
+        # df has only sea points, columns: lat, lon
+        lats = np.sort(df["lat"].unique())
+        lons = np.sort(df["lon"].unique())
+
+        dlat = np.median(np.diff(lats))
+        dlon = np.median(np.diff(lons))
+
+        fig = plt.figure(figsize=(9, 6))
+        ax = plt.axes(projection=ccrs.PlateCarree())
+
+        ax.set_extent([lons.min() - 1, lons.max() + 1, lats.min() - 1, lats.max() + 1])
+
+        # background: land white
+        ax.add_feature(cfeature.OCEAN, facecolor="#eaf2f8", zorder=0)
+        ax.add_feature(cfeature.LAND, facecolor="white", edgecolor="black", linewidth=0.4, zorder=2)
+        ax.coastlines(resolution="10m", linewidth=0.5, color="black", zorder=3)
+
+        # pick one random sea point
+        rand_row = df[["lat", "lon"]].drop_duplicates().sample(1).iloc[0]
+        rand_lat = rand_row["lat"]
+        rand_lon = rand_row["lon"]
+
+        # draw only sea grid cells
+        for _, row in df[["lat", "lon"]].drop_duplicates().iterrows():
+            lat = row["lat"]
+            lon = row["lon"]
+
+            # check if this is the random one
+            is_random = (lat == rand_lat) and (lon == rand_lon)
+
+            rect = patches.Rectangle(
+                (lon - dlon / 2, lat - dlat / 2),
+                dlon,
+                dlat,
+                facecolor="#d73027" if is_random else "none",
+                edgecolor="#d73027" if is_random else "black",
+                linewidth=1.2 if is_random else 0.08,
+                alpha=0.6 if is_random else 0.4,
+                transform=ccrs.PlateCarree(),
+                zorder=5 if is_random else 1
+            )
+            ax.add_patch(rect)
+
+        plt.tight_layout()
+        plt.savefig("sea_grid_cells_5798.pdf", dpi=300, bbox_inches="tight")
+        plt.show()
+
+
+        # Evaluate all
+        f.write("\n====================================\n")
+        f.write("======= Full Map Evaluation ========\n")
+        f.write("====================================\n")
+
+        Lat, Lon, Z, dfd = evaluate(df, None)
+        plot_map("all")
+        plot_dist(dfd, f"{out_dir}/all_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_scatter_per_bin.png", "all")
+
+        Lat, Lon, Z, dfd = evaluate(df, 0.05)
+        plot_map("denoised_0.05")
+        plot_dist(dfd, f"{out_dir}/all_denoised_0.05_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_denoised_0.05_scatter_per_bin.png", "all_denoised_0.05")
+
+        f.write("\n====================================\n")
+        f.write("======= Aegean Evaluation ==========\n")
+        f.write("====================================\n")
+        # Aegean Sea bounds (approx)
+        lon_min, lon_max = 23, 28
+        lat_min, lat_max = 35, 42
+
+        df_aegean = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        Lat, Lon, Z, dfd = evaluate(df_aegean, None)
+        plot_map("aegean_all")
+        plot_dist(dfd, f"{out_dir}/aegean_all_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_all_scatter_per_bin.png", "aegean_all")
+
+        Lat, Lon, Z, dfd = evaluate(df_aegean, 0.05)
+        plot_map("aegean_denoised_0.05")
+        plot_dist(dfd, f"{out_dir}/aegean_denoised_0.05_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_denoised_0.05_scatter_per_bin.png", "aegean_denoised_0.05")
+
+
+        f.write("\n====================================\n")
+        f.write("======= Cyprus Evaluation ==========\n")
+        f.write("====================================\n")
+        # Cyprus Sea bounds (approx)
+        lon_min, lon_max = 31, 40
+        lat_min, lat_max = 31, 37
+
+        df_cyprus = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        Lat, Lon, Z, dfd = evaluate(df_cyprus, None)
+        plot_map("cyprus_all")
+        plot_dist(dfd, f"{out_dir}/cyprus_all_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_all_scatter_per_bin.png", "cyprus_all")
+
+        Lat, Lon, Z, dfd = evaluate(df_cyprus, 0.05)
+        plot_map("cyprus_denoised")
+        plot_dist(dfd, f"{out_dir}/cyprus_denoised_0.05_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_denoised_0.05_scatter_per_bin.png", "cyprus_denoised_0.05")
+
+        f.write("\n====================================\n")
+        f.write("======= North Italy Evaluation =====\n")
+        f.write("====================================\n")
+        # North Italy sea bounds approx)
+        lon_min, lon_max = 12, 18
+        lat_min, lat_max = 42, 46
+
+        df_nitaly = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        Lat, Lon, Z, dfd = evaluate(df_nitaly, None)
+        plot_map("north_italy_all")
+        plot_dist(dfd, f"{out_dir}/north_italy_all_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_all_scatter_per_bin.png", "north_italy_all")
+
+        Lat, Lon, Z, dfd = evaluate(df_nitaly, 0.05)
+        plot_map("north_italy_denoised_0.05")
+        plot_dist(dfd, f"{out_dir}/north_italy_denoised_0.05_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_denoised_0.05_scatter_per_bin.png", "north_italy_denoised_0.05")
+
+        f.write("\n====================================\n")
+        f.write("======= Central Med Evaluation =====\n")
+        f.write("====================================\n")
+        # central mediterannean good region
+        lon_min, lon_max = 15, 20
+        lat_min, lat_max = 32, 40
+
+        df_central = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        Lat, Lon, Z, dfd = evaluate(df_central, None)
+        plot_map("central_all")
+        plot_dist(dfd, f"{out_dir}/central_all_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_all_scatter_per_bin.png", "central_all")
+
+        Lat, Lon, Z, dfd = evaluate(df_central, 0.05)
+        plot_map("central_denoised_0.05")
+        plot_dist(dfd, f"{out_dir}/central_denoised_0.05.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_denoised_0.05_scatter_per_bin.png", "canteal_denoised_0.05")
