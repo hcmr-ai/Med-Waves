@@ -131,6 +131,7 @@ class ModelEvaluator:
         timestamps_csv: Optional[str] = None,
         eval_task: Optional[str] = None,
         save_predictions: bool = False,
+        denoise_abs_threshold: Optional[float] = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -362,6 +363,8 @@ class ModelEvaluator:
         self.sampled_points_csv = sampled_points_csv
         self.timestamps_csv = timestamps_csv
         self.save_predictions = save_predictions
+        self.denoise_abs_threshold = denoise_abs_threshold
+        self._denoise_warned_no_baseline = False
         self._grid_point_indices: Optional[List[dict]] = None  # set by _setup_grid_point_sampling
         self._grid_point_records: List[dict] = []
         self._gp_ts_map: dict = self._load_ts_map(timestamps_csv)
@@ -683,6 +686,11 @@ class ModelEvaluator:
         self.sum_y_pred = 0.0
         self.sum_y_pred_sq = 0.0
         self.sum_y_true_y_pred = 0.0
+        self._temporal_all_model_sq = np.zeros((24, 12), dtype=np.float64)
+        self._temporal_all_base_sq = np.zeros((24, 12), dtype=np.float64)
+        self._temporal_all_count = np.zeros((24, 12), dtype=np.float64)
+        self.denoise_total_candidate = 0
+        self.denoise_total_kept = 0
 
         # Sea-bin accumulators: {bin_name: {'count': 0, 'sum_mae': 0, 'sum_mse': 0, ...}}
         self.sea_bin_accumulators = {
@@ -1425,11 +1433,20 @@ class ModelEvaluator:
             BISCAY_LAT = 43.0
             BISCAY_LON = 0.0
             biscay = (lat_grid > BISCAY_LAT) & (lon_grid < BISCAY_LON)
+            AEGEAN_LON_MIN, AEGEAN_LON_MAX = 23.0, 28.0
+            AEGEAN_LAT_MIN, AEGEAN_LAT_MAX = 35.0, 42.0
 
             if self.region_filter == "mediterranean":
                 geo_mask = geo_mask & (lon_grid >= GIBRALTAR_LON) & ~biscay
             elif self.region_filter == "atlantic":
                 geo_mask = geo_mask & ((lon_grid < GIBRALTAR_LON) | biscay)
+            elif self.region_filter == "aegean":
+                geo_mask = geo_mask & (
+                    (lat_grid >= AEGEAN_LAT_MIN)
+                    & (lat_grid <= AEGEAN_LAT_MAX)
+                    & (lon_grid >= AEGEAN_LON_MIN)
+                    & (lon_grid <= AEGEAN_LON_MAX)
+                )
 
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
@@ -1741,12 +1758,42 @@ class ModelEvaluator:
         .pt filename pattern WAVEAN{year}{month}{day} + hour_idx so that every
         recorded row has a proper datetime even when no Parquet timestamps exist.
         """
+        dataset = self.test_loader.dataset
+        # ------------------------------------------------------------------
+        # Timestamp map setup is useful beyond sampled points (e.g. all-pixels
+        # temporal heatmap), so initialize it regardless of sampled_points_csv.
+        # ------------------------------------------------------------------
+        self._gp_item_ts: Optional[List] = None
+        self._gp_sample_counter: int = 0
+        from torch.utils.data import RandomSampler
+        if isinstance(self.test_loader.sampler, RandomSampler):
+            raise ValueError(
+                "test_loader uses shuffle=True, which breaks timestamp mapping. "
+                "Set shuffle=False for evaluation."
+            )
+        if hasattr(dataset, "index_map") and hasattr(dataset, "file_paths"):
+            if self._gp_ts_map:
+                item_ts: List = []
+                for file_idx, hour_idx in dataset.index_map:
+                    pt_stem = Path(dataset.file_paths[file_idx]).stem
+                    item_ts.append(self._gp_ts_map.get((pt_stem, hour_idx)))
+                self._gp_item_ts = item_ts
+                n_resolved = sum(t is not None for t in item_ts)
+                logger.info(
+                    f"Grid-point timestamps resolved: {n_resolved}/{len(item_ts)} "
+                    f"from timestamp map"
+                )
+            else:
+                logger.warning(
+                    "No timestamp map loaded; timestamps will be None in grid_point_timeseries.csv "
+                    "and all-pixels temporal heatmap. "
+                    "Pass --timestamps-csv to enable."
+                )
+
         if self.sampled_points_csv is None:
             return
 
         import csv as _csv
-
-        dataset = self.test_loader.dataset
         if not hasattr(dataset, "get_coordinates"):
             logger.warning("Dataset has no get_coordinates(); grid-point sampling disabled.")
             return
@@ -1801,45 +1848,6 @@ class ModelEvaluator:
                 "Make sure the CSV was produced from the same dataset used for evaluation."
             )
 
-        # ------------------------------------------------------------------
-        # Guard: timestamp mapping requires sequential iteration.
-        # Shuffling during evaluation doesn't affect metrics but breaks the
-        # dataset-index → timestamp lookup below.
-        # ------------------------------------------------------------------
-        from torch.utils.data import RandomSampler
-        if isinstance(self.test_loader.sampler, RandomSampler):
-            raise ValueError(
-                "test_loader uses shuffle=True, which breaks grid-point timestamp "
-                "mapping. Set shuffle=False for evaluation."
-            )
-
-        # ------------------------------------------------------------------
-        # Pre-build a flat item_ts[dataset_index] → datetime array using the
-        # external timestamp map CSV (pt_stem, hour_idx → timestamp).
-        # A running counter (_gp_sample_counter) advances by B each batch so
-        # _update_grid_point_records can do item_ts[counter + b] safely.
-        # ------------------------------------------------------------------
-        self._gp_item_ts: Optional[List] = None
-        self._gp_sample_counter: int = 0
-
-        if self.sampled_points_csv and hasattr(dataset, "index_map") and hasattr(dataset, "file_paths"):
-            if self._gp_ts_map:
-                item_ts: List = []
-                for file_idx, hour_idx in dataset.index_map:
-                    pt_stem = Path(dataset.file_paths[file_idx]).stem
-                    item_ts.append(self._gp_ts_map.get((pt_stem, hour_idx)))
-                self._gp_item_ts = item_ts
-                n_resolved = sum(t is not None for t in item_ts)
-                logger.info(
-                    f"Grid-point timestamps resolved: {n_resolved}/{len(item_ts)} "
-                    f"from timestamp map"
-                )
-            else:
-                logger.warning(
-                    "No timestamp map loaded; timestamps will be None in grid_point_timeseries.csv. "
-                    "Pass --timestamps-csv to enable."
-                )
-
         self._grid_point_indices = indices
         self._grid_point_records = []
         logger.info(
@@ -1853,6 +1861,7 @@ class ModelEvaluator:
         y_pred_4d: torch.Tensor,
         y_base_4d: Optional[torch.Tensor],
         batch_idx: int,
+        valid_mask_4d: Optional[torch.Tensor] = None,
     ) -> None:
         """Extract reference / uncorrected / corrected values at sampled grid points.
 
@@ -1869,6 +1878,11 @@ class ModelEvaluator:
         y_true_np = y_true_4d.detach().cpu().numpy()   # (B, 1, H, W)
         y_pred_np = y_pred_4d.detach().cpu().numpy()
         y_base_np = y_base_4d.detach().cpu().numpy() if y_base_4d is not None else None
+        valid_mask_np = (
+            valid_mask_4d.detach().cpu().numpy().astype(bool)
+            if valid_mask_4d is not None
+            else None
+        )
 
         B = y_true_np.shape[0]
 
@@ -1887,6 +1901,8 @@ class ModelEvaluator:
                 H, W = y_true_np.shape[2], y_true_np.shape[3]
                 if r >= H or c >= W:
                     continue  # point outside padded region
+                if valid_mask_np is not None and not valid_mask_np[b, :, r, c].any():
+                    continue
                 self._grid_point_records.append({
                     "timestamp":     ts,
                     "batch_idx":     batch_idx,
@@ -1923,6 +1939,118 @@ class ModelEvaluator:
             f"Saved grid-point time-series ({len(self._grid_point_records)} rows) → {out_path}"
         )
         print(f"  Grid-point CSV saved → {out_path}")
+
+    def _update_all_points_temporal_accumulators(
+        self,
+        error_map: np.ndarray,
+        error_map_baseline: Optional[np.ndarray],
+        count_map: np.ndarray,
+        batch_size: int,
+    ) -> None:
+        """Accumulate hour×month RMSE stats over all valid pixels."""
+        if error_map_baseline is None or self._gp_item_ts is None:
+            return
+
+        for b in range(batch_size):
+            idx = self._gp_sample_counter + b
+            if idx >= len(self._gp_item_ts):
+                continue
+            ts = self._gp_item_ts[idx]
+            if ts is None:
+                continue
+            h = int(ts.hour)
+            m = int(ts.month) - 1
+
+            cnt = float(count_map[b].sum())
+            if cnt <= 0:
+                continue
+
+            self._temporal_all_count[h, m] += cnt
+            self._temporal_all_model_sq[h, m] += float(error_map[b].sum())
+            self._temporal_all_base_sq[h, m] += float(error_map_baseline[b].sum())
+
+    def _save_all_points_temporal_heatmap(self) -> None:
+        """Save hour×month RMSE improvement heatmap over all valid pixels."""
+        if float(self._temporal_all_count.sum()) <= 0:
+            logger.info("Skipping all-points temporal heatmap: no timestamp-aligned counts.")
+            return
+
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rmse_unc = np.where(
+                self._temporal_all_count > 0,
+                np.sqrt(self._temporal_all_base_sq / self._temporal_all_count),
+                np.nan,
+            )
+            rmse_cor = np.where(
+                self._temporal_all_count > 0,
+                np.sqrt(self._temporal_all_model_sq / self._temporal_all_count),
+                np.nan,
+            )
+            rmse_impr = 100.0 * (rmse_unc - rmse_cor) / rmse_unc
+
+        finite = rmse_impr[np.isfinite(rmse_impr)]
+        if finite.size == 0:
+            # Fallback: compute improvement directly in MSE space when RMSE
+            # normalization yields all-NaN (e.g., zero-denominator edge cases).
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rmse_impr = np.where(
+                    (self._temporal_all_count > 0) & (self._temporal_all_base_sq > 0),
+                    100.0
+                    * (self._temporal_all_base_sq - self._temporal_all_model_sq)
+                    / self._temporal_all_base_sq,
+                    np.nan,
+                )
+            finite = rmse_impr[np.isfinite(rmse_impr)]
+            logger.warning(
+                "All-points RMSE-improvement matrix had no finite values; used MSE-improvement fallback."
+            )
+
+        if finite.size == 0:
+            logger.warning(
+                "All-points temporal heatmap still has no finite values after fallback; skipping save."
+            )
+            return
+
+        fig, ax = plt.subplots(figsize=(10, 5.4))
+        vmax = float(np.nanpercentile(np.abs(finite), 98))
+        if not np.isfinite(vmax) or vmax < 1e-6:
+            vmax = max(float(np.nanmax(np.abs(finite))), 1e-3)
+        sns.heatmap(
+            rmse_impr,
+            ax=ax,
+            vmin=-vmax,
+            vmax=vmax,
+            cmap="RdBu",
+            center=0,
+            linewidths=0.2,
+            linecolor="#f0f0f0",
+            cbar_kws={"label": "RMSE improvement (%)", "shrink": 1, "pad": 0.02},
+        )
+        ax.set_xlabel("Month (1-12)")
+        ax.set_ylabel("Hour of day")
+        ax.set_title("Temporal RMSE improvement (all valid pixels)")
+        fig.tight_layout()
+
+        png_path = self.output_dir / "heatmap_rmse_improvement_all_points.png"
+        pdf_path = self.output_dir / "heatmap_rmse_improvement_all_points.pdf"
+        fig.savefig(png_path, dpi=300, bbox_inches="tight")
+        fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        # Save numeric diagnostics for transparency and reproducibility.
+        pd.DataFrame(rmse_impr).to_csv(
+            self.output_dir / "heatmap_rmse_improvement_all_points_values.csv",
+            index=True,
+        )
+        pd.DataFrame(self._temporal_all_count).to_csv(
+            self.output_dir / "heatmap_rmse_improvement_all_points_counts.csv",
+            index=True,
+        )
+        logger.info(f"Saved all-points temporal heatmap → {png_path}")
 
     # ------------------------------------------------------------------
 
@@ -2023,12 +2151,34 @@ class ModelEvaluator:
             y_true_wave_4d = y
             y_pred_wave_4d = y_pred
 
-        combined_mask = mask.float()
+        denoise_mask = None
+        if (
+            self.denoise_abs_threshold is not None
+            and self.denoise_abs_threshold > 0
+        ):
+            if y_base_wave_4d is not None:
+                unc_abs_err = (y_base_wave_4d - y_true_wave_4d).abs()
+                denoise_mask = torch.isfinite(unc_abs_err) & (
+                    unc_abs_err > self.denoise_abs_threshold
+                )
+            elif not self._denoise_warned_no_baseline:
+                logger.warning(
+                    "Denoising requested but baseline (vhm0) is unavailable; "
+                    "denoise filter is not applied."
+                )
+                self._denoise_warned_no_baseline = True
+
+        combined_mask = mask.bool()
+        if denoise_mask is not None:
+            self.denoise_total_candidate += int(combined_mask.sum().item())
+            combined_mask = combined_mask & denoise_mask
+            self.denoise_total_kept += int(combined_mask.sum().item())
+
         if self.atlantic_exclusion_mask is not None:
             # Broadcast 2D (H, W) mask to match 4D (N, C, H, W)
             h, w = combined_mask.shape[2], combined_mask.shape[3]
-            exc = self.atlantic_exclusion_mask[:h, :w].float()
-            combined_mask = combined_mask * exc.unsqueeze(0).unsqueeze(0)
+            exc = self.atlantic_exclusion_mask[:h, :w].bool()
+            combined_mask = combined_mask & exc.unsqueeze(0).unsqueeze(0)
 
         self._update_low_bin_spatial_accumulators(
             y_true_4d=y_true_wave_4d,
@@ -2043,15 +2193,25 @@ class ModelEvaluator:
             y_pred_4d=y_pred_wave_4d,
             y_base_4d=y_base_wave_4d,
             batch_idx=batch_idx,
+            valid_mask_4d=combined_mask,
         )
-        self._gp_sample_counter += y_true_wave_4d.shape[0]
-        count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
+        count_map = combined_mask.float().cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
+        # Use nan_to_num first: NaN * 0 stays NaN in numpy, which can poison
+        # downstream sums/heatmaps.
+        error_map = np.nan_to_num(error_map, nan=0.0, posinf=0.0, neginf=0.0)
+        error_map_mae = np.nan_to_num(error_map_mae, nan=0.0, posinf=0.0, neginf=0.0)
         error_map = error_map * count_map
         if error_map_baseline is not None:
+            error_map_baseline = np.nan_to_num(
+                error_map_baseline, nan=0.0, posinf=0.0, neginf=0.0
+            )
             error_map_baseline = error_map_baseline * count_map
         if error_map_baseline_mae is not None:
+            error_map_baseline_mae = np.nan_to_num(
+                error_map_baseline_mae, nan=0.0, posinf=0.0, neginf=0.0
+            )
             error_map_baseline_mae = error_map_baseline_mae * count_map
         # Store spatial errors (sum over batch and channel dimensions)
         self.spatial_errors_model.append(
@@ -2070,6 +2230,13 @@ class ModelEvaluator:
                     "count": count_map.sum(axis=(0, 1)),  # (H, W)
                 }
             )
+        self._update_all_points_temporal_accumulators(
+            error_map=error_map,
+            error_map_baseline=error_map_baseline,
+            count_map=count_map,
+            batch_size=y_true_wave_4d.shape[0],
+        )
+        self._gp_sample_counter += y_true_wave_4d.shape[0]
 
         # Bin-conditional spatial accumulators (binned by true wave height)
         if self.eval_in_bias_mode and vhm0 is not None:
@@ -2092,11 +2259,7 @@ class ModelEvaluator:
             self._rel_improvement_samples.append(rel_imp.astype(np.float32))
 
         # Apply mask (including Atlantic exclusion)
-        mask_combined = mask.clone()
-        if self.atlantic_exclusion_mask is not None:
-            h, w = mask_combined.shape[2], mask_combined.shape[3]
-            exc = self.atlantic_exclusion_mask[:h, :w]
-            mask_combined = mask_combined & exc.unsqueeze(0).unsqueeze(0)
+        mask_combined = combined_mask
         mask_flat = mask_combined.flatten()
         y_true_flat = y.flatten()[mask_flat]
         y_pred_flat = y_pred.flatten()[mask_flat]
@@ -2354,6 +2517,24 @@ class ModelEvaluator:
                 mask_np = mask_combined.flatten().cpu().numpy().astype(bool)
                 self.plot_samples["lat"].extend(lat_tiled[mask_np])
                 self.plot_samples["lon"].extend(lon_tiled[mask_np])
+
+    def _get_denoising_summary(self) -> Dict:
+        enabled = (
+            self.denoise_abs_threshold is not None
+            and self.denoise_abs_threshold > 0
+        )
+        summary = {
+            "enabled": bool(enabled),
+            "abs_threshold_m": float(self.denoise_abs_threshold) if enabled else None,
+            "candidate_pixels": int(self.denoise_total_candidate) if enabled else 0,
+            "kept_pixels": int(self.denoise_total_kept) if enabled else 0,
+            "kept_pct": None,
+        }
+        if enabled and self.denoise_total_candidate > 0:
+            summary["kept_pct"] = (
+                100.0 * self.denoise_total_kept / self.denoise_total_candidate
+            )
+        return summary
 
     def _update_category_stats(
         self, bin_name, category, features, y_true, y_pred, timestamps, confidence
@@ -3673,6 +3854,17 @@ class ModelEvaluator:
                 print(
                     f"  RMSE Improvement:     {overall_metrics['rmse_improvement_pct']:.2f}%"
                 )
+        denoise_summary = self._get_denoising_summary()
+        if denoise_summary["enabled"]:
+            kept_pct = denoise_summary["kept_pct"]
+            kept_pct_str = "n/a" if kept_pct is None else f"{kept_pct:.2f}%"
+            print("\nDenoising:")
+            print(f"  Abs threshold:        {denoise_summary['abs_threshold_m']:.4f} m")
+            print(
+                "  Coverage:             "
+                f"{denoise_summary['kept_pixels']:,}/{denoise_summary['candidate_pixels']:,} "
+                f"({kept_pct_str})"
+            )
 
         per_point = self.compute_per_point_improvement_stats()
         if per_point:
@@ -3757,6 +3949,7 @@ class ModelEvaluator:
 
         # Save metrics
         per_point_stats = self.compute_per_point_improvement_stats()
+        denoise_summary = self._get_denoising_summary()
         with open(self.output_dir / "metrics.json", "w") as f:
             json.dump(
                 {
@@ -3764,6 +3957,7 @@ class ModelEvaluator:
                     "sea_bins": sea_bin_metrics,
                     "category_breakdown": category_breakdown,
                     "per_point_improvement": per_point_stats,
+                    "denoising": denoise_summary,
                 },
                 f,
                 indent=2,
@@ -3779,6 +3973,8 @@ class ModelEvaluator:
         self._save_coastal_distance_diagnostics()
         print("Saving grid-point time-series CSV...")
         self._save_grid_point_csv()
+        print("Saving all-points temporal heatmap...")
+        self._save_all_points_temporal_heatmap()
 
         # Save raw prediction samples for offline plot experimentation
         if self.save_predictions:
@@ -3798,15 +3994,15 @@ class ModelEvaluator:
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
-        self.plot_bin_spatial_rmse_maps()
-        self.plot_low_bin_spatial_maps()
+        # self.plot_bin_spatial_rmse_maps()
+        # self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
         # self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
         # self.plot_vhm0_distributions(vhm0_range=(11, 12))
         # self.plot_vhm0_distributions(vhm0_range=(12, 13))
-        self.plot_error_distribution_histograms()
+        # self.plot_error_distribution_histograms()
         # self.plot_error_boxplots()
         # self.plot_error_violins()
         # self.plot_error_cdfs()
@@ -3815,7 +4011,7 @@ class ModelEvaluator:
         self.print_summary(overall_metrics, sea_bin_metrics)
 
         # NEW: Print category breakdown
-        self.print_category_breakdown(category_breakdown)
+        # self.print_category_breakdown(category_breakdown)
 
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
 
@@ -3874,7 +4070,7 @@ def main(evaluator_class=None):
         "--region-filter",
         type=str,
         default=None,
-        choices=["atlantic", "mediterranean"],
+        choices=["atlantic", "mediterranean", "aegean"],
         help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
     )
     parser.add_argument(
@@ -3904,6 +4100,15 @@ def main(evaluator_class=None):
         action="store_true",
         default=False,
         help="Save plot_samples (y_true, y_pred, vhm0) to plot_samples.npz in the output dir",
+    )
+    parser.add_argument(
+        "--denoise-abs-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional denoising filter applied during evaluation: keep only pixels "
+            "with |uncorrected-reference| > threshold (meters)."
+        ),
     )
     args = parser.parse_args()
 
@@ -4252,6 +4457,7 @@ def main(evaluator_class=None):
             sampled_points_csv=args.sampled_points_csv,
             timestamps_csv=args.timestamps_csv,
             save_predictions=args.save_predictions,
+            denoise_abs_threshold=args.denoise_abs_threshold,
         )
 
         evaluator.evaluate()

@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import copy
+import argparse
 import seaborn as sns
 import matplotlib
 import numpy as np
@@ -42,7 +43,7 @@ def plot_map(data_type):
     )
 
     # ---- map styling ----
-    ax.set_extent([-6, 36, 30, 46])
+    ax.set_extent(map_extent)
 
     ax.add_feature(cfeature.LAND, facecolor="#f0f0f0", zorder=0)
     ax.add_feature(cfeature.OCEAN, facecolor="#ffffff", zorder=0)
@@ -84,12 +85,25 @@ def plot_map(data_type):
     plt.close()
 
 def get_lat_lon_Z(dframe):
-    rmse_unc = dframe.groupby(["lat", "lon"]).apply(
-        lambda g: rmse(g["y_true"], g["y_unco"])
-    ).reset_index(name="rmse_unc")
-    rmse_cor = dframe.groupby(["lat", "lon"]).apply(
-        lambda g: rmse(g["y_true"], g["y_pred"])
-    ).reset_index(name="rmse_cor")
+    # Version-safe RMSE by location (avoid groupby.apply(...).reset_index(name=...),
+    # which behaves differently across pandas versions).
+    rmse_unc = (
+        dframe.assign(se_unc=(dframe["y_unco"] - dframe["y_true"]) ** 2)
+        .groupby(["lat", "lon"], as_index=False)["se_unc"]
+        .mean()
+        .rename(columns={"se_unc": "mse_unc"})
+    )
+    rmse_unc["rmse_unc"] = np.sqrt(rmse_unc["mse_unc"])
+    rmse_unc = rmse_unc.drop(columns=["mse_unc"])
+
+    rmse_cor = (
+        dframe.assign(se_cor=(dframe["y_pred"] - dframe["y_true"]) ** 2)
+        .groupby(["lat", "lon"], as_index=False)["se_cor"]
+        .mean()
+        .rename(columns={"se_cor": "mse_cor"})
+    )
+    rmse_cor["rmse_cor"] = np.sqrt(rmse_cor["mse_cor"])
+    rmse_cor = rmse_cor.drop(columns=["mse_cor"])
 
     # merge
     d = rmse_unc.merge(rmse_cor, on=["lat", "lon"])
@@ -341,14 +355,45 @@ def plot_scatter_per_wave_bin(dfs, save_path, label):
     plt.close(fig)
 
 if __name__ == "__main__":
-    model = "transunet"
-    # metric = "diff"
-    metric = "impr"
-    # model = "mlp"
-    path = f"{model}_coords.npz"
-    data = np.load(f'data/{path}')
+    parser = argparse.ArgumentParser(
+        description="Plot RMSE maps and diagnostics from evaluator NPZ output."
+    )
+    parser.add_argument(
+        "--input-npz",
+        type=str,
+        default="data/transunet_coords.npz",
+        help="Path to input NPZ with y_true, y_pred, vhm0, lat, lon.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="results/transunet",
+        help="Directory for generated figures and statistics.txt.",
+    )
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="impr",
+        choices=["diff", "impr"],
+        help="Map metric: diff (rmse_unc-rmse_cor) or impr (relative improvement %).",
+    )
+    parser.add_argument(
+        "--region",
+        type=str,
+        default="auto",
+        choices=["auto", "mediterranean", "atlantic", "aegean"],
+        help=(
+            "Region mode for map extent and subregion reports. "
+            "'mediterranean' enables Aegean/Cyprus/North Italy/Central Med blocks; "
+            "'atlantic' skips them."
+        ),
+    )
+    args = parser.parse_args()
 
-    out_dir = f"results/{model}"
+    data = np.load(args.input_npz)
+    metric = args.metric
+    out_dir = args.output_dir
+    model = os.path.splitext(os.path.basename(args.input_npz))[0]
     os.makedirs(out_dir, exist_ok=True)
 
     with open(f"{out_dir}/statistics.txt", "w") as f:
@@ -368,6 +413,26 @@ if __name__ == "__main__":
             "y_pred": y_pred,
             "y_unco": y_unco
         })
+
+        region = args.region
+        if region == "auto":
+            lon_min_data = float(df["lon"].min())
+            region = "atlantic" if lon_min_data < -6.0 else "mediterranean"
+
+        if region == "mediterranean":
+            map_extent = [-6, 36, 30, 46]
+        elif region == "aegean":
+            map_extent = [23, 28, 35, 42]
+        else:
+            pad_deg = 0.25
+            map_extent = [
+                float(df["lon"].min()) - pad_deg,
+                float(df["lon"].max()) + pad_deg,
+                float(df["lat"].min()) - pad_deg,
+                float(df["lat"].max()) + pad_deg,
+            ]
+
+        f.write(f"Region: {region}\n")
 
 
         # df has only sea points, columns: lat, lon
@@ -433,75 +498,77 @@ if __name__ == "__main__":
         plot_dist(dfd, f"{out_dir}/all_denoised_0.05_distr.pdf")
         plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_denoised_0.05_scatter_per_bin.png", "all_denoised_0.05")
 
-        f.write("\n====================================\n")
-        f.write("======= Aegean Evaluation ==========\n")
-        f.write("====================================\n")
-        # Aegean Sea bounds (approx)
-        lon_min, lon_max = 23, 28
-        lat_min, lat_max = 35, 42
+        if region == "mediterranean":
+            f.write("\n====================================\n")
+            f.write("======= Aegean Evaluation ==========\n")
+            f.write("====================================\n")
+            # Aegean Sea bounds (approx)
+            lon_min, lon_max = 23, 28
+            lat_min, lat_max = 35, 42
 
-        df_aegean = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-        Lat, Lon, Z, dfd = evaluate(df_aegean, None)
-        plot_map("aegean_all")
-        plot_dist(dfd, f"{out_dir}/aegean_all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_all_scatter_per_bin.png", "aegean_all")
+            df_aegean = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+            Lat, Lon, Z, dfd = evaluate(df_aegean, None)
+            plot_map("aegean_all")
+            plot_dist(dfd, f"{out_dir}/aegean_all_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_all_scatter_per_bin.png", "aegean_all")
 
-        Lat, Lon, Z, dfd = evaluate(df_aegean, 0.05)
-        plot_map("aegean_denoised_0.05")
-        plot_dist(dfd, f"{out_dir}/aegean_denoised_0.05_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_denoised_0.05_scatter_per_bin.png", "aegean_denoised_0.05")
+            Lat, Lon, Z, dfd = evaluate(df_aegean, 0.05)
+            plot_map("aegean_denoised_0.05")
+            plot_dist(dfd, f"{out_dir}/aegean_denoised_0.05_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_denoised_0.05_scatter_per_bin.png", "aegean_denoised_0.05")
 
+            f.write("\n====================================\n")
+            f.write("======= Cyprus Evaluation ==========\n")
+            f.write("====================================\n")
+            # Cyprus Sea bounds (approx)
+            lon_min, lon_max = 31, 40
+            lat_min, lat_max = 31, 37
 
-        f.write("\n====================================\n")
-        f.write("======= Cyprus Evaluation ==========\n")
-        f.write("====================================\n")
-        # Cyprus Sea bounds (approx)
-        lon_min, lon_max = 31, 40
-        lat_min, lat_max = 31, 37
+            df_cyprus = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+            Lat, Lon, Z, dfd = evaluate(df_cyprus, None)
+            plot_map("cyprus_all")
+            plot_dist(dfd, f"{out_dir}/cyprus_all_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_all_scatter_per_bin.png", "cyprus_all")
 
-        df_cyprus = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-        Lat, Lon, Z, dfd = evaluate(df_cyprus, None)
-        plot_map("cyprus_all")
-        plot_dist(dfd, f"{out_dir}/cyprus_all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_all_scatter_per_bin.png", "cyprus_all")
+            Lat, Lon, Z, dfd = evaluate(df_cyprus, 0.05)
+            plot_map("cyprus_denoised")
+            plot_dist(dfd, f"{out_dir}/cyprus_denoised_0.05_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_denoised_0.05_scatter_per_bin.png", "cyprus_denoised_0.05")
 
-        Lat, Lon, Z, dfd = evaluate(df_cyprus, 0.05)
-        plot_map("cyprus_denoised")
-        plot_dist(dfd, f"{out_dir}/cyprus_denoised_0.05_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_denoised_0.05_scatter_per_bin.png", "cyprus_denoised_0.05")
+            f.write("\n====================================\n")
+            f.write("======= North Italy Evaluation =====\n")
+            f.write("====================================\n")
+            # North Italy sea bounds approx)
+            lon_min, lon_max = 12, 18
+            lat_min, lat_max = 42, 46
 
-        f.write("\n====================================\n")
-        f.write("======= North Italy Evaluation =====\n")
-        f.write("====================================\n")
-        # North Italy sea bounds approx)
-        lon_min, lon_max = 12, 18
-        lat_min, lat_max = 42, 46
+            df_nitaly = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+            Lat, Lon, Z, dfd = evaluate(df_nitaly, None)
+            plot_map("north_italy_all")
+            plot_dist(dfd, f"{out_dir}/north_italy_all_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_all_scatter_per_bin.png", "north_italy_all")
 
-        df_nitaly = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-        Lat, Lon, Z, dfd = evaluate(df_nitaly, None)
-        plot_map("north_italy_all")
-        plot_dist(dfd, f"{out_dir}/north_italy_all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_all_scatter_per_bin.png", "north_italy_all")
+            Lat, Lon, Z, dfd = evaluate(df_nitaly, 0.05)
+            plot_map("north_italy_denoised_0.05")
+            plot_dist(dfd, f"{out_dir}/north_italy_denoised_0.05_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_denoised_0.05_scatter_per_bin.png", "north_italy_denoised_0.05")
 
-        Lat, Lon, Z, dfd = evaluate(df_nitaly, 0.05)
-        plot_map("north_italy_denoised_0.05")
-        plot_dist(dfd, f"{out_dir}/north_italy_denoised_0.05_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_denoised_0.05_scatter_per_bin.png", "north_italy_denoised_0.05")
+            f.write("\n====================================\n")
+            f.write("======= Central Med Evaluation =====\n")
+            f.write("====================================\n")
+            # central mediterannean good region
+            lon_min, lon_max = 15, 20
+            lat_min, lat_max = 32, 40
 
-        f.write("\n====================================\n")
-        f.write("======= Central Med Evaluation =====\n")
-        f.write("====================================\n")
-        # central mediterannean good region
-        lon_min, lon_max = 15, 20
-        lat_min, lat_max = 32, 40
+            df_central = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+            Lat, Lon, Z, dfd = evaluate(df_central, None)
+            plot_map("central_all")
+            plot_dist(dfd, f"{out_dir}/central_all_distr.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_all_scatter_per_bin.png", "central_all")
 
-        df_central = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-        Lat, Lon, Z, dfd = evaluate(df_central, None)
-        plot_map("central_all")
-        plot_dist(dfd, f"{out_dir}/central_all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_all_scatter_per_bin.png", "central_all")
-
-        Lat, Lon, Z, dfd = evaluate(df_central, 0.05)
-        plot_map("central_denoised_0.05")
-        plot_dist(dfd, f"{out_dir}/central_denoised_0.05.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_denoised_0.05_scatter_per_bin.png", "canteal_denoised_0.05")
+            Lat, Lon, Z, dfd = evaluate(df_central, 0.05)
+            plot_map("central_denoised_0.05")
+            plot_dist(dfd, f"{out_dir}/central_denoised_0.05.pdf")
+            plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_denoised_0.05_scatter_per_bin.png", "canteal_denoised_0.05")
+        else:
+            f.write("\nSubregion evaluations skipped (region != mediterranean).\n")

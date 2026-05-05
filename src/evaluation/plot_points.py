@@ -25,6 +25,14 @@ from plot_point_evolution import (
     timeseries_for_point,
     abs_error_means,
     with_point_key,
+    weekly_mean_timeseries,
+    fifteen_day_mean_timeseries,
+    monthly_mean_timeseries,
+    timeseries_table_for_export,
+    write_absdiff_csv,
+    save_15day_timeseries_csvs,
+    plot_evolution,
+    plot_abs_errors,
 )
 def plot_point_on_map(
     save_path: Path,
@@ -559,8 +567,12 @@ def plot_points_overview_map_enh3(
     plt.close(fig)
 
 
-def mediterranean_only(df):
-    return df[df["region"].str.lower() == "mediterranean"].copy()
+def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
+    if "region" not in df.columns:
+        return df.copy()
+    if region == "all":
+        return df.copy()
+    return df[df["region"].str.lower() == region].copy()
 
 
 def top_n_points(df, n: int):
@@ -568,6 +580,8 @@ def top_n_points(df, n: int):
     return counts.sort_values("size", ascending=False).head(n)
 
 def plot_scatter(x,y, save_path: Path ):
+    if len(x) == 0 or len(y) == 0:
+        return
     fig, ax = plt.subplots(figsize=(10, 7))
 
     ax.scatter(x, y)
@@ -588,6 +602,8 @@ def plot_scatter(x,y, save_path: Path ):
     plt.close(fig)
 
 def plot_degraded_pdf(d: pd.DataFrame, save_path: Path) -> None:
+    if d.empty:
+        return
 
     fig, ax = plt.subplots(figsize=(10, 7))  # Αυξήσαμε ελαφρώς το figsize για να χωρέσουν τα μεγαλύτερα γράμματα
     import seaborn as sns
@@ -613,6 +629,19 @@ def main() -> None:
         default=None,
         help="optional CSV path (default: med_simple23 next to load_csv.py)",
     )
+    p.add_argument(
+        "--region",
+        type=str,
+        default="mediterranean",
+        choices=["mediterranean", "atlantic", "aegean", "all"],
+        help="Region filter for input CSV rows (default: mediterranean).",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional explicit output directory for generated plot files.",
+    )
     args = p.parse_args()
     n = args.n_points
     if n < 1 or n > 400:
@@ -620,14 +649,18 @@ def main() -> None:
         sys.exit(1)
 
     csv_path = Path(args.csv) if args.csv is not None else DATA_PATH
-    out_dir = Path(__file__).resolve().parent / "plots_300" / csv_path.stem
+    out_dir = (
+        Path(args.output_dir)
+        if args.output_dir is not None
+        else Path(__file__).resolve().parent / "plots_300" / csv_path.stem
+    )
     # out_dir = Path(__file__).resolve().parent / "plots_300_mlp" / csv_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df_raw = load_data(csv_path)
-    df = with_point_key(mediterranean_only(df_raw))
+    df = with_point_key(filter_region(df_raw, args.region))
     if df.empty:
-        raise SystemExit("No rows with region 'mediterranean'.")
+        raise SystemExit(f"No rows with region '{args.region}'.")
 
     top = top_n_points(df, n)
     written = 0
@@ -642,14 +675,53 @@ def main() -> None:
 
         if ts.empty:
             continue
-        point_dir = out_dir / lat_lon_dirname(plat, plon)
+        point_tag = lat_lon_dirname(plat, plon)
+        point_dir = out_dir / point_tag
         point_dir.mkdir(parents=True, exist_ok=True)
-        # plot_point_on_map(point_dir / "map_location.png", plat, plon)
-        # x= plot_abs_errors(ts, plat, plon, point_dir / "plot_abs_errors_native.png", resolution_label="Native timestep")
+
+        # Restore per-point artifacts (timeseries CSVs + plots + location map).
+        ts_w = weekly_mean_timeseries(ts)
+        ts_15 = fifteen_day_mean_timeseries(ts)
+        ts_m = monthly_mean_timeseries(ts)
+        timeseries_table_for_export(ts, plat, plon).to_csv(point_dir / "timeseries_native.csv", index=False)
+        write_absdiff_csv(point_dir / "timeseries_native_absdiff.csv", ts)
+        timeseries_table_for_export(ts_w, plat, plon).to_csv(point_dir / "timeseries_7d.csv", index=False)
+        write_absdiff_csv(point_dir / "timeseries_7d_absdiff.csv", ts_w)
+        save_15day_timeseries_csvs(point_dir, ts_15, plat, plon)
+        timeseries_table_for_export(ts_m, plat, plon).to_csv(point_dir / "timeseries_monthly.csv", index=False)
+        write_absdiff_csv(point_dir / "timeseries_monthly_absdiff.csv", ts_m)
+        plot_evolution(ts, plat, plon, point_dir / "plot_native.png", title=f"Native timestep — grid ({plat}, {plon})")
+        plot_evolution(
+            ts_w,
+            plat,
+            plon,
+            point_dir / "plot_7d.png",
+            title=f"7-day mean ({len(ts_w)} values) — grid ({plat}, {plon})",
+        )
+        plot_evolution(
+            ts_15,
+            plat,
+            plon,
+            point_dir / "plot_15d.png",
+            title=f"15-day mean ({len(ts_15)} values) — grid ({plat}, {plon})",
+        )
+        plot_evolution(
+            ts_m,
+            plat,
+            plon,
+            point_dir / "plot_monthly.png",
+            title=f"Monthly mean ({len(ts_m)} values) — grid ({plat}, {plon})",
+        )
+        plot_abs_errors(ts, plat, plon, point_dir / "plot_abs_errors_native.png", resolution_label="Native timestep")
+        plot_abs_errors(ts_w, plat, plon, point_dir / "plot_abs_errors_7d.png", resolution_label="7-day mean")
+        plot_abs_errors(ts_15, plat, plon, point_dir / "plot_abs_errors_15d.png", resolution_label="15-day mean")
+        plot_abs_errors(ts_m, plat, plon, point_dir / "plot_abs_errors_monthly.png", resolution_label="Monthly mean")
+        plot_point_on_map(point_dir / "map_location.png", plat, plon)
+
         x = abs_error_means(ts)
         means["ref_unc"].append(x[0])
         means["ref_cor"].append(x[1])
-        means["point"].append(point_dir)
+        means["point"].append(point_tag)
         means["rel_imp"].append((x[0]-x[1])/x[0])
 
         # hourly-level dataframe
@@ -687,7 +759,6 @@ def main() -> None:
 
     deg = d[d["improvement"] < 0]
     imp = d[d["improvement"] >= 0]
-    data = np.load('../data/transunet.npz')
     # lon_min, lon_max = 12, 18
     # lat_min, lat_max = 42, 46
     #
@@ -732,25 +803,10 @@ def main() -> None:
 
     plt.tight_layout()
 
-    plt.savefig("heatmap_rmse_improvement_cyprus.png", dpi=300, bbox_inches="tight")
-    plt.savefig("heatmap_rmse_improvement_cyprus.pdf", dpi=300, bbox_inches="tight")  # for paper
+    plt.savefig(out_dir / "heatmap_rmse_improvement_cyprus.png", dpi=300, bbox_inches="tight")
+    plt.savefig(out_dir / "heatmap_rmse_improvement_cyprus.pdf", dpi=300, bbox_inches="tight")  # for paper
 
     plt.close()
-
-
-    y_true = data['y_true']
-    y_pred = data['y_pred']
-    y_unco = data["vhm0"]
-
-    # ---- Colors ----
-
-    pd.DataFrame({
-    "y_true": y_true.round(3),
-    "y_pred": y_pred.round(3),
-    "y_unco": y_unco.round(3),
-    })
-
-
     B = deg[["ref_unc", "ref_cor"]]
     C = imp[["ref_unc", "ref_cor"]]
 
@@ -765,8 +821,7 @@ def main() -> None:
         plot_points_overview_map_enh(out_dir / "map_overview.png", overview_points, overview_points_2)
 
     print(
-        f"Wrote {written} point folder(s) under {out_dir} "
-        f"(each: 4 value + 4 abs-error plots + map + 10 CSVs incl. absdiff); map_overview.png in run folder"
+        f"Wrote per-point and summary plots for {written} sampled point(s) under {out_dir}."
     )
 
 

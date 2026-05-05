@@ -29,8 +29,8 @@ class CachedWaveDataset(Dataset):
         normalize_target: Normalize target values
         fs: S3 filesystem instance
         max_cache_size: Maximum number of files to cache
-        region_filter: Region filter string ("atlantic", "mediterranean", or None)
-                      Filters pixels based on Gibraltar Strait boundary (lon=-5.5°)
+        region_filter: Region filter string ("atlantic", "mediterranean", "aegean", or None)
+                      Filters pixels based on geographic boundaries.
 
     Returns:
         Single task: X, y_tensor, mask, vhm0
@@ -100,7 +100,7 @@ class CachedWaveDataset(Dataset):
             else self.FEATURES_ORDER
         )
         self.region_filter = (
-            region_filter  # Region filter: "atlantic", "mediterranean", or None
+            region_filter  # Region filter: "atlantic", "mediterranean", "aegean", or None
         )
         self.add_sea_mask_channel = add_sea_mask_channel
         if self.predict_residual_to_prior:
@@ -179,6 +179,14 @@ class CachedWaveDataset(Dataset):
                 BISCAY_LAT = 43.0
                 BISCAY_LON = 0.0
                 biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
+                AEGEAN_LON_MIN, AEGEAN_LON_MAX = 23.0, 28.0
+                AEGEAN_LAT_MIN, AEGEAN_LAT_MAX = 35.0, 42.0
+                aegean_mask = (
+                    (lat_data >= AEGEAN_LAT_MIN)
+                    & (lat_data <= AEGEAN_LAT_MAX)
+                    & (lon_data >= AEGEAN_LON_MIN)
+                    & (lon_data <= AEGEAN_LON_MAX)
+                )
 
                 # Find which columns (longitude) and rows (latitude) to keep
                 # For each column, check if ANY pixel in that column is in the target region
@@ -186,6 +194,8 @@ class CachedWaveDataset(Dataset):
                     region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
                 elif self.region_filter == "mediterranean":
                     region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
+                elif self.region_filter == "aegean":
+                    region_condition = aegean_mask
                 else:
                     raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -218,6 +228,13 @@ class CachedWaveDataset(Dataset):
                         (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
                     )
                     exclude = is_med
+                elif self.region_filter == "aegean":
+                    exclude = ~(
+                        (self.cropped_lat_grid >= AEGEAN_LAT_MIN)
+                        & (self.cropped_lat_grid <= AEGEAN_LAT_MAX)
+                        & (self.cropped_lon_grid >= AEGEAN_LON_MIN)
+                        & (self.cropped_lon_grid <= AEGEAN_LON_MAX)
+                    )
                 else:
                     exclude = None
                 if exclude is not None and exclude.any():
@@ -292,11 +309,15 @@ class CachedWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
             if self.region_filter == "atlantic":
+                print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
                 print("  Keeping pixels: lon < -5.5° OR (lat > 43° AND lon < 0°)")
             elif self.region_filter == "mediterranean":
+                print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
                 print("  Keeping pixels: lon >= -5.5° AND NOT (lat > 43° AND lon < 0°)")
+            elif self.region_filter == "aegean":
+                print("  Boundary: Aegean box (lat 35..42, lon 23..28)")
+                print("  Keeping pixels: 35 <= lat <= 42 AND 23 <= lon <= 28")
             print("================================\n")
         else:
             print("  No region filtering (using all pixels)")
