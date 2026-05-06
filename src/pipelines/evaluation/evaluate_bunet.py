@@ -3965,12 +3965,12 @@ class ModelEvaluator:
 
         # NEW: Save category breakdown to CSV
         print("Saving category breakdown to CSV...")
-        self.save_category_breakdown_csv(category_breakdown, self.output_dir)
-        self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
+        # self.save_category_breakdown_csv(category_breakdown, self.output_dir)
+        # self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
         print("Saving detailed low-bin diagnostics...")
-        self._save_low_bin_diagnostics(sea_bin_metrics)
+        # self._save_low_bin_diagnostics(sea_bin_metrics)
         print("Saving coastal-distance diagnostics...")
-        self._save_coastal_distance_diagnostics()
+        # self._save_coastal_distance_diagnostics()
         print("Saving grid-point time-series CSV...")
         self._save_grid_point_csv()
         print("Saving all-points temporal heatmap...")

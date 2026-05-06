@@ -10,7 +10,7 @@ fi
 #checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05/
 CONFIG_PATH="src/configs/config_dnn.yaml"
 SUFFIX=""
-REGION="mediterranean"
+REGION="aegean"
 OUTPUT_BASE="/mnt/Med-WAV/evaluation_results/${REGION}${SUFFIX}"
 ROOT_DIR="/mnt/blobstorage/checkpoints/"
 EXP_NAME="checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_beta_0.05"
