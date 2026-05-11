@@ -219,7 +219,7 @@ def plot_dist(dfd, path):
     sns.kdeplot(dfd["y_true"], ax=ax, label=label_ref, color=ref_color, linewidth=2.5, bw_adjust=0.7)
     sns.kdeplot(dfd["y_pred"], ax=ax, label=label_tr, color=trans_color, linewidth=1.5, bw_adjust=0.7, linestyle="--")
     sns.kdeplot(dfd["y_unco"], ax=ax, label=label_unc, color=uncor_color, linewidth=1.5, bw_adjust=0.7, alpha=0.5)
-    ax.set_xlim(0, 3)
+    ax.set_xlim(0, 6)
     ax.legend(
         loc="upper right",
         # bbox_to_anchor=(0.5, 1.25),  # Τοποθέτηση πάνω από το γράφημα
@@ -489,86 +489,95 @@ if __name__ == "__main__":
         f.write("====================================\n")
 
         Lat, Lon, Z, dfd = evaluate(df, None)
-        plot_map("all")
-        plot_dist(dfd, f"{out_dir}/all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_scatter_per_bin.png", "all")
+        # plot_map("all")
+        # plot_dist(dfd, f"{out_dir}/all_distr.pdf")
+        # plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_scatter_per_bin.png", "all")
 
-        Lat, Lon, Z, dfd = evaluate(df, 0.05)
-        plot_map("denoised_0.05")
-        plot_dist(dfd, f"{out_dir}/all_denoised_0.05_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_denoised_0.05_scatter_per_bin.png", "all_denoised_0.05")
+        # Lat, Lon, Z, dfd = evaluate(df, 0.05)
+        # Lat, Lon, Z, dfd = evaluate(df, 0.10)
+        # Lat, Lon, Z, dfd = evaluate(df, 0.15)
+        Lat, Lon, Z, dfd = evaluate(df, 0.20)
+        # Lat, Lon, Z, dfd = evaluate(df, 0.30)
+        # Lat, Lon, Z, dfd = evaluate(df, 0.40)
+        # Lat, Lon, Z, dfd = evaluate(df, 0.50)
+        # Lat, Lon, Z, dfd = evaluate(df, 1)
+        # Lat, Lon, Z, dfd = evaluate(df, 2)
+        # Lat, Lon, Z, dfd = evaluate(df, 5)
+        plot_map("denoised_0.20")
+        plot_dist(dfd, f"{out_dir}/all_denoised_0.20_distr.pdf")
+        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_denoised_0.20_scatter_per_bin.png", "all_denoised_0.20")
 
-        if region == "mediterranean":
-            f.write("\n====================================\n")
-            f.write("======= Aegean Evaluation ==========\n")
-            f.write("====================================\n")
-            # Aegean Sea bounds (approx)
-            lon_min, lon_max = 23, 28
-            lat_min, lat_max = 35, 42
+        # if region == "mediterranean":
+        #     f.write("\n====================================\n")
+        #     f.write("======= Aegean Evaluation ==========\n")
+        #     f.write("====================================\n")
+        #     # Aegean Sea bounds (approx)
+        #     lon_min, lon_max = 23, 28
+        #     lat_min, lat_max = 35, 42
 
-            df_aegean = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-            Lat, Lon, Z, dfd = evaluate(df_aegean, None)
-            plot_map("aegean_all")
-            plot_dist(dfd, f"{out_dir}/aegean_all_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_all_scatter_per_bin.png", "aegean_all")
+        #     df_aegean = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        #     Lat, Lon, Z, dfd = evaluate(df_aegean, None)
+        #     plot_map("aegean_all")
+        #     plot_dist(dfd, f"{out_dir}/aegean_all_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_all_scatter_per_bin.png", "aegean_all")
 
-            Lat, Lon, Z, dfd = evaluate(df_aegean, 0.05)
-            plot_map("aegean_denoised_0.05")
-            plot_dist(dfd, f"{out_dir}/aegean_denoised_0.05_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_denoised_0.05_scatter_per_bin.png", "aegean_denoised_0.05")
+        #     Lat, Lon, Z, dfd = evaluate(df_aegean, 0.05)
+        #     plot_map("aegean_denoised_0.05")
+        #     plot_dist(dfd, f"{out_dir}/aegean_denoised_0.05_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/aegean_denoised_0.05_scatter_per_bin.png", "aegean_denoised_0.05")
 
-            f.write("\n====================================\n")
-            f.write("======= Cyprus Evaluation ==========\n")
-            f.write("====================================\n")
-            # Cyprus Sea bounds (approx)
-            lon_min, lon_max = 31, 40
-            lat_min, lat_max = 31, 37
+        #     f.write("\n====================================\n")
+        #     f.write("======= Cyprus Evaluation ==========\n")
+        #     f.write("====================================\n")
+        #     # Cyprus Sea bounds (approx)
+        #     lon_min, lon_max = 31, 40
+        #     lat_min, lat_max = 31, 37
 
-            df_cyprus = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-            Lat, Lon, Z, dfd = evaluate(df_cyprus, None)
-            plot_map("cyprus_all")
-            plot_dist(dfd, f"{out_dir}/cyprus_all_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_all_scatter_per_bin.png", "cyprus_all")
+        #     df_cyprus = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        #     Lat, Lon, Z, dfd = evaluate(df_cyprus, None)
+        #     plot_map("cyprus_all")
+        #     plot_dist(dfd, f"{out_dir}/cyprus_all_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_all_scatter_per_bin.png", "cyprus_all")
 
-            Lat, Lon, Z, dfd = evaluate(df_cyprus, 0.05)
-            plot_map("cyprus_denoised")
-            plot_dist(dfd, f"{out_dir}/cyprus_denoised_0.05_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_denoised_0.05_scatter_per_bin.png", "cyprus_denoised_0.05")
+        #     Lat, Lon, Z, dfd = evaluate(df_cyprus, 0.05)
+        #     plot_map("cyprus_denoised")
+        #     plot_dist(dfd, f"{out_dir}/cyprus_denoised_0.05_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/cyprus_denoised_0.05_scatter_per_bin.png", "cyprus_denoised_0.05")
 
-            f.write("\n====================================\n")
-            f.write("======= North Italy Evaluation =====\n")
-            f.write("====================================\n")
-            # North Italy sea bounds approx)
-            lon_min, lon_max = 12, 18
-            lat_min, lat_max = 42, 46
+        #     f.write("\n====================================\n")
+        #     f.write("======= North Italy Evaluation =====\n")
+        #     f.write("====================================\n")
+        #     # North Italy sea bounds approx)
+        #     lon_min, lon_max = 12, 18
+        #     lat_min, lat_max = 42, 46
 
-            df_nitaly = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-            Lat, Lon, Z, dfd = evaluate(df_nitaly, None)
-            plot_map("north_italy_all")
-            plot_dist(dfd, f"{out_dir}/north_italy_all_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_all_scatter_per_bin.png", "north_italy_all")
+        #     df_nitaly = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        #     Lat, Lon, Z, dfd = evaluate(df_nitaly, None)
+        #     plot_map("north_italy_all")
+        #     plot_dist(dfd, f"{out_dir}/north_italy_all_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_all_scatter_per_bin.png", "north_italy_all")
 
-            Lat, Lon, Z, dfd = evaluate(df_nitaly, 0.05)
-            plot_map("north_italy_denoised_0.05")
-            plot_dist(dfd, f"{out_dir}/north_italy_denoised_0.05_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_denoised_0.05_scatter_per_bin.png", "north_italy_denoised_0.05")
+        #     Lat, Lon, Z, dfd = evaluate(df_nitaly, 0.05)
+        #     plot_map("north_italy_denoised_0.05")
+        #     plot_dist(dfd, f"{out_dir}/north_italy_denoised_0.05_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/north_italy_denoised_0.05_scatter_per_bin.png", "north_italy_denoised_0.05")
 
-            f.write("\n====================================\n")
-            f.write("======= Central Med Evaluation =====\n")
-            f.write("====================================\n")
-            # central mediterannean good region
-            lon_min, lon_max = 15, 20
-            lat_min, lat_max = 32, 40
+        #     f.write("\n====================================\n")
+        #     f.write("======= Central Med Evaluation =====\n")
+        #     f.write("====================================\n")
+        #     # central mediterannean good region
+        #     lon_min, lon_max = 15, 20
+        #     lat_min, lat_max = 32, 40
 
-            df_central = filter_area(df, lat_min, lon_min, lat_max, lon_max)
-            Lat, Lon, Z, dfd = evaluate(df_central, None)
-            plot_map("central_all")
-            plot_dist(dfd, f"{out_dir}/central_all_distr.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_all_scatter_per_bin.png", "central_all")
+        #     df_central = filter_area(df, lat_min, lon_min, lat_max, lon_max)
+        #     Lat, Lon, Z, dfd = evaluate(df_central, None)
+        #     plot_map("central_all")
+        #     plot_dist(dfd, f"{out_dir}/central_all_distr.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_all_scatter_per_bin.png", "central_all")
 
-            Lat, Lon, Z, dfd = evaluate(df_central, 0.05)
-            plot_map("central_denoised_0.05")
-            plot_dist(dfd, f"{out_dir}/central_denoised_0.05.pdf")
-            plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_denoised_0.05_scatter_per_bin.png", "canteal_denoised_0.05")
-        else:
-            f.write("\nSubregion evaluations skipped (region != mediterranean).\n")
+        #     Lat, Lon, Z, dfd = evaluate(df_central, 0.05)
+        #     plot_map("central_denoised_0.05")
+        #     plot_dist(dfd, f"{out_dir}/central_denoised_0.05.pdf")
+        #     plot_scatter_per_wave_bin(dfd, f"{out_dir}/central_denoised_0.05_scatter_per_bin.png", "canteal_denoised_0.05")
+        # else:
+        #     f.write("\nSubregion evaluations skipped (region != mediterranean).\n")
