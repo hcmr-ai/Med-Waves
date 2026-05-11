@@ -2163,7 +2163,8 @@ class ModelEvaluator:
                 )
             elif not self._denoise_warned_no_baseline:
                 logger.warning(
-                    "Denoising requested but baseline (vhm0) is unavailable; "
+                    f"Denoising requested but baseline for task '{self.task_name}' "
+                    "is unavailable; "
                     "denoise filter is not applied."
                 )
                 self._denoise_warned_no_baseline = True

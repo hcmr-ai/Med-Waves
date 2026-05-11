@@ -9,19 +9,19 @@ if ! command -v poetry >/dev/null 2>&1; then
 fi
 #checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05/
 CONFIG_PATH="src/configs/config_dnn.yaml"
-SUFFIX=""
-REGION="aegean"
+SUFFIX="_DENOISED"
+REGION="atlantic"
 OUTPUT_BASE="/mnt/Med-WAV/evaluation_results/${REGION}${SUFFIX}"
 ROOT_DIR="/mnt/blobstorage/checkpoints/"
-EXP_NAME="checkpoints_subsampled_step_5_100_val_23_test_22_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_beta_0.05"
-CHECKPOINT_STEM="epoch=02-val_loss=0.22.ckpt"
+EXP_NAME="checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05"
+CHECKPOINT_STEM="epoch=01-val_loss=0.34.ckpt"
 CKPT_DIR="${ROOT_DIR}/${EXP_NAME}/${CHECKPOINT_STEM}"
 TIMESTAMPS_CSV="/mnt/blobstorage/diagnostics/pt_timestamp_map.csv"
-DENOISE_ABS_THRESHOLD="0.05"
+DENOISE_ABS_THRESHOLD="0.20"
 export CONFIG_PATH OUTPUT_BASE CKPT_DIR
 
 # Region-specific sampled points file (atlantic/mediterranean/aegean)
-SAMPLED_POINTS_CSV="/mnt/blobstorage/diagnostics/sampled_grid_points_300/sampled_grid_points_mediterranean.csv"
+SAMPLED_POINTS_CSV="/mnt/blobstorage/diagnostics/sampled_grid_points_300/sampled_grid_points_atlantic.csv"
 if [[ ! -f "$SAMPLED_POINTS_CSV" ]]; then
   echo "Sampled points file not found: $SAMPLED_POINTS_CSV" >&2
   exit 1
@@ -37,7 +37,7 @@ EVAL_CMD=(
 #   --apply-geographic-filtering
   --sampled-points-csv "$SAMPLED_POINTS_CSV"
   --timestamps-csv "$TIMESTAMPS_CSV"
-#   --denoise-abs-threshold "$DENOISE_ABS_THRESHOLD"
+  --denoise-abs-threshold "$DENOISE_ABS_THRESHOLD"
 )
 "${EVAL_CMD[@]}"
 
@@ -82,7 +82,16 @@ PLOT_MAPS_CMD=(
 PLOT_POINTS_CMD=(
   poetry run python plot_points.py
   --csv "$RUN_DIR/grid_point_timeseries.csv"
-  --region mediterranean # "$REGION"
+  --region "$REGION"
   --output-dir "$RUN_DIR/plots_300/grid_point_timeseries"
 )
 "${PLOT_POINTS_CMD[@]}"
+
+NATIVE_SUMMARY_CMD=(
+  poetry run python native_plots_and_summary.py
+  --csv "$RUN_DIR/grid_point_timeseries.csv"
+  --region "$REGION"
+  --n-points 300
+  --output-dir "$RUN_DIR/plots_300_native/grid_point_timeseries"
+)
+"${NATIVE_SUMMARY_CMD[@]}"
