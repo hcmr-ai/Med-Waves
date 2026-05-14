@@ -148,16 +148,17 @@ def evaluate(dataset, denoise):
 
     df["delta"] = df["err_unc"] - df["err_pred"]  # >0 means improvement
 
+    df_filtered_out = None
     if denoise:
         abs_th = denoise
         sq_th = abs_th ** 2
         mask = df["err_unc"] > sq_th
         f.write(f"\nDenoising: \nabs err > {abs_th:.2f} m  ->  sq err > {sq_th:.4g}  ->  coverage {100 * np.mean(mask):.2f}%\n")
 
+        df_filtered_out = df[~mask].copy()
         df = df[mask]
-        # improvement_pct = (df["err_unc"][mask] - df["err_pred"][mask]) / df["err_unc"][mask] * 100
 
-    lat, lon, z = get_lat_lon_Z (df)
+    lat, lon, z = get_lat_lon_Z(df)
     rmse_y_unco = rmse(df["y_unco"], df["y_true"])
     rmse_y_pred = rmse(df["y_pred"], df["y_true"])
     global_rmse = 100 * ((rmse_y_unco - rmse_y_pred) / rmse_y_unco)
@@ -204,7 +205,7 @@ def evaluate(dataset, denoise):
     f.write(f"Median Hs: {np.median(y_bad):.2f}\n")
     f.write(f"P90 Hs: {np.percentile(y_bad, 90):.2f}\n")
 
-    return lat, lon, z, df
+    return lat, lon, z, df, df_filtered_out
 
 def plot_dist(dfd, path):
     ref_color = "#4285f4"
@@ -266,6 +267,49 @@ def plot_scatter(dfs, save_path):
     else:
         plt.show()
 
+    plt.close(fig)
+
+
+def plot_scatter_filtered_out(df_out, save_path):
+    """Scatter of filtered-out (low-noise) points.
+
+    x: |corrected − ground truth|, y: |uncorrected − ground truth|, with 1:1 line.
+    """
+    abs_err_cor = np.abs(df_out["y_pred"] - df_out["y_true"])
+    abs_err_unc = np.abs(df_out["y_unco"] - df_out["y_true"])
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    better = abs_err_cor < abs_err_unc
+    worse  = abs_err_cor >= abs_err_unc
+
+    ax.scatter(
+        abs_err_cor[better], abs_err_unc[better],
+        s=6, alpha=0.4, color="#2ca25f", label=f"Improved ({100*better.mean():.1f}%)",
+        rasterized=True,
+    )
+    ax.scatter(
+        abs_err_cor[worse], abs_err_unc[worse],
+        s=6, alpha=0.4, color="#d73027", label=f"Degraded ({100*worse.mean():.1f}%)",
+        rasterized=True,
+    )
+
+    lim = max(abs_err_cor.max(), abs_err_unc.max()) * 1.05
+    ax.plot([0, lim], [0, lim], "k--", linewidth=1, label="1:1")
+
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_xlabel("|corrected − ground truth|  (m)", fontsize=12)
+    ax.set_ylabel("|uncorrected − ground truth|  (m)", fontsize=12)
+    ax.set_title(f"Filtered-out points  (n={len(df_out):,})", fontsize=13)
+    ax.legend(fontsize=10)
+    ax.set_aspect("equal", adjustable="box")
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    else:
+        plt.show()
     plt.close(fig)
 
 
@@ -488,7 +532,7 @@ if __name__ == "__main__":
         f.write("======= Full Map Evaluation ========\n")
         f.write("====================================\n")
 
-        Lat, Lon, Z, dfd = evaluate(df, None)
+        Lat, Lon, Z, dfd, _ = evaluate(df, None)
         plot_map("all")
         plot_dist(dfd, f"{out_dir}/all_distr.pdf")
         plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_scatter_per_bin.png", "all")
