@@ -122,10 +122,11 @@ class WaveBiasCorrector(pl.LightningModule):
         if self.loss_type == "mse_ssim_perceptual" or self.loss_type == "mse_ssim":
             self.ssim_loss = SSIMLoss()
 
-        if (
-            self.loss_type == "smooth_l1"
-            or self.loss_type == "multi_bin_weighted_smooth_l1"
-        ):
+        if self.loss_type == "smooth_l1":
+            # masked_smooth_l1_loss returns criterion(...) directly, so keep scalar output.
+            self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="mean")
+        elif self.loss_type == "multi_bin_weighted_smooth_l1":
+            # Weighted variant needs per-pixel losses before custom reduction.
             self.criterion = torch.nn.SmoothL1Loss(beta=0.3, reduction="none")
 
         self.use_mdn = use_mdn
