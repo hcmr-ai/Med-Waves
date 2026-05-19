@@ -24,6 +24,7 @@ data:
   use_patch_sampling: false # Use patch sampling
   sampling_mode: exhaustive
   add_sea_mask_channel: true # Add sea mask channel to input
+  add_domain_mean_vhm0_channel: false
   predict_log_correction: false # Predict log correction (log(DA+eps) - log(raw+eps))
   predict_bias: true # If true, predict bias (corrected_VHM0 - VHM0), if false, predict corrected_VHM0
   predict_residual_to_prior: false # If true, train target as (bias - prior_bias) for residual learning
