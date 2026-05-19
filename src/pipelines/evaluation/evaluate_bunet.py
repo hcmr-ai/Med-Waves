@@ -66,6 +66,9 @@ from src.evaluation.evaluation_plots import (
     plot_low_bin_spatial_maps as plot_low_bin_spatial_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
+    plot_ref_error_scatter as plot_ref_error_scatter_fn,
+)
+from src.evaluation.evaluation_plots import (
     plot_rmse_maps as plot_rmse_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
@@ -3805,6 +3808,14 @@ class ModelEvaluator:
             vhm0_range=vhm0_range,
         )
 
+    def plot_ref_error_scatter(self):
+        """Plot (reference - uncorrected) vs (reference - corrected) scatter."""
+        plot_ref_error_scatter_fn(
+            plot_samples=self.plot_samples,
+            output_dir=self.output_dir,
+            unit=self.unit,
+        )
+
     def compute_per_point_improvement_stats(self, epsilon_m: float = 0.01) -> Dict:
         """Compute per-pixel relative improvement statistics.
 
@@ -3995,6 +4006,7 @@ class ModelEvaluator:
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
+        self.plot_ref_error_scatter()
         # self.plot_bin_spatial_rmse_maps()
         # self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
@@ -4015,6 +4027,26 @@ class ModelEvaluator:
         # self.print_category_breakdown(category_breakdown)
 
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
+
+
+def _extract_ema_weights_from_ckpt(ckpt: dict):
+    """Return EMA weights from known checkpoint locations, or (None, None)."""
+    # Legacy/custom top-level location.
+    top_level = ckpt.get("ema_weights", None)
+    if top_level is not None:
+        return top_level, "ckpt['ema_weights']"
+
+    # Lightning callback-state location.
+    callbacks = ckpt.get("callbacks", None)
+    if isinstance(callbacks, dict):
+        for cb_key, cb_state in callbacks.items():
+            if not isinstance(cb_state, dict):
+                continue
+            ema = cb_state.get("ema_weights", None)
+            if ema is not None:
+                return ema, f"ckpt['callbacks'][{cb_key!r}]['ema_weights']"
+
+    return None, None
 
 
 def main(evaluator_class=None):
@@ -4379,15 +4411,22 @@ def main(evaluator_class=None):
             predict_residual_to_prior,
         )
 
-        if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
-            logger.info("Applying EMA weights for evaluation...")
-            ema_weights = [w.to(model.device) for w in ckpt["ema_weights"]]
+        ema_weights, ema_source = _extract_ema_weights_from_ckpt(ckpt)
+        if ema_weights is not None:
+            logger.info("Applying EMA weights for evaluation from %s...", ema_source)
+            ema_weights = [w.to(model.device) for w in ema_weights]
 
             # Copy into model
             for ema_param, param in zip(ema_weights, model.parameters(), strict=False):
                 param.data.copy_(ema_param.data)
         else:
             logger.info("No EMA weights found in checkpoint. Using standard weights.")
+            if training_config.get("use_ema", False):
+                logger.info(
+                    "Config has training.use_ema=true. If this was an EMA run, "
+                    "the checkpoint may have been saved before EMA initialization "
+                    "(early steps) or from a run without EMA callback state."
+                )
 
         # Create geographic bounds dictionary if filtering is requested
         geo_bounds = None

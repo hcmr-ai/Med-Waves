@@ -655,7 +655,8 @@ class WaveBiasCorrector(pl.LightningModule):
         """
         # Backward compatibility: single task
         if not isinstance(predictions, dict):
-            residual_pred = predictions if self.predict_residual_to_prior else None
+            residual_pred = predictions if (self.predict_residual_to_prior or self.predict_bias) else None
+
             loss = self.compute_loss(
                 predictions,
                 targets,
@@ -680,8 +681,8 @@ class WaveBiasCorrector(pl.LightningModule):
             y_true = targets[task_name]
             residual_pred = (
                 y_pred
-                if self.predict_residual_to_prior
-                and task_name == self.residual_prior_task
+                if (self.predict_residual_to_prior and task_name == self.residual_prior_task)
+                or self.predict_bias
                 else None
             )
 

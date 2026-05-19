@@ -118,6 +118,26 @@ def _configure_torch_precision() -> None:
     logger.info("Configured precision using legacy TF32 flags")
 
 
+def _resolve_tensorboard_log_dir(configured_log_dir: str) -> str:
+    """Return a writable TensorBoard directory, falling back to local storage if needed."""
+    candidates = [
+        configured_log_dir,
+        str(Path.home() / ".cache" / "medwav" / "tensorboard"),
+        str(Path.cwd() / "logs"),
+        tempfile.gettempdir(),
+    ]
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe_path = Path(candidate) / ".write_probe"
+            probe_path.write_text("ok")
+            probe_path.unlink(missing_ok=True)
+            return candidate
+        except OSError:
+            continue
+    return configured_log_dir
+
+
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
     import glob
@@ -367,7 +387,18 @@ def main():
 
     # Create directories
     os.makedirs(config.config["checkpoint"]["checkpoint_dir"], exist_ok=True)
-    os.makedirs(config.config["logging"]["log_dir"], exist_ok=True)
+    if config.config["logging"].get("use_tensorboard", None) is not False:
+        tensorboard_log_dir = _resolve_tensorboard_log_dir(
+            config.config["logging"]["log_dir"]
+        )
+        config.config["logging"]["resolved_tensorboard_log_dir"] = tensorboard_log_dir
+        os.makedirs(tensorboard_log_dir, exist_ok=True)
+        if tensorboard_log_dir != config.config["logging"]["log_dir"]:
+            logger.warning(
+                "TensorBoard log_dir '%s' is not writable; falling back to '%s'",
+                config.config["logging"]["log_dir"],
+                tensorboard_log_dir,
+            )
 
     # Initialize S3 filesystem only when data is on S3
     data_path = config.config["data"]["data_path"]
@@ -549,10 +580,16 @@ def main():
     callbacks = create_callbacks(config)
 
     # Create loggers
-    tensorboard_logger = TensorBoardLogger(
-        save_dir=config.config["logging"]["log_dir"],
-        name=config.config["logging"]["experiment_name"],
-    )
+    use_comet = config.config["logging"]["use_comet"]
+    use_tensorboard = config.config["logging"].get("use_tensorboard", not use_comet)
+    tensorboard_logger = None
+    if use_tensorboard:
+        tensorboard_logger = TensorBoardLogger(
+            save_dir=config.config["logging"].get(
+                "resolved_tensorboard_log_dir", config.config["logging"]["log_dir"]
+            ),
+            name=config.config["logging"]["experiment_name"],
+        )
     comet_logger = CometLogger(
         api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
         workspace="ioannisgkinis",
@@ -566,7 +603,7 @@ def main():
     )
 
     # Log training artifacts (scripts, config, git info)
-    if config.config["logging"]["use_comet"]:
+    if use_comet:
         logger.info(f"Comet experiment URL: {comet_logger.experiment.url}")
         _log_training_artifacts(comet_logger, args.config)
 
@@ -590,11 +627,17 @@ def main():
         )
 
     # Use both loggers
-    loggers = (
-        [tensorboard_logger]
-        if not config.config["logging"]["use_comet"]
-        else [tensorboard_logger, comet_logger]
-    )
+    loggers = []
+    if tensorboard_logger is not None:
+        loggers.append(tensorboard_logger)
+    if use_comet:
+        loggers.append(comet_logger)
+    if not loggers:
+        logger.warning(
+            "No external logger enabled (use_comet=false, use_tensorboard=false);"
+            " Lightning will use its default logger."
+        )
+        loggers = True
 
     # Create trainer
     training_config = config.config["training"]
