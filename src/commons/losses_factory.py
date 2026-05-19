@@ -66,7 +66,18 @@ def compute_loss(
     def _with_residual_penalty(base_loss):
         if residual_pred is None or residual_penalty_lambda <= 0:
             return base_loss
-        penalty = (residual_pred**2)[mask].mean()
+        if vhm0_for_reconstruction is not None:
+            # Relative penalty: λ · mean((Δ_pred / (VHM0 + ε))²)
+            # Suppresses overcorrection where VHM0 is small (0-0.2m regime)
+            # without over-penalising legitimate corrections at higher wave heights.
+            import torch
+            eps = 1e-3
+            vhm0_clean = torch.nan_to_num(vhm0_for_reconstruction, nan=0.0)
+            rel = residual_pred / (vhm0_clean + eps)
+            penalty = (rel**2)[mask].mean()
+        else:
+            # Fallback: absolute penalty when VHM0 not available
+            penalty = (residual_pred**2)[mask].mean()
         return base_loss + residual_penalty_lambda * penalty
 
     if loss_type == "mse":
