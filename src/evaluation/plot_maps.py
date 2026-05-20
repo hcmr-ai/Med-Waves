@@ -139,7 +139,7 @@ def filter_area(data_full, lat_min, lon_min, lat_max, lon_max):
         ]
     return df_filtered
 
-def evaluate(dataset, denoise):
+def evaluate(dataset, denoise, subset="all"):
     df = copy.deepcopy(dataset)
 
     # ---- Per-sample squared error improvement ----
@@ -147,6 +147,17 @@ def evaluate(dataset, denoise):
     df["err_pred"] = (df["y_pred"] - df["y_true"]) ** 2
 
     df["delta"] = df["err_unc"] - df["err_pred"]  # >0 means improvement
+
+    # Optional subset analysis
+    subset = (subset or "all").lower()
+    if subset == "degraded":
+        df = df[df["delta"] < 0].copy()
+    elif subset == "improved":
+        df = df[df["delta"] > 0].copy()
+
+    if len(df) == 0:
+        f.write(f"\nSubset '{subset}' has no samples. Skipping metrics.\n")
+        return None, None, None, df, None
 
     df_filtered_out = None
     if denoise:
@@ -157,6 +168,12 @@ def evaluate(dataset, denoise):
 
         df_filtered_out = df[~mask].copy()
         df = df[mask]
+
+        if len(df) == 0:
+            f.write(
+                f"\nSubset '{subset}' has no samples after denoising threshold {abs_th:.2f}m.\n"
+            )
+            return None, None, None, df, df_filtered_out
 
     lat, lon, z = get_lat_lon_Z(df)
     rmse_y_unco = rmse(df["y_unco"], df["y_true"])
@@ -204,6 +221,70 @@ def evaluate(dataset, denoise):
     f.write(f"Std Hs: {np.std(y_bad):.2f}\n")
     f.write(f"Median Hs: {np.median(y_bad):.2f}\n")
     f.write(f"P90 Hs: {np.percentile(y_bad, 90):.2f}\n")
+
+    # Detailed error summaries to verify absolute error magnitudes.
+    _write_case_stats("All samples")
+    _write_case_stats("Improved samples", improvement_pct > 0)
+    _write_case_stats("Degraded samples", improvement_pct < 0)
+
+    if df_filtered_out is not None and len(df_filtered_out) > 0:
+        f.write("\n=== Filtered-out subset (low-noise points) ===\n")
+        f.write(f"Count: {len(df_filtered_out)}\n")
+        f.write(f"Percentage of original samples: {100 * len(df_filtered_out) / len(dataset):.2f}%\n")
+
+        rmse_out_unc = rmse(df_filtered_out["y_unco"], df_filtered_out["y_true"])
+        rmse_out_pred = rmse(df_filtered_out["y_pred"], df_filtered_out["y_true"])
+        mae_out_unc = np.mean(np.abs(df_filtered_out["y_unco"] - df_filtered_out["y_true"]))
+        mae_out_pred = np.mean(np.abs(df_filtered_out["y_pred"] - df_filtered_out["y_true"]))
+
+        rmse_out_impr = (
+            100 * (rmse_out_unc - rmse_out_pred) / rmse_out_unc if rmse_out_unc > 0 else 0.0
+        )
+        mae_out_impr = (
+            100 * (mae_out_unc - mae_out_pred) / mae_out_unc if mae_out_unc > 0 else 0.0
+        )
+
+        f.write(f"RMSE uncorrected: {rmse_out_unc:.6f}\n")
+        f.write(f"RMSE corrected:   {rmse_out_pred:.6f}\n")
+        f.write(f"RMSE improvement: {rmse_out_impr:.4f}%\n")
+        f.write(f"MAE uncorrected:  {mae_out_unc:.6f}\n")
+        f.write(f"MAE corrected:    {mae_out_pred:.6f}\n")
+        f.write(f"MAE improvement:  {mae_out_impr:.4f}%\n")
+
+        eps_out = 1e-8
+        err_unc_out = (df_filtered_out["y_unco"] - df_filtered_out["y_true"]) ** 2
+        err_pred_out = (df_filtered_out["y_pred"] - df_filtered_out["y_true"]) ** 2
+        imp_pct_out = ((err_unc_out - err_pred_out) / (err_unc_out + eps_out)) * 100
+
+        f.write("\nFiltered-out denominator diagnostics (err_unc):\n")
+        f.write(f"{err_unc_out.describe()}\n")
+        for thr in [1e-8, 1e-6, 1e-4, 1e-3]:
+            cnt_thr = int((err_unc_out < thr).sum())
+            pct_thr = 100.0 * cnt_thr / len(err_unc_out)
+            f.write(f"err_unc < {thr:.0e}: {cnt_thr} ({pct_thr:.2f}%)\n")
+
+        f.write("\nFiltered-out relative improvement (%) diagnostics:\n")
+        f.write(f"{imp_pct_out.describe()}\n")
+        q = imp_pct_out.quantile([0.01, 0.05, 0.95, 0.99])
+        f.write(
+            "p01/p05/p95/p99: "
+            f"{q.loc[0.01]:.2f}, {q.loc[0.05]:.2f}, {q.loc[0.95]:.2f}, {q.loc[0.99]:.2f}\n"
+        )
+        imp_pct_out_clipped = imp_pct_out.clip(-500, 500)
+        f.write(
+            "clipped[-500,500] mean/std: "
+            f"{imp_pct_out_clipped.mean():.2f} / {imp_pct_out_clipped.std():.2f}\n"
+        )
+
+        delta_out = (
+            (df_filtered_out["y_unco"] - df_filtered_out["y_true"]) ** 2
+            - (df_filtered_out["y_pred"] - df_filtered_out["y_true"]) ** 2
+        )
+        improved_out = np.sum(delta_out > 0)
+        f.write(
+            f"Improved samples in filtered-out subset: {improved_out} "
+            f"({100 * improved_out / len(df_filtered_out):.2f}%)\n"
+        )
 
     return lat, lon, z, df, df_filtered_out
 
@@ -432,6 +513,16 @@ if __name__ == "__main__":
             "'atlantic' skips them."
         ),
     )
+    parser.add_argument(
+        "--subset",
+        type=str,
+        default="all",
+        choices=["all", "degraded", "improved"],
+        help=(
+            "Sample subset for diagnostics: all points, only degraded points "
+            "(model worse than uncorrected), or only improved points."
+        ),
+    )
     args = parser.parse_args()
 
     data = np.load(args.input_npz)
@@ -443,6 +534,7 @@ if __name__ == "__main__":
     with open(f"{out_dir}/statistics.txt", "w") as f:
         f.write(f"Model: {model}\n"
                 f"Metric: {metric}\n"
+                f"Subset: {args.subset}\n"
                 f"==================\n\n")
         y_true = data['y_true']
         y_pred = data['y_pred']
@@ -531,13 +623,23 @@ if __name__ == "__main__":
         f.write("\n====================================\n")
         f.write("======= Full Map Evaluation ========\n")
         f.write("====================================\n")
+        subset_tag = args.subset
+        if subset_tag == "all":
+            subset_tag = "all"
 
-        Lat, Lon, Z, dfd, _ = evaluate(df, None)
-        plot_map("all")
-        plot_dist(dfd, f"{out_dir}/all_distr.pdf")
-        plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_scatter_per_bin.png", "all")
+        Lat, Lon, Z, dfd, _ = evaluate(df, None, subset=args.subset)
+        if Lat is not None:
+            plot_map(subset_tag)
+            plot_dist(dfd, f"{out_dir}/{subset_tag}_distr.pdf")
+            plot_scatter_per_wave_bin(
+                dfd,
+                f"{out_dir}/{subset_tag}_scatter_per_bin.png",
+                subset_tag,
+            )
+        else:
+            f.write(f"Skipping full-map plots for subset '{args.subset}' (no data).\n")
 
-        # Lat, Lon, Z, dfd = evaluate(df, 0.05)
+        Lat, Lon, Z, dfd, dfd_filtered_out = evaluate(df, 0.05, subset=args.subset)
         # Lat, Lon, Z, dfd = evaluate(df, 0.10)
         # Lat, Lon, Z, dfd = evaluate(df, 0.15)
         # Lat, Lon, Z, dfd = evaluate(df, 0.20)
@@ -547,9 +649,28 @@ if __name__ == "__main__":
         # Lat, Lon, Z, dfd = evaluate(df, 1)
         # Lat, Lon, Z, dfd = evaluate(df, 2)
         # Lat, Lon, Z, dfd = evaluate(df, 5)
-        # plot_map("denoised_0.20")
-        # plot_dist(dfd, f"{out_dir}/all_denoised_0.20_distr.pdf")
-        # plot_scatter_per_wave_bin(dfd, f"{out_dir}/all_denoised_0.20_scatter_per_bin.png", "all_denoised_0.20")
+        if Lat is not None:
+            plot_map(f"{subset_tag}_denoised_0.05")
+            plot_dist(dfd, f"{out_dir}/{subset_tag}_denoised_0.05_distr.pdf")
+            plot_scatter_per_wave_bin(
+                dfd,
+                f"{out_dir}/{subset_tag}_denoised_0.05_scatter_per_bin.png",
+                f"{subset_tag}_denoised_0.05",
+            )
+        else:
+            f.write(f"Skipping denoised plots for subset '{args.subset}' (no data).\n")
+        if dfd_filtered_out is not None and len(dfd_filtered_out) > 0:
+            plot_dist(dfd_filtered_out, f"{out_dir}/{subset_tag}_filtered_out_0.05_distr.pdf")
+            plot_scatter_per_wave_bin(
+                dfd_filtered_out,
+                f"{out_dir}/{subset_tag}_filtered_out_0.05_scatter_per_bin.png",
+                f"{subset_tag}_filtered_out_0.05",
+            )
+            f.write("\n====================================\n")
+            f.write("=== Filtered-out subset map eval ===\n")
+            f.write("====================================\n")
+            Lat, Lon, Z = get_lat_lon_Z(dfd_filtered_out)
+            plot_map(f"{subset_tag}_filtered_out_0.05")
 
         # if region == "mediterranean":
         #     f.write("\n====================================\n")

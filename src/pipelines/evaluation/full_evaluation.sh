@@ -9,19 +9,19 @@ if ! command -v poetry >/dev/null 2>&1; then
 fi
 #checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05/
 CONFIG_PATH="src/configs/config_dnn.yaml"
-SUFFIX="_DENOISED"
-REGION="atlantic"
+SUFFIX=""
+REGION="mediterranean"
 OUTPUT_BASE="/mnt/Med-WAV/evaluation_results/${REGION}${SUFFIX}"
 ROOT_DIR="/mnt/blobstorage/checkpoints/"
-EXP_NAME="checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_vtm02_atlantic_16_128_1layer_dropout_0.2_beta_0.05"
-CHECKPOINT_STEM="epoch=01-val_loss=0.34.ckpt"
+EXP_NAME="checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_penalty_0.01"
+CHECKPOINT_STEM="epoch=08-val_loss=0.05.ckpt"
 CKPT_DIR="${ROOT_DIR}/${EXP_NAME}/${CHECKPOINT_STEM}"
 TIMESTAMPS_CSV="/mnt/blobstorage/diagnostics/pt_timestamp_map.csv"
-DENOISE_ABS_THRESHOLD="0.20"
+DENOISE_ABS_THRESHOLD=null
 export CONFIG_PATH OUTPUT_BASE CKPT_DIR
 
 # Region-specific sampled points file (atlantic/mediterranean/aegean)
-SAMPLED_POINTS_CSV="/mnt/blobstorage/diagnostics/sampled_grid_points_300/sampled_grid_points_atlantic.csv"
+SAMPLED_POINTS_CSV="/mnt/blobstorage/diagnostics/sampled_grid_points_300/sampled_grid_points_mediterranean.csv"
 if [[ ! -f "$SAMPLED_POINTS_CSV" ]]; then
   echo "Sampled points file not found: $SAMPLED_POINTS_CSV" >&2
   exit 1
@@ -37,7 +37,7 @@ EVAL_CMD=(
 #   --apply-geographic-filtering
   --sampled-points-csv "$SAMPLED_POINTS_CSV"
   --timestamps-csv "$TIMESTAMPS_CSV"
-  --denoise-abs-threshold "$DENOISE_ABS_THRESHOLD"
+  # --denoise-abs-threshold "$DENOISE_ABS_THRESHOLD"
 )
 "${EVAL_CMD[@]}"
 
@@ -78,6 +78,14 @@ PLOT_MAPS_CMD=(
   --region "$REGION"
 )
 "${PLOT_MAPS_CMD[@]}"
+
+GLOBAL_EVAL_CMD=(
+  poetry run python global_evaluation.py
+  --input-npz "$RUN_DIR/plot_samples.npz"
+  --output-dir "$RUN_DIR/global_evaluation"
+  --threshold-cm 5.0
+)
+"${GLOBAL_EVAL_CMD[@]}"
 
 PLOT_POINTS_CMD=(
   poetry run python plot_points.py
