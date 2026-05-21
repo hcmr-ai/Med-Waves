@@ -1803,3 +1803,94 @@ def plot_vhm0_distributions(
     plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"Saved VHM0 distribution plot to {output_dir / fname}")
+
+
+def plot_ref_error_scatter(
+    plot_samples: Dict,
+    output_dir: Path,
+    unit: str,
+    max_points: int = 250000,
+    random_seed: int = 42,
+) -> None:
+    """Scatter plot: (reference - uncorrected) vs (reference - corrected)."""
+    y_true = np.asarray(plot_samples.get("y_true", []), dtype=np.float64)
+    y_pred = np.asarray(plot_samples.get("y_pred", []), dtype=np.float64)
+    y_unc = np.asarray(plot_samples.get("y_uncorrected", []), dtype=np.float64)
+
+    if y_true.size == 0 or y_pred.size == 0 or y_unc.size == 0:
+        logger.warning(
+            "Skipping ref-error scatter: missing y_true/y_pred/y_uncorrected samples."
+        )
+        return
+
+    n = min(y_true.size, y_pred.size, y_unc.size)
+    x = y_true[:n] - y_unc[:n]   # reference - uncorrected
+    y = y_true[:n] - y_pred[:n]  # reference - corrected
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size == 0:
+        logger.warning("Skipping ref-error scatter: no finite samples.")
+        return
+
+    n_total = int(x.size)
+    if n_total > max_points:
+        rng = np.random.default_rng(random_seed)
+        keep_idx = rng.choice(n_total, size=max_points, replace=False)
+        x_plot = x[keep_idx]
+        y_plot = y[keep_idx]
+    else:
+        x_plot = x
+        y_plot = y
+
+    improved = np.abs(y_plot) < np.abs(x_plot)
+    degraded = ~improved
+    improved_pct = 100.0 * float(np.mean(improved))
+    degraded_pct = 100.0 * float(np.mean(degraded))
+
+    lim = float(np.nanpercentile(np.abs(np.concatenate([x_plot, y_plot])), 99.5))
+    if not np.isfinite(lim) or lim <= 0:
+        lim = float(max(np.nanmax(np.abs(x_plot)), np.nanmax(np.abs(y_plot)), 1e-3))
+    lim *= 1.05
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.scatter(
+        x_plot[improved],
+        y_plot[improved],
+        s=6,
+        alpha=0.4,
+        color="#2ca25f",
+        label=f"Improved ({improved_pct:.1f}%)",
+        rasterized=True,
+    )
+    ax.scatter(
+        x_plot[degraded],
+        y_plot[degraded],
+        s=6,
+        alpha=0.4,
+        color="#d73027",
+        label=f"Degraded ({degraded_pct:.1f}%)",
+        rasterized=True,
+    )
+    ax.plot([-lim, lim], [-lim, lim], "k--", linewidth=1, label="1:1")
+    ax.axhline(0.0, color="gray", linewidth=0.7, alpha=0.5)
+    ax.axvline(0.0, color="gray", linewidth=0.7, alpha=0.5)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(f"Reference - Uncorrected ({unit})", fontsize=12, fontweight="bold")
+    ax.set_ylabel(f"Reference - Corrected ({unit})", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"Per-point Error Comparison (n={n_total:,})",
+        fontsize=13,
+        fontweight="bold",
+    )
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.35)
+    ax.legend(fontsize=10, frameon=True, loc="upper left")
+    fig.tight_layout()
+
+    out_png = output_dir / "scatter_ref_minus_uncorrected_vs_ref_minus_corrected.png"
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Saved reference-error scatter → %s", out_png)
+

@@ -123,6 +123,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
             max_cache_size=data_config.get("max_cache_size", 20),
             region_filter=region_filter,
             add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
+            add_domain_mean_vhm0_channel=data_config.get("add_domain_mean_vhm0_channel", False),
             predict_residual_to_prior=predict_residual_to_prior,
             prior_source=prior_source,
             static_bias_map_path=static_bias_map_path,
@@ -175,6 +176,7 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         max_cache_size=data_config.get("max_cache_size", 20),
         region_filter=region_filter,
         add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
+        add_domain_mean_vhm0_channel=data_config.get("add_domain_mean_vhm0_channel", False),
         predict_residual_to_prior=predict_residual_to_prior,
         prior_source=prior_source,
         static_bias_map_path=static_bias_map_path,
@@ -298,7 +300,45 @@ def create_data_loaders(config: DNNConfig, fs: s3fs.S3FileSystem) -> tuple:
         # timeout=300  # 5 minute timeout for S3 loading
     )
 
+    eval_loader = None
+    if training_config.get("run_eval_each_epoch", False):
+        eval_dataset = CachedWaveDataset(
+            test_files,
+            patch_size=patch_size,
+            excluded_columns=excluded_columns,
+            target_columns=target_columns,
+            predict_bias=predict_bias,
+            subsample_step=subsample_step,
+            normalizer=normalizer,
+            enable_profiler=True,
+            use_cache=data_config.get("use_cache", False),
+            normalize_target=data_config.get("normalize_target", False),
+            fs=fs,
+            max_cache_size=data_config.get("max_cache_size", 20),
+            region_filter=region_filter,
+            add_sea_mask_channel=data_config.get("add_sea_mask_channel", False),
+            add_domain_mean_vhm0_channel=data_config.get("add_domain_mean_vhm0_channel", False),
+            predict_residual_to_prior=predict_residual_to_prior,
+            prior_source=prior_source,
+            static_bias_map_path=static_bias_map_path,
+            residual_prior_task=residual_prior_task,
+        )
+        eval_loader = DataLoader(
+            eval_dataset,
+            batch_size=training_config["batch_size"],
+            shuffle=False,
+            num_workers=training_config["num_workers"],
+            pin_memory=training_config["pin_memory"],
+            persistent_workers=training_config.get(
+                "persistent_workers", training_config["num_workers"] > 0
+            ),
+            prefetch_factor=None,
+            sampler=None,
+        )
+
     logger.info(f"Train loader: {len(train_loader)} batches")
     logger.info(f"Val loader: {len(val_loader)} batches")
+    if eval_loader is not None:
+        logger.info(f"Eval loader: {len(eval_loader)} batches")
 
-    return train_loader, val_loader, normalizer
+    return train_loader, val_loader, eval_loader, normalizer

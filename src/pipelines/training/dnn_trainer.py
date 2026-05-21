@@ -118,6 +118,26 @@ def _configure_torch_precision() -> None:
     logger.info("Configured precision using legacy TF32 flags")
 
 
+def _resolve_tensorboard_log_dir(configured_log_dir: str) -> str:
+    """Return a writable TensorBoard directory, falling back to local storage if needed."""
+    candidates = [
+        configured_log_dir,
+        str(Path.home() / ".cache" / "medwav" / "tensorboard"),
+        str(Path.cwd() / "logs"),
+        tempfile.gettempdir(),
+    ]
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe_path = Path(candidate) / ".write_probe"
+            probe_path.write_text("ok")
+            probe_path.unlink(missing_ok=True)
+            return candidate
+        except OSError:
+            continue
+    return configured_log_dir
+
+
 def _log_training_artifacts(comet_logger, config_file):
     """Log all training scripts and configuration to Comet ML"""
     import glob
@@ -367,7 +387,18 @@ def main():
 
     # Create directories
     os.makedirs(config.config["checkpoint"]["checkpoint_dir"], exist_ok=True)
-    os.makedirs(config.config["logging"]["log_dir"], exist_ok=True)
+    if config.config["logging"].get("use_tensorboard", None) is not False:
+        tensorboard_log_dir = _resolve_tensorboard_log_dir(
+            config.config["logging"]["log_dir"]
+        )
+        config.config["logging"]["resolved_tensorboard_log_dir"] = tensorboard_log_dir
+        os.makedirs(tensorboard_log_dir, exist_ok=True)
+        if tensorboard_log_dir != config.config["logging"]["log_dir"]:
+            logger.warning(
+                "TensorBoard log_dir '%s' is not writable; falling back to '%s'",
+                config.config["logging"]["log_dir"],
+                tensorboard_log_dir,
+            )
 
     # Initialize S3 filesystem only when data is on S3
     data_path = config.config["data"]["data_path"]
@@ -385,7 +416,7 @@ def main():
             "Consider setting num_workers=0 or pre-downloading data locally."
         )
 
-    train_loader, val_loader, normalizer = create_data_loaders(config, fs)
+    train_loader, val_loader, eval_loader, normalizer = create_data_loaders(config, fs)
 
     # Create model
     model_config = config.config["model"]
@@ -459,6 +490,18 @@ def main():
             transformer_sea_mask_channel_index=model_config.get(
                 "transformer_sea_mask_channel_index", None
             ),
+            num_experts=model_config.get("num_experts", 3),
+            gate_temperature=model_config.get("gate_temperature", 1.0),
+            gate_entropy_weight=model_config.get("gate_entropy_weight", 0.0),
+            gate_balance_weight=model_config.get("gate_balance_weight", 0.0),
+            gate_prior_weight=model_config.get("gate_prior_weight", 0.0),
+            gate_bin_edges=model_config.get("gate_bin_edges", [1.0, 3.0]),
+            gate_input_mode=model_config.get("gate_input_mode", "features"),
+            gate_input_channels=model_config.get("gate_input_channels", None),
+            expert_diversity_weight=model_config.get("expert_diversity_weight", 0.0),
+            expert_dropout=model_config.get("expert_dropout", 0.0),
+            transformer_dropout=model_config.get("transformer_dropout", 0.0),
+            return_gate_maps=model_config.get("return_gate_maps", True),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
@@ -508,6 +551,18 @@ def main():
             transformer_sea_mask_channel_index=model_config.get(
                 "transformer_sea_mask_channel_index", None
             ),
+            num_experts=model_config.get("num_experts", 3),
+            gate_temperature=model_config.get("gate_temperature", 1.0),
+            gate_entropy_weight=model_config.get("gate_entropy_weight", 0.0),
+            gate_balance_weight=model_config.get("gate_balance_weight", 0.0),
+            gate_prior_weight=model_config.get("gate_prior_weight", 0.0),
+            gate_bin_edges=model_config.get("gate_bin_edges", [1.0, 3.0]),
+            gate_input_mode=model_config.get("gate_input_mode", "features"),
+            gate_input_channels=model_config.get("gate_input_channels", None),
+            expert_diversity_weight=model_config.get("expert_diversity_weight", 0.0),
+            expert_dropout=model_config.get("expert_dropout", 0.0),
+            transformer_dropout=model_config.get("transformer_dropout", 0.0),
+            return_gate_maps=model_config.get("return_gate_maps", True),
             tasks_config=model_config.get("tasks_config", None),
             normalizer=normalizer,
             normalize_target=data_config.get("normalize_target", False),
@@ -525,10 +580,16 @@ def main():
     callbacks = create_callbacks(config)
 
     # Create loggers
-    tensorboard_logger = TensorBoardLogger(
-        save_dir=config.config["logging"]["log_dir"],
-        name=config.config["logging"]["experiment_name"],
-    )
+    use_comet = config.config["logging"]["use_comet"]
+    use_tensorboard = config.config["logging"].get("use_tensorboard", not use_comet)
+    tensorboard_logger = None
+    if use_tensorboard:
+        tensorboard_logger = TensorBoardLogger(
+            save_dir=config.config["logging"].get(
+                "resolved_tensorboard_log_dir", config.config["logging"]["log_dir"]
+            ),
+            name=config.config["logging"]["experiment_name"],
+        )
     comet_logger = CometLogger(
         api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
         workspace="ioannisgkinis",
@@ -542,7 +603,7 @@ def main():
     )
 
     # Log training artifacts (scripts, config, git info)
-    if config.config["logging"]["use_comet"]:
+    if use_comet:
         logger.info(f"Comet experiment URL: {comet_logger.experiment.url}")
         _log_training_artifacts(comet_logger, args.config)
 
@@ -566,11 +627,17 @@ def main():
         )
 
     # Use both loggers
-    loggers = (
-        [tensorboard_logger]
-        if not config.config["logging"]["use_comet"]
-        else [tensorboard_logger, comet_logger]
-    )
+    loggers = []
+    if tensorboard_logger is not None:
+        loggers.append(tensorboard_logger)
+    if use_comet:
+        loggers.append(comet_logger)
+    if not loggers:
+        logger.warning(
+            "No external logger enabled (use_comet=false, use_tensorboard=false);"
+            " Lightning will use its default logger."
+        )
+        loggers = True
 
     # Create trainer
     training_config = config.config["training"]
@@ -604,21 +671,33 @@ def main():
     logger.info(
         f"Training with {len(train_loader)} train batches and {len(val_loader)} val batches"
     )
+    run_eval_each_epoch = training_config.get("run_eval_each_epoch", False)
+    val_dataloaders = (
+        [val_loader, eval_loader]
+        if run_eval_each_epoch and eval_loader is not None
+        else val_loader
+    )
+    if run_eval_each_epoch and eval_loader is not None:
+        logger.info("Eval-at-epoch-end enabled with %d eval batches", len(eval_loader))
 
     # Only pass ckpt_path if we actually have a checkpoint to resume from
     if config.config["training"]["finetune_model"]:
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(
+            model, train_dataloaders=train_loader, val_dataloaders=val_dataloaders
+        )
     elif resume_path is not None:
         logger.info(f"Resuming from checkpoint: {resume_path}")
         trainer.fit(
             model,
             train_dataloaders=train_loader,
-            val_dataloaders=val_loader,
+            val_dataloaders=val_dataloaders,
             ckpt_path=resume_path,
         )
     else:
         logger.info("Training from scratch (no checkpoint)")
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(
+            model, train_dataloaders=train_loader, val_dataloaders=val_dataloaders
+        )
 
     logger.info("Training completed!")
 

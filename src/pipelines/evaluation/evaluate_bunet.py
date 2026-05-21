@@ -9,7 +9,7 @@ import csv
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import joblib
 import lightning as pl
@@ -66,6 +66,9 @@ from src.evaluation.evaluation_plots import (
     plot_low_bin_spatial_maps as plot_low_bin_spatial_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
+    plot_ref_error_scatter as plot_ref_error_scatter_fn,
+)
+from src.evaluation.evaluation_plots import (
     plot_rmse_maps as plot_rmse_maps_fn,
 )
 from src.evaluation.evaluation_plots import (
@@ -116,6 +119,7 @@ class ModelEvaluator:
         high_wave_ckpt: str = None,
         static_bias_map_path: str = None,
         blend_sigma: float = None,
+        uncertainty_blend_sigma: float = None,
         domain_mean_recalibration: bool = False,
         edcdf_model_path: str = None,
         edcdf_blend_sigma: float = None,
@@ -126,6 +130,11 @@ class ModelEvaluator:
         prior_fallback_target: str = "prior",
         low_bin_affine_params: List[dict] = None,
         low_bin_affine_source: str = "raw",
+        sampled_points_csv: Optional[str] = None,
+        timestamps_csv: Optional[str] = None,
+        eval_task: Optional[str] = None,
+        save_predictions: bool = False,
+        denoise_abs_threshold: Optional[float] = None,
     ):
         if target_columns is None:
             target_columns = {"vhm0": "corrected_VHM0"}
@@ -298,9 +307,18 @@ class ModelEvaluator:
         self.use_mdn = use_mdn
         self.target_columns = target_columns
 
-        # For backward compatibility and single-task evaluation, use first target
-        self.target_column = list(self.target_columns.values())[0]
-        self.task_name = list(self.target_columns.keys())[0]
+        # Which task to score (default: first key in dict / YAML order)
+        if eval_task is not None:
+            if eval_task not in self.target_columns:
+                raise ValueError(
+                    f"eval_task {eval_task!r} not in target_columns "
+                    f"{list(self.target_columns.keys())}"
+                )
+            self.task_name = eval_task
+            self.target_column = self.target_columns[eval_task]
+        else:
+            self.target_column = list(self.target_columns.values())[0]
+            self.task_name = list(self.target_columns.keys())[0]
         if residual_prior_task is None:
             if "vhm0" in self.target_columns:
                 residual_prior_task = "vhm0"
@@ -344,6 +362,16 @@ class ModelEvaluator:
         self.spatial_errors_model = []  # Store (error_map, count_map) for each batch
         self.spatial_errors_baseline = []
 
+        # Sampled grid-point time-series recording
+        self.sampled_points_csv = sampled_points_csv
+        self.timestamps_csv = timestamps_csv
+        self.save_predictions = save_predictions
+        self.denoise_abs_threshold = denoise_abs_threshold
+        self._denoise_warned_no_baseline = False
+        self._grid_point_indices: Optional[List[dict]] = None  # set by _setup_grid_point_sampling
+        self._grid_point_records: List[dict] = []
+        self._gp_ts_map: dict = self._load_ts_map(timestamps_csv)
+
         # Initialize accumulators for incremental computation
         self._reset_accumulators()
         self._init_coastal_distance_diagnostics()
@@ -354,7 +382,19 @@ class ModelEvaluator:
             "y_pred": [],
             "y_uncorrected": [],
             "vhm0": [],
+            "lat": [],
+            "lon": [],
         }
+
+        # Load coordinate grids once for plot_samples coordinate accumulation
+        self._coord_lat_grid: Optional[np.ndarray] = None
+        self._coord_lon_grid: Optional[np.ndarray] = None
+        try:
+            dataset = self.test_loader.dataset
+            if hasattr(dataset, "get_coordinates"):
+                self._coord_lat_grid, self._coord_lon_grid = dataset.get_coordinates()
+        except Exception as e:
+            logger.warning(f"Could not load coordinate grids for plot_samples: {e}")
 
         # Timestamp cache for seasonal analysis
         self._timestamps_cache = {}
@@ -364,8 +404,14 @@ class ModelEvaluator:
         self.static_bias_valid = None
         self.static_domain_mean = None
         self.blend_sigma = blend_sigma
+        self.uncertainty_blend_sigma = uncertainty_blend_sigma
         self.domain_mean_recalibration = domain_mean_recalibration
-        if static_bias_map_path and (blend_sigma is not None or domain_mean_recalibration):
+        if static_bias_map_path and (
+            blend_sigma is not None
+            or uncertainty_blend_sigma is not None
+            or domain_mean_recalibration
+            or (prior_hard_fallback_bins and prior_fallback_target == "static")
+        ):
             self._load_static_bias_map(static_bias_map_path)
 
         # Optional EDCDF prior for Gaussian trust blending of predicted bias
@@ -417,7 +463,7 @@ class ModelEvaluator:
             if prior_fallback_target is not None
             else "prior"
         )
-        if self.prior_fallback_target not in {"prior", "raw"}:
+        if self.prior_fallback_target not in {"prior", "raw", "static"}:
             logger.warning(
                 f"Unknown prior_fallback_target='{prior_fallback_target}', using 'prior'"
             )
@@ -643,6 +689,11 @@ class ModelEvaluator:
         self.sum_y_pred = 0.0
         self.sum_y_pred_sq = 0.0
         self.sum_y_true_y_pred = 0.0
+        self._temporal_all_model_sq = np.zeros((24, 12), dtype=np.float64)
+        self._temporal_all_base_sq = np.zeros((24, 12), dtype=np.float64)
+        self._temporal_all_count = np.zeros((24, 12), dtype=np.float64)
+        self.denoise_total_candidate = 0
+        self.denoise_total_kept = 0
 
         # Sea-bin accumulators: {bin_name: {'count': 0, 'sum_mae': 0, 'sum_mse': 0, ...}}
         self.sea_bin_accumulators = {
@@ -669,7 +720,14 @@ class ModelEvaluator:
             for bin_config in self.sea_bins
         }
 
+        # Bin-conditional spatial error accumulators keyed by (lo, hi) true-wave bin
+        self.bin_spatial_accumulators = {
+            (b["min"], b["max"]): {"error_sq": [], "count": []}
+            for b in self.sea_bins
+        }
         self.spatial_rmse_accumulators = {}
+        # Per-pixel relative improvement accumulator: (|base_err| - |model_err|) / |base_err| * 100
+        self._rel_improvement_samples = []
         self.low_bin_spatial_accumulators = {
             f"{lo:.1f}_{hi:.1f}": {
                 "sum_delta_abs_err": None,
@@ -1378,12 +1436,21 @@ class ModelEvaluator:
             BISCAY_LAT = 43.0
             BISCAY_LON = 0.0
             biscay = (lat_grid > BISCAY_LAT) & (lon_grid < BISCAY_LON)
+            AEGEAN_LON_MIN, AEGEAN_LON_MAX = 23.0, 28.0
+            AEGEAN_LAT_MIN, AEGEAN_LAT_MAX = 35.0, 42.0
 
             if self.region_filter == "mediterranean":
                 geo_mask = geo_mask & (lon_grid >= GIBRALTAR_LON) & ~biscay
             elif self.region_filter == "atlantic":
                 geo_mask = geo_mask & ((lon_grid < GIBRALTAR_LON) | biscay)
-            
+            elif self.region_filter == "aegean":
+                geo_mask = geo_mask & (
+                    (lat_grid >= AEGEAN_LAT_MIN)
+                    & (lat_grid <= AEGEAN_LAT_MAX)
+                    & (lon_grid >= AEGEAN_LON_MIN)
+                    & (lon_grid <= AEGEAN_LON_MAX)
+                )
+
             # Convert to torch tensor and store
             self.geo_mask = torch.from_numpy(geo_mask).to(self.device)
 
@@ -1445,6 +1512,30 @@ class ModelEvaluator:
         valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0)
         deviation = (dnn_bias - static).abs()
         trust = torch.exp(-deviation ** 2 / (2 * self.blend_sigma ** 2))
+        blended = trust * dnn_bias + (1 - trust) * static
+        return torch.where(valid, blended, dnn_bias)
+
+    def _apply_uncertainty_blend(
+        self, dnn_bias: torch.Tensor, uncertainty: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Blend DNN bias toward static map using MoE gate uncertainty as trust signal.
+
+        trust = exp(-uncertainty^2 / (2*sigma^2))
+        blended = trust * dnn_bias + (1-trust) * static_bias
+
+        For K=3 experts, uncertainty ∈ [0, 0.67]; calibrate sigma in that range.
+        """
+        if (
+            self.static_bias_map is None
+            or self.uncertainty_blend_sigma is None
+            or uncertainty is None
+        ):
+            return dnn_bias
+        h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+        static = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0)
+        valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0)
+        u = uncertainty[:, :h, :w].unsqueeze(1)  # [B, 1, H, W]
+        trust = torch.exp(-u ** 2 / (2 * self.uncertainty_blend_sigma ** 2))
         blended = trust * dnn_bias + (1 - trust) * static
         return torch.where(valid, blended, dnn_bias)
 
@@ -1568,8 +1659,9 @@ class ModelEvaluator:
         """Replace DNN bias with configured fallback target in selected bins.
 
         prior_fallback_target:
-          - "prior": replace with static prior bias
-          - "raw": replace with raw baseline in wave space (bias=0)
+          - "raw":    zero correction (bias=0, corrected = raw vhm0)
+          - "static": static bias map (requires static_bias_map_path to be set)
+          - "prior":  residual prior bias (only in predict_residual_to_prior mode)
         """
         if not self.prior_hard_fallback_bins or raw_uncorrected is None:
             return dnn_bias
@@ -1588,6 +1680,15 @@ class ModelEvaluator:
         if self.prior_fallback_target == "raw":
             replacement_bias = torch.zeros_like(dnn_bias)
             valid = torch.isfinite(raw_uncorrected)
+        elif self.prior_fallback_target == "static":
+            if self.static_bias_map is None:
+                logger.warning(
+                    "prior_fallback_target='static' requires static_bias_map_path; skipping fallback."
+                )
+                return dnn_bias
+            h, w = dnn_bias.shape[2], dnn_bias.shape[3]
+            replacement_bias = self.static_bias_map[:h, :w].unsqueeze(0).unsqueeze(0).expand_as(dnn_bias)
+            valid = self.static_bias_valid[:h, :w].unsqueeze(0).unsqueeze(0).expand_as(dnn_bias)
         else:
             if prior_bias is None:
                 return dnn_bias
@@ -1626,8 +1727,339 @@ class ModelEvaluator:
         offset = dnn_mean - self.static_domain_mean
         return dnn_bias - offset
 
+    # ------------------------------------------------------------------
+    # Sampled grid-point time-series
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_ts_map(timestamps_csv: Optional[str]) -> dict:
+        """Load the pt_stem × hour_idx → datetime map produced by build_pt_timestamp_map.py.
+
+        Returns a dict keyed by (pt_stem, hour_idx) → datetime, or an empty dict
+        if no CSV is provided.
+        """
+        if timestamps_csv is None:
+            return {}
+
+        import csv as _csv
+        from datetime import datetime, timezone
+
+        ts_map: dict = {}
+        with open(timestamps_csv, newline="") as fh:
+            for row in _csv.DictReader(fh):
+                key = (row["pt_stem"], int(row["hour_idx"]))
+                ts_map[key] = datetime.fromisoformat(row["timestamp"]).replace(
+                    tzinfo=timezone.utc
+                )
+        logger.info(f"Loaded {len(ts_map):,} timestamp entries from '{timestamps_csv}'")
+        return ts_map
+
+    def _setup_grid_point_sampling(self) -> None:
+        """Read the sampled-points CSV and map each lat/lon to a grid (row, col).
+
+        Also pre-builds a timestamp array (one entry per dataset item) from the
+        .pt filename pattern WAVEAN{year}{month}{day} + hour_idx so that every
+        recorded row has a proper datetime even when no Parquet timestamps exist.
+        """
+        dataset = self.test_loader.dataset
+        # ------------------------------------------------------------------
+        # Timestamp map setup is useful beyond sampled points (e.g. all-pixels
+        # temporal heatmap), so initialize it regardless of sampled_points_csv.
+        # ------------------------------------------------------------------
+        self._gp_item_ts: Optional[List] = None
+        self._gp_sample_counter: int = 0
+        from torch.utils.data import RandomSampler
+        if isinstance(self.test_loader.sampler, RandomSampler):
+            raise ValueError(
+                "test_loader uses shuffle=True, which breaks timestamp mapping. "
+                "Set shuffle=False for evaluation."
+            )
+        if hasattr(dataset, "index_map") and hasattr(dataset, "file_paths"):
+            if self._gp_ts_map:
+                item_ts: List = []
+                for file_idx, hour_idx in dataset.index_map:
+                    pt_stem = Path(dataset.file_paths[file_idx]).stem
+                    item_ts.append(self._gp_ts_map.get((pt_stem, hour_idx)))
+                self._gp_item_ts = item_ts
+                n_resolved = sum(t is not None for t in item_ts)
+                logger.info(
+                    f"Grid-point timestamps resolved: {n_resolved}/{len(item_ts)} "
+                    f"from timestamp map"
+                )
+            else:
+                logger.warning(
+                    "No timestamp map loaded; timestamps will be None in grid_point_timeseries.csv "
+                    "and all-pixels temporal heatmap. "
+                    "Pass --timestamps-csv to enable."
+                )
+
+        if self.sampled_points_csv is None:
+            return
+
+        import csv as _csv
+        if not hasattr(dataset, "get_coordinates"):
+            logger.warning("Dataset has no get_coordinates(); grid-point sampling disabled.")
+            return
+
+        lat_grid, lon_grid = dataset.get_coordinates()
+        lat_grid = np.asarray(lat_grid, dtype=np.float64)
+        lon_grid = np.asarray(lon_grid, dtype=np.float64)
+
+        sampled = []
+        with open(self.sampled_points_csv, newline="") as fh:
+            for row in _csv.DictReader(fh):
+                sampled.append({"region": row["region"],
+                                 "lat": float(row["latitude"]),
+                                 "lon": float(row["longitude"])})
+
+        # Tolerance for exact coordinate matching (1e-5 deg ≈ 1 m — survives CSV
+        # round-trip at 4–6 decimal places while staying well within one grid cell).
+        COORD_TOL = 1e-5
+
+        indices = []
+        unmatched = []
+        for pt in sampled:
+            match = np.where(
+                (np.abs(lat_grid - pt["lat"]) < COORD_TOL)
+                & (np.abs(lon_grid - pt["lon"]) < COORD_TOL)
+            )
+            if len(match[0]) == 0:
+                unmatched.append(pt)
+                logger.warning(
+                    f"Sampled point ({pt['lat']:.6f}, {pt['lon']:.6f}) has no exact match "
+                    f"in the coordinate grid (tol={COORD_TOL}); skipping."
+                )
+                continue
+            # If multiple cells match (shouldn't happen on a regular grid), take the first.
+            r, c = int(match[0][0]), int(match[1][0])
+            indices.append({
+                "region":        pt["region"],
+                "requested_lat": pt["lat"],
+                "requested_lon": pt["lon"],
+                "grid_lat":      float(lat_grid[r, c]),
+                "grid_lon":      float(lon_grid[r, c]),
+                "row":           r,
+                "col":           c,
+            })
+            logger.debug(
+                f"  ({pt['lat']:.6f}, {pt['lon']:.6f}) → grid cell [row={r}, col={c}]"
+            )
+
+        if unmatched:
+            logger.error(
+                f"{len(unmatched)} sampled point(s) could not be matched to the grid. "
+                "Make sure the CSV was produced from the same dataset used for evaluation."
+            )
+
+        self._grid_point_indices = indices
+        self._grid_point_records = []
+        logger.info(
+            f"Grid-point sampling ready: {len(indices)}/{len(sampled)} points matched "
+            f"from '{self.sampled_points_csv}'"
+        )
+
+    def _update_grid_point_records(
+        self,
+        y_true_4d: torch.Tensor,
+        y_pred_4d: torch.Tensor,
+        y_base_4d: Optional[torch.Tensor],
+        batch_idx: int,
+        valid_mask_4d: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Extract reference / uncorrected / corrected values at sampled grid points.
+
+        Parameters
+        ----------
+        y_true_4d  : (B, 1, H, W) ground-truth wave heights
+        y_pred_4d  : (B, 1, H, W) model-corrected wave heights
+        y_base_4d  : (B, 1, H, W) uncorrected (raw) wave heights, or None
+        batch_idx  : int, index of this batch in the DataLoader loop
+        """
+        if self._grid_point_indices is None:
+            return
+
+        y_true_np = y_true_4d.detach().cpu().numpy()   # (B, 1, H, W)
+        y_pred_np = y_pred_4d.detach().cpu().numpy()
+        y_base_np = y_base_4d.detach().cpu().numpy() if y_base_4d is not None else None
+        valid_mask_np = (
+            valid_mask_4d.detach().cpu().numpy().astype(bool)
+            if valid_mask_4d is not None
+            else None
+        )
+
+        B = y_true_np.shape[0]
+
+        # Resolve one timestamp per batch item via the sequential counter.
+        def _ts(b):
+            if self._gp_item_ts is not None:
+                idx = self._gp_sample_counter + b
+                t = self._gp_item_ts[idx] if idx < len(self._gp_item_ts) else None
+                return t.isoformat() if t is not None else None
+            return None
+
+        for b in range(B):
+            ts = _ts(b)
+            for pt in self._grid_point_indices:
+                r, c = pt["row"], pt["col"]
+                H, W = y_true_np.shape[2], y_true_np.shape[3]
+                if r >= H or c >= W:
+                    continue  # point outside padded region
+                if valid_mask_np is not None and not valid_mask_np[b, :, r, c].any():
+                    continue
+                self._grid_point_records.append({
+                    "timestamp":     ts,
+                    "batch_idx":     batch_idx,
+                    "sample_in_batch": b,
+                    "region":        pt["region"],
+                    "requested_lat": pt["requested_lat"],
+                    "requested_lon": pt["requested_lon"],
+                    "grid_lat":      pt["grid_lat"],
+                    "grid_lon":      pt["grid_lon"],
+                    "reference":     float(y_true_np[b, 0, r, c]),
+                    "uncorrected":   float(y_base_np[b, 0, r, c]) if y_base_np is not None else None,
+                    "corrected":     float(y_pred_np[b, 0, r, c]),
+                })
+
+    def _save_grid_point_csv(self) -> None:
+        """Write the accumulated grid-point time-series records to CSV."""
+        if not self._grid_point_records:
+            return
+
+        import csv as _csv
+
+        out_path = self.output_dir / "grid_point_timeseries.csv"
+        fieldnames = [
+            "timestamp", "batch_idx", "sample_in_batch",
+            "region", "requested_lat", "requested_lon", "grid_lat", "grid_lon",
+            "reference", "uncorrected", "corrected",
+        ]
+        with open(out_path, "w", newline="") as fh:
+            writer = _csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self._grid_point_records)
+
+        logger.info(
+            f"Saved grid-point time-series ({len(self._grid_point_records)} rows) → {out_path}"
+        )
+        print(f"  Grid-point CSV saved → {out_path}")
+
+    def _update_all_points_temporal_accumulators(
+        self,
+        error_map: np.ndarray,
+        error_map_baseline: Optional[np.ndarray],
+        count_map: np.ndarray,
+        batch_size: int,
+    ) -> None:
+        """Accumulate hour×month RMSE stats over all valid pixels."""
+        if error_map_baseline is None or self._gp_item_ts is None:
+            return
+
+        for b in range(batch_size):
+            idx = self._gp_sample_counter + b
+            if idx >= len(self._gp_item_ts):
+                continue
+            ts = self._gp_item_ts[idx]
+            if ts is None:
+                continue
+            h = int(ts.hour)
+            m = int(ts.month) - 1
+
+            cnt = float(count_map[b].sum())
+            if cnt <= 0:
+                continue
+
+            self._temporal_all_count[h, m] += cnt
+            self._temporal_all_model_sq[h, m] += float(error_map[b].sum())
+            self._temporal_all_base_sq[h, m] += float(error_map_baseline[b].sum())
+
+    def _save_all_points_temporal_heatmap(self) -> None:
+        """Save hour×month RMSE improvement heatmap over all valid pixels."""
+        if float(self._temporal_all_count.sum()) <= 0:
+            logger.info("Skipping all-points temporal heatmap: no timestamp-aligned counts.")
+            return
+
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rmse_unc = np.where(
+                self._temporal_all_count > 0,
+                np.sqrt(self._temporal_all_base_sq / self._temporal_all_count),
+                np.nan,
+            )
+            rmse_cor = np.where(
+                self._temporal_all_count > 0,
+                np.sqrt(self._temporal_all_model_sq / self._temporal_all_count),
+                np.nan,
+            )
+            rmse_impr = 100.0 * (rmse_unc - rmse_cor) / rmse_unc
+
+        finite = rmse_impr[np.isfinite(rmse_impr)]
+        if finite.size == 0:
+            # Fallback: compute improvement directly in MSE space when RMSE
+            # normalization yields all-NaN (e.g., zero-denominator edge cases).
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rmse_impr = np.where(
+                    (self._temporal_all_count > 0) & (self._temporal_all_base_sq > 0),
+                    100.0
+                    * (self._temporal_all_base_sq - self._temporal_all_model_sq)
+                    / self._temporal_all_base_sq,
+                    np.nan,
+                )
+            finite = rmse_impr[np.isfinite(rmse_impr)]
+            logger.warning(
+                "All-points RMSE-improvement matrix had no finite values; used MSE-improvement fallback."
+            )
+
+        if finite.size == 0:
+            logger.warning(
+                "All-points temporal heatmap still has no finite values after fallback; skipping save."
+            )
+            return
+
+        fig, ax = plt.subplots(figsize=(10, 5.4))
+        vmax = float(np.nanpercentile(np.abs(finite), 98))
+        if not np.isfinite(vmax) or vmax < 1e-6:
+            vmax = max(float(np.nanmax(np.abs(finite))), 1e-3)
+        sns.heatmap(
+            rmse_impr,
+            ax=ax,
+            vmin=-vmax,
+            vmax=vmax,
+            cmap="RdBu",
+            center=0,
+            linewidths=0.2,
+            linecolor="#f0f0f0",
+            cbar_kws={"label": "RMSE improvement (%)", "shrink": 1, "pad": 0.02},
+        )
+        ax.set_xlabel("Month (1-12)")
+        ax.set_ylabel("Hour of day")
+        ax.set_title("Temporal RMSE improvement (all valid pixels)")
+        fig.tight_layout()
+
+        png_path = self.output_dir / "heatmap_rmse_improvement_all_points.png"
+        pdf_path = self.output_dir / "heatmap_rmse_improvement_all_points.pdf"
+        fig.savefig(png_path, dpi=300, bbox_inches="tight")
+        fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+        # Save numeric diagnostics for transparency and reproducibility.
+        pd.DataFrame(rmse_impr).to_csv(
+            self.output_dir / "heatmap_rmse_improvement_all_points_values.csv",
+            index=True,
+        )
+        pd.DataFrame(self._temporal_all_count).to_csv(
+            self.output_dir / "heatmap_rmse_improvement_all_points_counts.csv",
+            index=True,
+        )
+        logger.info(f"Saved all-points temporal heatmap → {png_path}")
+
+    # ------------------------------------------------------------------
+
     def _process_batch(
-        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None
+        self, X, y, mask, vhm0, y_pred, timestamps=None, confidence=None, prior_bias=None,
+        batch_idx: int = 0, timestamps_raw=None, moe_uncertainty=None,
     ):
         """Process a single batch and update accumulators.
 
@@ -1676,6 +2108,7 @@ class ModelEvaluator:
         if self.eval_in_bias_mode:
             y_pred = self._recalibrate_domain_mean(y_pred, mask)
             y_pred = self._apply_static_blend(y_pred)
+            y_pred = self._apply_uncertainty_blend(y_pred, moe_uncertainty)
             y_pred = self._apply_low_bin_affine_calibration(
                 y_pred, vhm0, y_true_bias=y
             )
@@ -1721,12 +2154,35 @@ class ModelEvaluator:
             y_true_wave_4d = y
             y_pred_wave_4d = y_pred
 
-        combined_mask = mask.float()
+        denoise_mask = None
+        if (
+            self.denoise_abs_threshold is not None
+            and self.denoise_abs_threshold > 0
+        ):
+            if y_base_wave_4d is not None:
+                unc_abs_err = (y_base_wave_4d - y_true_wave_4d).abs()
+                denoise_mask = torch.isfinite(unc_abs_err) & (
+                    unc_abs_err > self.denoise_abs_threshold
+                )
+            elif not self._denoise_warned_no_baseline:
+                logger.warning(
+                    f"Denoising requested but baseline for task '{self.task_name}' "
+                    "is unavailable; "
+                    "denoise filter is not applied."
+                )
+                self._denoise_warned_no_baseline = True
+
+        combined_mask = mask.bool()
+        if denoise_mask is not None:
+            self.denoise_total_candidate += int(combined_mask.sum().item())
+            combined_mask = combined_mask & denoise_mask
+            self.denoise_total_kept += int(combined_mask.sum().item())
+
         if self.atlantic_exclusion_mask is not None:
             # Broadcast 2D (H, W) mask to match 4D (N, C, H, W)
             h, w = combined_mask.shape[2], combined_mask.shape[3]
-            exc = self.atlantic_exclusion_mask[:h, :w].float()
-            combined_mask = combined_mask * exc.unsqueeze(0).unsqueeze(0)
+            exc = self.atlantic_exclusion_mask[:h, :w].bool()
+            combined_mask = combined_mask & exc.unsqueeze(0).unsqueeze(0)
 
         self._update_low_bin_spatial_accumulators(
             y_true_4d=y_true_wave_4d,
@@ -1734,13 +2190,32 @@ class ModelEvaluator:
             y_base_4d=y_base_wave_4d,
             valid_mask_4d=combined_mask,
         )
-        count_map = combined_mask.cpu().numpy().astype(np.float32)  # (N, C, H, W)
+
+        # Extract values at sampled grid points (no-op when sampled_points_csv is None)
+        self._update_grid_point_records(
+            y_true_4d=y_true_wave_4d,
+            y_pred_4d=y_pred_wave_4d,
+            y_base_4d=y_base_wave_4d,
+            batch_idx=batch_idx,
+            valid_mask_4d=combined_mask,
+        )
+        count_map = combined_mask.float().cpu().numpy().astype(np.float32)  # (N, C, H, W)
 
         # IMPORTANT: Apply mask to errors (zero out invalid pixels)
+        # Use nan_to_num first: NaN * 0 stays NaN in numpy, which can poison
+        # downstream sums/heatmaps.
+        error_map = np.nan_to_num(error_map, nan=0.0, posinf=0.0, neginf=0.0)
+        error_map_mae = np.nan_to_num(error_map_mae, nan=0.0, posinf=0.0, neginf=0.0)
         error_map = error_map * count_map
         if error_map_baseline is not None:
+            error_map_baseline = np.nan_to_num(
+                error_map_baseline, nan=0.0, posinf=0.0, neginf=0.0
+            )
             error_map_baseline = error_map_baseline * count_map
         if error_map_baseline_mae is not None:
+            error_map_baseline_mae = np.nan_to_num(
+                error_map_baseline_mae, nan=0.0, posinf=0.0, neginf=0.0
+            )
             error_map_baseline_mae = error_map_baseline_mae * count_map
         # Store spatial errors (sum over batch and channel dimensions)
         self.spatial_errors_model.append(
@@ -1759,13 +2234,36 @@ class ModelEvaluator:
                     "count": count_map.sum(axis=(0, 1)),  # (H, W)
                 }
             )
+        self._update_all_points_temporal_accumulators(
+            error_map=error_map,
+            error_map_baseline=error_map_baseline,
+            count_map=count_map,
+            batch_size=y_true_wave_4d.shape[0],
+        )
+        self._gp_sample_counter += y_true_wave_4d.shape[0]
+
+        # Bin-conditional spatial accumulators (binned by true wave height)
+        if self.eval_in_bias_mode and vhm0 is not None:
+            true_wave_np = (y + vhm0).cpu().numpy()  # (N, C, H, W)
+            for (lo, hi), acc in self.bin_spatial_accumulators.items():
+                bin_mask = ((true_wave_np >= lo) & (true_wave_np < hi)).astype(np.float32)
+                bin_mask = bin_mask * count_map
+                if bin_mask.sum() > 0:
+                    acc["error_sq"].append(
+                        (error_map * bin_mask).sum(axis=(0, 1))  # (H, W)
+                    )
+                    acc["count"].append(bin_mask.sum(axis=(0, 1)))  # (H, W)
+
+        # Per-pixel relative improvement accumulation
+        if error_map_baseline is not None:
+            eps = 1e-6
+            model_err_flat = np.sqrt(error_map[count_map > 0])
+            base_err_flat  = np.sqrt(error_map_baseline[count_map > 0])
+            rel_imp = (base_err_flat - model_err_flat) / (base_err_flat + eps) * 100.0
+            self._rel_improvement_samples.append(rel_imp.astype(np.float32))
 
         # Apply mask (including Atlantic exclusion)
-        mask_combined = mask.clone()
-        if self.atlantic_exclusion_mask is not None:
-            h, w = mask_combined.shape[2], mask_combined.shape[3]
-            exc = self.atlantic_exclusion_mask[:h, :w]
-            mask_combined = mask_combined & exc.unsqueeze(0).unsqueeze(0)
+        mask_combined = combined_mask
         mask_flat = mask_combined.flatten()
         y_true_flat = y.flatten()[mask_flat]
         y_pred_flat = y_pred.flatten()[mask_flat]
@@ -2010,6 +2508,38 @@ class ModelEvaluator:
             else:
                 self.plot_samples["vhm0"].extend(y_true_np)
 
+            # Accumulate coordinates aligned to the same mask
+            if self._coord_lat_grid is not None and self._coord_lon_grid is not None:
+                h = mask_combined.shape[2]
+                w = mask_combined.shape[3]
+                B = mask_combined.shape[0]
+                lat_crop = self._coord_lat_grid[:h, :w]  # (H, W)
+                lon_crop = self._coord_lon_grid[:h, :w]
+                # tile B times to match (B, 1, H, W) flatten layout
+                lat_tiled = np.tile(lat_crop[np.newaxis, np.newaxis], (B, 1, 1, 1)).flatten()
+                lon_tiled = np.tile(lon_crop[np.newaxis, np.newaxis], (B, 1, 1, 1)).flatten()
+                mask_np = mask_combined.flatten().cpu().numpy().astype(bool)
+                self.plot_samples["lat"].extend(lat_tiled[mask_np])
+                self.plot_samples["lon"].extend(lon_tiled[mask_np])
+
+    def _get_denoising_summary(self) -> Dict:
+        enabled = (
+            self.denoise_abs_threshold is not None
+            and self.denoise_abs_threshold > 0
+        )
+        summary = {
+            "enabled": bool(enabled),
+            "abs_threshold_m": float(self.denoise_abs_threshold) if enabled else None,
+            "candidate_pixels": int(self.denoise_total_candidate) if enabled else 0,
+            "kept_pixels": int(self.denoise_total_kept) if enabled else 0,
+            "kept_pct": None,
+        }
+        if enabled and self.denoise_total_candidate > 0:
+            summary["kept_pct"] = (
+                100.0 * self.denoise_total_kept / self.denoise_total_candidate
+            )
+        return summary
+
     def _update_category_stats(
         self, bin_name, category, features, y_true, y_pred, timestamps, confidence
     ):
@@ -2115,6 +2645,8 @@ class ModelEvaluator:
         print("Running inference on test set...")
         self.model.eval()
         self._reset_accumulators()
+        self._gp_sample_counter = 0
+        self._setup_grid_point_sampling()
 
         def pad_to_multiple(x, multiple=16, mode="reflect"):
             import torch.nn.functional as F
@@ -2125,6 +2657,39 @@ class ModelEvaluator:
             if pad_h > 0 or pad_w > 0:
                 x = F.pad(x, (0, pad_w, 0, pad_h), mode=mode)
             return x, (H, W)
+
+        def _extract_task_tensor(value, value_name):
+            """Normalize nested multi-task payloads to a tensor for current eval task."""
+            unwrap_order = (self.task_name, "target", "targets", "prediction", "y")
+            max_unwrap_depth = 8
+
+            for _ in range(max_unwrap_depth):
+                if isinstance(value, dict):
+                    selected_key = next((k for k in unwrap_order if k in value), None)
+                    if selected_key is None:
+                        raise KeyError(
+                            f"{value_name} is dict but has no recognized tensor key. "
+                            f"Expected one of {list(unwrap_order)}; available keys: {list(value.keys())}"
+                        )
+                    value = value[selected_key]
+                    continue
+
+                if isinstance(value, (list, tuple)) and len(value) == 1:
+                    value = value[0]
+                    continue
+
+                if hasattr(value, "shape"):
+                    return value
+
+                raise TypeError(
+                    f"{value_name} could not be converted to tensor. "
+                    f"Got type: {type(value)}"
+                )
+
+            raise RuntimeError(
+                f"{value_name} exceeded max nested unwrap depth ({max_unwrap_depth}). "
+                "Check batch/model output structure."
+            )
 
         # If binwise correction is enabled, compute biases from bias_loader first
         if self.apply_binwise_correction_flag:
@@ -2150,7 +2715,7 @@ class ModelEvaluator:
                 # If y is a dict (multi-task), extract the target for the task we're evaluating
                 if isinstance(y, dict):
                     # Multi-task: extract the specific target we're evaluating
-                    y = y[self.task_name]
+                    y = _extract_task_tensor(y, "target batch")
 
                 X, orig_size = pad_to_multiple(X, multiple=16)
 
@@ -2168,6 +2733,7 @@ class ModelEvaluator:
 
                 # Load timestamps from test files for seasonal analysis
                 timestamps = None
+                timestamps_raw = None
                 if self.test_files and len(self.test_files) > 0:
                     try:
                         # Get file index for this batch (cycle through files)
@@ -2264,9 +2830,13 @@ class ModelEvaluator:
                         # Get predictions from all models
                         y_pred_default = self.model(X)
 
-                        # Handle multi-task: extract task before combining
+                        # Handle MoE diagnostic dicts and multi-task outputs.
                         if isinstance(y_pred_default, dict):
-                            y_pred_default = y_pred_default[self.task_name]
+                            y_pred_default = (
+                                y_pred_default["prediction"]
+                                if "prediction" in y_pred_default
+                                else y_pred_default[self.task_name]
+                            )
 
                         # Start with default predictions
                         y_pred = y_pred_default.clone()
@@ -2296,7 +2866,11 @@ class ModelEvaluator:
                         if self.low_wave_model is not None and low_wave_mask.any():
                             y_pred_low = self.low_wave_model(X)
                             if isinstance(y_pred_low, dict):
-                                y_pred_low = y_pred_low[self.task_name]
+                                y_pred_low = (
+                                    y_pred_low["prediction"]
+                                    if "prediction" in y_pred_low
+                                    else y_pred_low[self.task_name]
+                                )
 
                             # Debug: Check if shapes match
                             if batch_idx == 0:
@@ -2370,7 +2944,11 @@ class ModelEvaluator:
                         if self.high_wave_model is not None and high_wave_mask.any():
                             y_pred_high = self.high_wave_model(X)
                             if isinstance(y_pred_high, dict):
-                                y_pred_high = y_pred_high[self.task_name]
+                                y_pred_high = (
+                                    y_pred_high["prediction"]
+                                    if "prediction" in y_pred_high
+                                    else y_pred_high[self.task_name]
+                                )
 
                             if batch_idx == 0:
                                 print(
@@ -2430,10 +3008,14 @@ class ModelEvaluator:
                     else:
                         y_pred = self.model(X)
 
-                # Handle multi-task predictions (for non-bin-routed case)
-                # If y_pred is a dict (multi-task model), extract the prediction for the task we're evaluating
-                if isinstance(y_pred, dict):
-                    y_pred = y_pred[self.task_name]
+                # Extract MoE uncertainty before the dict is consumed.
+                moe_uncertainty = None
+                if isinstance(y_pred, dict) and "uncertainty" in y_pred:
+                    moe_uncertainty = y_pred["uncertainty"].detach()  # [B, H, W]
+
+                # Normalize multi-task payloads to tensors before alignment.
+                y_pred = _extract_task_tensor(y_pred, "model prediction")
+                y = _extract_task_tensor(y, "target batch")
 
                 # Align dimensions
                 min_h = min(y_pred.shape[2], y.shape[2])
@@ -2453,6 +3035,8 @@ class ModelEvaluator:
 
                 if confidence is not None:
                     confidence = confidence[:, :min_h, :min_w]
+                if moe_uncertainty is not None:
+                    moe_uncertainty = moe_uncertainty[:, :min_h, :min_w]
 
                 # Unnormalize if needed
                 if self.normalize_target and self.normalizer is not None:
@@ -2485,6 +3069,9 @@ class ModelEvaluator:
                     timestamps,
                     confidence,
                     prior_bias_batch,
+                    batch_idx=batch_idx,
+                    timestamps_raw=timestamps_raw,
+                    moe_uncertainty=moe_uncertainty,
                 )
 
         print(f"Inference complete. Processed {self.total_count} valid pixels.")
@@ -3088,6 +3675,32 @@ class ModelEvaluator:
             dataset_coords=dataset_coords,
         )
 
+    def plot_bin_spatial_rmse_maps(self):
+        """Plot spatial RMSE maps conditioned on true wave height bin."""
+        import matplotlib.pyplot as plt
+
+        output_dir = self.output_dir / "bin_spatial_rmse"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for (lo, hi), acc in self.bin_spatial_accumulators.items():
+            if not acc["error_sq"]:
+                continue
+            sum_sq = np.sum(acc["error_sq"], axis=0)   # (H, W)
+            count  = np.sum(acc["count"],    axis=0)   # (H, W)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rmse = np.where(count > 0, np.sqrt(sum_sq / count), np.nan)
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            im = ax.imshow(rmse, origin="upper", cmap="YlOrRd", aspect="auto")
+            plt.colorbar(im, ax=ax, label="RMSE (m)")
+            hi_label = f"{hi:.0f}" if hi < float("inf") else "∞"
+            ax.set_title(f"Spatial RMSE | true wave {lo:.0f}–{hi_label}m  (n={int(count.sum()):,})")
+            ax.axis("off")
+            fname = f"spatial_rmse_true_{lo:.0f}_{hi_label}m.png"
+            fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"Saved bin spatial RMSE map → {output_dir / fname}")
+
     def plot_low_bin_spatial_maps(self):
         """Plot spatial diagnostics for ultra-calm true-wave sub-bins."""
         dataset_coords = None
@@ -3195,6 +3808,35 @@ class ModelEvaluator:
             vhm0_range=vhm0_range,
         )
 
+    def plot_ref_error_scatter(self):
+        """Plot (reference - uncorrected) vs (reference - corrected) scatter."""
+        plot_ref_error_scatter_fn(
+            plot_samples=self.plot_samples,
+            output_dir=self.output_dir,
+            unit=self.unit,
+        )
+
+    def compute_per_point_improvement_stats(self, epsilon_m: float = 0.01) -> Dict:
+        """Compute per-pixel relative improvement statistics.
+
+        epsilon_m: minimum absolute improvement (m) to count as genuinely improved.
+        """
+        if not self._rel_improvement_samples:
+            return {}
+        all_vals = np.concatenate(self._rel_improvement_samples)
+        finite = all_vals[np.isfinite(all_vals)]
+        if len(finite) == 0:
+            return {}
+        improved = np.sum(finite > (epsilon_m * 100 / 1.0))  # epsilon as relative %
+        return {
+            "mean_pct": float(np.mean(finite)),
+            "median_pct": float(np.median(finite)),
+            "std_pct": float(np.std(finite)),
+            "pct_improved": float(100.0 * improved / len(finite)),
+            "n_pixels": int(len(finite)),
+            "epsilon_m": epsilon_m,
+        }
+
     def print_summary(self, overall_metrics: Dict, sea_bin_metrics: Dict):
         """Print evaluation summary to console."""
         print("\n" + "=" * 80)
@@ -3224,6 +3866,25 @@ class ModelEvaluator:
                 print(
                     f"  RMSE Improvement:     {overall_metrics['rmse_improvement_pct']:.2f}%"
                 )
+        denoise_summary = self._get_denoising_summary()
+        if denoise_summary["enabled"]:
+            kept_pct = denoise_summary["kept_pct"]
+            kept_pct_str = "n/a" if kept_pct is None else f"{kept_pct:.2f}%"
+            print("\nDenoising:")
+            print(f"  Abs threshold:        {denoise_summary['abs_threshold_m']:.4f} m")
+            print(
+                "  Coverage:             "
+                f"{denoise_summary['kept_pixels']:,}/{denoise_summary['candidate_pixels']:,} "
+                f"({kept_pct_str})"
+            )
+
+        per_point = self.compute_per_point_improvement_stats()
+        if per_point:
+            print("\n=== Per-point Relative Improvement (%) ===")
+            print(f"  Mean:              {per_point['mean_pct']:.2f}%")
+            print(f"  Median:            {per_point['median_pct']:.2f}%")
+            print(f"  Std:               {per_point['std_pct']:.2f}%")
+            print(f"  Improved samples:  {per_point['pct_improved']:.2f}%  (ε={per_point['epsilon_m']}m)")
 
         print("\nSea-Bin Metrics:")
         print(
@@ -3299,12 +3960,16 @@ class ModelEvaluator:
         category_breakdown = self.compute_category_breakdown()
 
         # Save metrics
+        per_point_stats = self.compute_per_point_improvement_stats()
+        denoise_summary = self._get_denoising_summary()
         with open(self.output_dir / "metrics.json", "w") as f:
             json.dump(
                 {
                     "overall": overall_metrics,
                     "sea_bins": sea_bin_metrics,
-                    "category_breakdown": category_breakdown,  # NEW: Add breakdown
+                    "category_breakdown": category_breakdown,
+                    "per_point_improvement": per_point_stats,
+                    "denoising": denoise_summary,
                 },
                 f,
                 indent=2,
@@ -3312,26 +3977,45 @@ class ModelEvaluator:
 
         # NEW: Save category breakdown to CSV
         print("Saving category breakdown to CSV...")
-        self.save_category_breakdown_csv(category_breakdown, self.output_dir)
-        self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
+        # self.save_category_breakdown_csv(category_breakdown, self.output_dir)
+        # self.save_category_breakdown_wide_format(category_breakdown, self.output_dir)
         print("Saving detailed low-bin diagnostics...")
-        self._save_low_bin_diagnostics(sea_bin_metrics)
+        # self._save_low_bin_diagnostics(sea_bin_metrics)
         print("Saving coastal-distance diagnostics...")
-        self._save_coastal_distance_diagnostics()
+        # self._save_coastal_distance_diagnostics()
+        print("Saving grid-point time-series CSV...")
+        self._save_grid_point_csv()
+        print("Saving all-points temporal heatmap...")
+        self._save_all_points_temporal_heatmap()
+
+        # Save raw prediction samples for offline plot experimentation
+        if self.save_predictions:
+            predictions_path = self.output_dir / "plot_samples.npz"
+            np.savez_compressed(
+                predictions_path,
+                y_true=np.array(self.plot_samples["y_true"]),
+                y_pred=np.array(self.plot_samples["y_pred"]),
+                vhm0=np.array(self.plot_samples["vhm0"]),
+                lat=np.array(self.plot_samples["lat"]),
+                lon=np.array(self.plot_samples["lon"]),
+            )
+            print(f"  Prediction samples saved → {predictions_path}")
 
         # Create plots using samples
         print("Creating plots...")
         self.plot_sea_bin_metrics(sea_bin_metrics)
         self.plot_model_better_percentage(sea_bin_metrics)
         self.plot_rmse_maps()
-        self.plot_low_bin_spatial_maps()
+        self.plot_ref_error_scatter()
+        # self.plot_bin_spatial_rmse_maps()
+        # self.plot_low_bin_spatial_maps()
         # self.plot_low_bin_advanced_diagnostics()
         # self.plot_vhm0_distributions()
         # self.plot_vhm0_distributions(vhm0_range=(0, 1))
         # self.plot_vhm0_distributions(vhm0_range=(1, 2))
-        self.plot_vhm0_distributions(vhm0_range=(11, 12))
-        self.plot_vhm0_distributions(vhm0_range=(12, 13))
-        self.plot_error_distribution_histograms()
+        # self.plot_vhm0_distributions(vhm0_range=(11, 12))
+        # self.plot_vhm0_distributions(vhm0_range=(12, 13))
+        # self.plot_error_distribution_histograms()
         # self.plot_error_boxplots()
         # self.plot_error_violins()
         # self.plot_error_cdfs()
@@ -3340,12 +4024,34 @@ class ModelEvaluator:
         self.print_summary(overall_metrics, sea_bin_metrics)
 
         # NEW: Print category breakdown
-        self.print_category_breakdown(category_breakdown)
+        # self.print_category_breakdown(category_breakdown)
 
         print(f"\nEvaluation complete! Results saved to {self.output_dir}")
 
 
-def main():
+def _extract_ema_weights_from_ckpt(ckpt: dict):
+    """Return EMA weights from known checkpoint locations, or (None, None)."""
+    # Legacy/custom top-level location.
+    top_level = ckpt.get("ema_weights", None)
+    if top_level is not None:
+        return top_level, "ckpt['ema_weights']"
+
+    # Lightning callback-state location.
+    callbacks = ckpt.get("callbacks", None)
+    if isinstance(callbacks, dict):
+        for cb_key, cb_state in callbacks.items():
+            if not isinstance(cb_state, dict):
+                continue
+            ema = cb_state.get("ema_weights", None)
+            if ema is not None:
+                return ema, f"ckpt['callbacks'][{cb_key!r}]['ema_weights']"
+
+    return None, None
+
+
+def main(evaluator_class=None):
+    if evaluator_class is None:
+        evaluator_class = ModelEvaluator
     parser = argparse.ArgumentParser(description="Evaluate WaveBiasCorrector model")
     parser.add_argument(
         "--checkpoint",
@@ -3369,6 +4075,15 @@ def main():
         help="Configuration file",
     )
     parser.add_argument(
+        "--eval-task",
+        type=str,
+        default=None,
+        help=(
+            "Task name to evaluate (must be a key in data.target_columns). "
+            "Use when multiple targets are configured; overrides the default first key."
+        ),
+    )
+    parser.add_argument(
         "--apply-binwise-correction",
         action="store_true",
         help="Apply bin-wise bias correction computed from training set",
@@ -3388,8 +4103,45 @@ def main():
         "--region-filter",
         type=str,
         default=None,
-        choices=["atlantic", "mediterranean"],
+        choices=["atlantic", "mediterranean", "aegean"],
         help="Region to filter metrics (applied via geo_mask, not dataset cropping)",
+    )
+    parser.add_argument(
+        "--sampled-points-csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to CSV produced by sample_grid_points.py "
+            "(columns: region, latitude, longitude). "
+            "When provided, records reference / uncorrected / corrected values at each "
+            "sampled grid point for every time step and writes grid_point_timeseries.csv "
+            "to the output directory."
+        ),
+    )
+    parser.add_argument(
+        "--timestamps-csv",
+        type=str,
+        default=None,
+        help=(
+            "Path to CSV produced by build_pt_timestamp_map.py "
+            "(columns: pt_stem, hour_idx, timestamp). "
+            "Required for correct timestamps in grid_point_timeseries.csv."
+        ),
+    )
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        default=False,
+        help="Save plot_samples (y_true, y_pred, vhm0) to plot_samples.npz in the output dir",
+    )
+    parser.add_argument(
+        "--denoise-abs-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional denoising filter applied during evaluation: keep only pixels "
+            "with |uncorrected-reference| > threshold (meters)."
+        ),
     )
     args = parser.parse_args()
 
@@ -3415,6 +4167,13 @@ def main():
         # Fall back to old single-task format
         target_column = data_config.get("target_column", "corrected_VHM0")
         target_columns = {"vhm0": target_column}
+
+    if args.eval_task is not None:
+        if args.eval_task not in target_columns:
+            raise ValueError(
+                f"--eval-task {args.eval_task!r} is not in data.target_columns "
+                f"{list(target_columns.keys())}"
+            )
 
     # Get file list (same as training)
     files = get_file_list(
@@ -3481,19 +4240,23 @@ def main():
 
     # CRITICAL: Set target_stats_ for the target column we're evaluating
     # Without this, inverse_transform_torch falls back to the last channel!
-    first_target_col = list(target_columns.values())[0]
-    if first_target_col in normalizer.feature_order_:
-        target_idx = normalizer.feature_order_.index(first_target_col)
+    eval_target_col = (
+        target_columns[args.eval_task]
+        if args.eval_task
+        else list(target_columns.values())[0]
+    )
+    if eval_target_col in normalizer.feature_order_:
+        target_idx = normalizer.feature_order_.index(eval_target_col)
         if target_idx in normalizer.stats_:
             normalizer.target_stats_ = normalizer.stats_[target_idx]
             logger.info(
-                f"Set normalizer target_stats_ for '{first_target_col}' (index {target_idx})"
+                f"Set normalizer target_stats_ for '{eval_target_col}' (index {target_idx})"
             )
         else:
             logger.warning(f"Target index {target_idx} not found in normalizer stats!")
     else:
         logger.warning(
-            f"Target column '{first_target_col}' not found in normalizer feature_order!"
+            f"Target column '{eval_target_col}' not found in normalizer feature_order!"
         )
 
     # Create test dataset (same parameters as training)
@@ -3648,15 +4411,22 @@ def main():
             predict_residual_to_prior,
         )
 
-        if "ema_weights" in ckpt and ckpt["ema_weights"] is not None:
-            logger.info("Applying EMA weights for evaluation...")
-            ema_weights = [w.to(model.device) for w in ckpt["ema_weights"]]
+        ema_weights, ema_source = _extract_ema_weights_from_ckpt(ckpt)
+        if ema_weights is not None:
+            logger.info("Applying EMA weights for evaluation from %s...", ema_source)
+            ema_weights = [w.to(model.device) for w in ema_weights]
 
             # Copy into model
             for ema_param, param in zip(ema_weights, model.parameters(), strict=False):
                 param.data.copy_(ema_param.data)
         else:
             logger.info("No EMA weights found in checkpoint. Using standard weights.")
+            if training_config.get("use_ema", False):
+                logger.info(
+                    "Config has training.use_ema=true. If this was an EMA run, "
+                    "the checkpoint may have been saved before EMA initialization "
+                    "(early steps) or from a run without EMA callback state."
+                )
 
         # Create geographic bounds dictionary if filtering is requested
         geo_bounds = None
@@ -3684,7 +4454,7 @@ def main():
                 )
 
         # Create evaluator and run evaluation
-        evaluator = ModelEvaluator(
+        evaluator = evaluator_class(
             model=model,
             test_loader=test_loader,
             output_dir=Path(args.output_dir)
@@ -3708,10 +4478,12 @@ def main():
             apply_bilateral_filter=False,
             apply_delta_corrector_flag=args.apply_delta_corrector_flag,
             region_filter=region_filter,
+            eval_task=args.eval_task,
             low_wave_ckpt=config.config["checkpoint"]["low_wave_ckpt"],
             high_wave_ckpt=config.config["checkpoint"]["high_wave_ckpt"],
             static_bias_map_path=data_config.get("static_bias_map_path", None),
             blend_sigma=data_config.get("blend_sigma", None),
+            uncertainty_blend_sigma=data_config.get("uncertainty_blend_sigma", None),
             domain_mean_recalibration=data_config.get("domain_mean_recalibration", False),
             edcdf_model_path=data_config.get("edcdf_model_path", None),
             edcdf_blend_sigma=data_config.get("edcdf_blend_sigma", None),
@@ -3722,6 +4494,10 @@ def main():
             prior_fallback_target=data_config.get("prior_fallback_target", "prior"),
             low_bin_affine_params=data_config.get("low_bin_affine_params", None),
             low_bin_affine_source=data_config.get("low_bin_affine_source", "raw"),
+            sampled_points_csv=args.sampled_points_csv,
+            timestamps_csv=args.timestamps_csv,
+            save_predictions=args.save_predictions,
+            denoise_abs_threshold=args.denoise_abs_threshold,
         )
 
         evaluator.evaluate()

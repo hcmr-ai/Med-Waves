@@ -95,7 +95,7 @@ def masked_bin_balanced_smooth_l1(
     vhm0,
     bin_thresholds=None,
     bin_weights=None,
-    beta=0.3,
+    beta=0.05,
     epsilon=1e-6,
 ):
     """
@@ -108,7 +108,8 @@ def masked_bin_balanced_smooth_l1(
     """
     if bin_thresholds is None:
         # Raw VHM0 bins: 0-1, 1-2, 2-3, 3-5, 5-7, 7+ m.
-        bin_thresholds = [1.0, 2.0, 3.0, 5.0, 7.0]
+        # bin_thresholds = [1.0, 2.0, 3.0, 5.0, 7.0]
+        bin_thresholds=[0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0]
     n_bins = len(bin_thresholds) + 1
     if bin_weights is None:
         bin_weights = [1.0] * n_bins

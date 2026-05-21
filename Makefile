@@ -66,10 +66,11 @@ run-train-random: ## Run random regressor training
 
 evaluation: ## Run evaluation
 	poetry run python src/pipelines/evaluation/evaluate_model_refactored.py --config src/configs/config_evaluation.yaml
-
+eval-bunet-short:
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --timestamps-csv /mnt/blobstorage/diagnostics/pt_timestamp_map.csv
 eval-bunet:
-	poetry run python src/pipelines/evaluation/evaluate_bunet.py
-
+	poetry run python src/pipelines/evaluation/evaluate_bunet.py --sampled-points-csv /mnt/blobstorage/diagnostics/sampled_grid_points_300/sampled_grid_points_mediterranean.csv \
+      --timestamps-csv /mnt/blobstorage/diagnostics/pt_timestamp_map.csv
 eval-bunet-geographic:
 	poetry run python src/pipelines/evaluation/evaluate_bunet.py --apply-geographic-filtering
 	

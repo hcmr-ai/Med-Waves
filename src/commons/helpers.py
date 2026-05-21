@@ -282,6 +282,11 @@ class DNNConfig:
     def _deep_update(self, base_dict: Dict, update_dict: Dict):
         """Deep update dictionary"""
         for key, value in update_dict.items():
+            # Do not merge target_columns with defaults: user YAML must fully replace
+            # the default {"vhm0": "corrected_VHM0"} or vhm0 is kept alongside vtm02.
+            if key == "target_columns" and isinstance(value, dict):
+                base_dict[key] = dict(value)
+                continue
             if (
                 key in base_dict
                 and isinstance(base_dict[key], dict)

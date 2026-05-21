@@ -22,6 +22,9 @@ import glob
 from collections import defaultdict
 from pathlib import Path
 
+import cartopy.crs as ccrs
+import matplotlib.colors as mcolors
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -155,7 +158,14 @@ def main():
         "0-1m", "1-2m", "2-3m", "3-4m", "4-5m", "5-6m", "6-7m",
         "7-8m", "8-9m", "9-10m", "10-11m", "11-12m", "12m+",
     ]
+    bin_labels = [
+        "0.0-1.0m", "1.0-2.0m", "2.0-3.0m", "3.0-4.0m", "4.0-5.0m",
+        "5.0-6.0m", "6.0-7.0m", "7.0-8.0m", "8.0-9.0m", "9.0-10.0m",
+        "10.0-11.0m", "11.0-12.0m", "12.0m+",
+    ]
     year_bin_sum = {}
+    year_bin_sq_sum = {}
+    year_bin_abs_sum = {}
     year_bin_count = {}
 
     # Per-season accumulators: {year: {season: {"sum": ..., "count": ...}}}
@@ -173,17 +183,32 @@ def main():
     year_relbin_sum = {}
     year_relbin_count = {}
 
+    # Per-pixel absolute bias accumulator (for spatial MAE maps)
+    year_abs_sum = {}
+
+    # Global VHM0 histograms for distribution plots (Plot 10)
+    VHM0_HIST_BINS = np.linspace(0, 15, 301)   # 300 bins, 0.05 m resolution
+    _n_hist = len(VHM0_HIST_BINS) - 1
+    vhm0_hist_raw       = np.zeros(_n_hist, dtype=np.float64)
+    vhm0_hist_corrected = np.zeros(_n_hist, dtype=np.float64)
+    # Per-year histograms (same bins, one entry per year)
+    year_vhm0_hist_raw       = {y: np.zeros(_n_hist, dtype=np.float64) for y in years}
+    year_vhm0_hist_corrected = {y: np.zeros(_n_hist, dtype=np.float64) for y in years}
+
     for year in years:
         year_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_sq_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_count[year] = np.zeros((H, W), dtype=np.float64)
         year_raw_sum[year] = np.zeros((H, W), dtype=np.float64)
         year_bin_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_bin_sq_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_bin_abs_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_bin_count[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_season_sum[year] = {s: np.zeros((H, W), dtype=np.float64) for s in ["winter", "spring", "summer", "autumn"]}
         year_season_count[year] = {s: np.zeros((H, W), dtype=np.float64) for s in ["winter", "spring", "summer", "autumn"]}
         year_relbin_sum[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
         year_relbin_count[year] = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+        year_abs_sum[year] = np.zeros((H, W), dtype=np.float64)
 
     for year in years:
         file_list = files_by_year[year]
@@ -208,6 +233,7 @@ def main():
                 bias_filled = np.where(valid, bias_hw, 0.0)
                 year_sum[year] += bias_filled
                 year_sq_sum[year] += np.where(valid, bias_hw**2, 0.0)
+                year_abs_sum[year] += np.where(valid, np.abs(bias_hw), 0.0)
                 year_count[year] += valid.astype(np.float64)
                 year_raw_sum[year] += np.where(valid, raw_hw, 0.0)
 
@@ -217,6 +243,8 @@ def main():
                     lo, hi = bin_edges[bi], bin_edges[bi+1]
                     in_bin = valid & (raw_hw >= lo) & (raw_hw < hi)
                     year_bin_sum[year][bin_names[bi]] += np.where(in_bin, bias_hw, 0.0)
+                    year_bin_sq_sum[year][bin_names[bi]] += np.where(in_bin, bias_hw**2, 0.0)
+                    year_bin_abs_sum[year][bin_names[bi]] += np.where(in_bin, np.abs(bias_hw), 0.0)
                     year_bin_count[year][bin_names[bi]] += in_bin.astype(np.float64)
                     year_relbin_sum[year][bin_names[bi]] += np.where(in_bin, rel_bias_hw, 0.0)
                     year_relbin_count[year][bin_names[bi]] += in_bin.astype(np.float64)
@@ -225,6 +253,14 @@ def main():
                 if season in year_season_sum[year]:
                     year_season_sum[year][season] += bias_filled
                     year_season_count[year][season] += valid.astype(np.float64)
+
+                # VHM0 distribution histograms (global + per-year)
+                raw_valid = raw_hw[valid].ravel()
+                corrected_valid = (raw_hw + bias_hw)[valid].ravel()
+                vhm0_hist_raw               += np.histogram(raw_valid,       bins=VHM0_HIST_BINS)[0]
+                vhm0_hist_corrected         += np.histogram(corrected_valid, bins=VHM0_HIST_BINS)[0]
+                year_vhm0_hist_raw[year]       += np.histogram(raw_valid,       bins=VHM0_HIST_BINS)[0]
+                year_vhm0_hist_corrected[year] += np.histogram(corrected_valid, bins=VHM0_HIST_BINS)[0]
 
             if (fi + 1) % 10 == 0 or fi == len(file_list) - 1:
                 print(f"  {year}: {fi+1}/{len(file_list)} files processed")
@@ -584,6 +620,640 @@ def main():
     fig2.tight_layout()
     fig2.savefig(output_dir / "07b_relative_bias_per_bin.png", dpi=150)
     plt.close(fig2)
+
+    # ================================================================
+    # ANALYSIS 8 / PLOT 8: Sea-bin performance (matches evaluate_bunet style)
+    # Metrics pooled across all years; binned by raw VHM0 value.
+    #
+    # Two "models" compared against true wave (corrected_VHM0):
+    #   Reference       : raw ERA5 VHM0 used as-is
+    #   Static correction: raw VHM0 + per-bin mean bias (grand-mean per sea state)
+    # ================================================================
+    print("\n=== Analysis 8: Sea-bin performance (raw ERA5 vs static correction vs true wave) ===")
+
+    # Pool across years
+    pool_bin_sum = {b: sum(year_bin_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_sq_sum = {b: sum(year_bin_sq_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_abs_sum = {b: sum(year_bin_abs_sum[y][b] for y in years) for b in bin_names}
+    pool_bin_count = {b: sum(year_bin_count[y][b] for y in years) for b in bin_names}
+
+    # Per-bin mean bias (the static correction offset)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pool_bin_mean = {
+            b: np.where(pool_bin_count[b] > 0,
+                        pool_bin_sum[b] / pool_bin_count[b], 0.0)
+            for b in bin_names
+        }
+
+    # --- Pass 2: accumulate |bias - bin_mean| for static-correction MAE
+    #             and static-corrected VHM0 histogram for distribution plot.
+    #
+    # Vectorised: np.digitize assigns every pixel to a bin in one call;
+    # a pre-built (n_bins, H, W) mean-stack allows a single fancy-index
+    # lookup instead of a Python loop over 13 bins per hour.
+    # -----------------------------------------------------------------------
+    print("  Pass 2: computing static-correction residuals for MAE …")
+    pool_bin_abs_residual_sum = {b: np.zeros((H, W), dtype=np.float64) for b in bin_names}
+    vhm0_hist_static = np.zeros(_n_hist, dtype=np.float64)
+    year_bin_abs_residual_sum = {y: {b: np.zeros((H, W), dtype=np.float64) for b in bin_names} for y in years}
+    year_vhm0_hist_static = {y: np.zeros(_n_hist, dtype=np.float64) for y in years}
+
+    # (n_bins, H, W) — built once, reused every hour
+    _bin_mean_stack = np.stack([pool_bin_mean[b] for b in bin_names], axis=0)
+    _row_idx, _col_idx = np.indices((H, W))
+
+    for year in years:
+        file_list = files_by_year[year]
+        if args.max_files_per_year:
+            file_list = file_list[:args.max_files_per_year]
+        for fpath in file_list:
+            vhm0_bias, raw_vhm0, _ = load_bias_fields(
+                fpath, vhm0_idx, corrected_vhm0_idx, vtm02_idx, corrected_vtm02_idx
+            )
+            for hour in range(24):
+                bias_hw = vhm0_bias[hour]
+                raw_hw  = raw_vhm0[hour]
+                valid = ~np.isnan(bias_hw) & region_mask
+
+                # bin index for every pixel (0-based; clipped so fancy-index is safe)
+                bin_idx = np.digitize(raw_hw, bin_edges) - 1   # (H, W)
+                in_valid_bin = valid & (bin_idx >= 0) & (bin_idx < len(bin_names))
+                safe_idx = np.where(in_valid_bin, bin_idx, 0)  # dummy 0 for out-of-range
+
+                # per-pixel bin mean via fancy index — one lookup, no Python loop
+                per_pixel_mean = _bin_mean_stack[safe_idx, _row_idx, _col_idx]
+
+                residual_abs = np.where(in_valid_bin, np.abs(bias_hw - per_pixel_mean), 0.0)
+
+                # scatter residuals into per-bin (H, W) accumulators (pooled + per-year)
+                for bi, bname in enumerate(bin_names):
+                    mask_bi = np.where(bin_idx == bi, residual_abs, 0.0)
+                    pool_bin_abs_residual_sum[bname]        += mask_bi
+                    year_bin_abs_residual_sum[year][bname]  += mask_bi
+
+                # single histogram call for all valid static-correction values
+                static_pred_vals = (raw_hw + per_pixel_mean)[in_valid_bin]
+                vhm0_hist_static              += np.histogram(static_pred_vals, bins=VHM0_HIST_BINS)[0]
+                year_vhm0_hist_static[year]   += np.histogram(static_pred_vals, bins=VHM0_HIST_BINS)[0]
+
+    sb_rmse, sb_static_rmse, sb_mae, sb_static_mae, sb_mean_bias, sb_count, sb_pct = [], [], [], [], [], [], []
+    sb_labels_plot = []
+    total_sea_count = sum(
+        float(pool_bin_count[b][sea_mask].sum()) for b in bin_names
+    )
+
+    for bi, bname in enumerate(bin_names):
+        cnt_map = pool_bin_count[bname]
+        n = float(cnt_map[sea_mask].sum())
+        if n == 0:
+            continue
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rmse_map = np.where(
+                cnt_map > 0,
+                np.sqrt(pool_bin_sq_sum[bname] / cnt_map),
+                np.nan,
+            )
+            mae_map = np.where(
+                cnt_map > 0,
+                pool_bin_abs_sum[bname] / cnt_map,
+                np.nan,
+            )
+            mean_map = np.where(
+                cnt_map > 0,
+                pool_bin_sum[bname] / cnt_map,
+                np.nan,
+            )
+            # Static per-bin correction RMSE = sqrt(Var(bias within bin))
+            # = sqrt(mean(bias²) - mean_bias²)
+            var_map = np.where(
+                cnt_map > 0,
+                pool_bin_sq_sum[bname] / cnt_map - (pool_bin_sum[bname] / cnt_map) ** 2,
+                np.nan,
+            )
+            static_rmse_map = np.where(
+                ~np.isnan(var_map),
+                np.sqrt(np.maximum(var_map, 0.0)),
+                np.nan,
+            )
+
+        static_mae_map = np.where(
+            cnt_map > 0,
+            pool_bin_abs_residual_sum[bname] / cnt_map,
+            np.nan,
+        )
+
+        rmse_val        = float(np.nanmean(rmse_map[sea_mask & (cnt_map > 0)]))
+        static_rmse_val = float(np.nanmean(static_rmse_map[sea_mask & (cnt_map > 0)]))
+        mae_val         = float(np.nanmean(mae_map[sea_mask & (cnt_map > 0)]))
+        static_mae_val  = float(np.nanmean(static_mae_map[sea_mask & (cnt_map > 0)]))
+        mean_val        = float(np.nanmean(mean_map[sea_mask & (cnt_map > 0)]))
+
+        sb_rmse.append(rmse_val)
+        sb_static_rmse.append(static_rmse_val)
+        sb_mae.append(mae_val)
+        sb_static_mae.append(static_mae_val)
+        sb_mean_bias.append(mean_val)
+        sb_count.append(int(n))
+        sb_pct.append(100.0 * n / total_sea_count if total_sea_count > 0 else 0.0)
+        sb_labels_plot.append(bin_labels[bi])
+
+        print(
+            f"  {bin_labels[bi]:<14s}: "
+            f"RMSE raw={rmse_val:.4f}m  static={static_rmse_val:.4f}m  |  "
+            f"MAE raw={mae_val:.4f}m  static={static_mae_val:.4f}m  |  "
+            f"n={int(n):,}  ({sb_pct[-1]:.1f}%)"
+        )
+
+    # Compute improvement % for panel [1,0] (matches evaluate_bunet panel [1,0])
+    sb_rmse_improvement_pct = [
+        (r - s) / r * 100 if r > 0 else 0.0
+        for r, s in zip(sb_rmse, sb_static_rmse)
+    ]
+
+    # Plot 8: 2×2 sea-bin performance — identical style to evaluate_bunet
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    fig.suptitle(
+        "Sea-Bin Performance Analysis (Static Correction vs Reference)",
+        fontsize=16,
+        fontweight="bold",
+    )
+
+    x = np.arange(len(sb_labels_plot))
+    width = 0.35
+
+    # Panel [0,0]: RMSE — Reference (darkblue) vs Static Correction (skyblue)
+    axes[0, 0].bar(
+        x - width / 2, sb_rmse, width,
+        label="Reference", color="darkblue", alpha=0.6,
+    )
+    axes[0, 0].bar(
+        x + width / 2, sb_static_rmse, width,
+        label="Static Correction", color="skyblue", alpha=0.8,
+    )
+    axes[0, 0].set_title("RMSE by Sea State", fontweight="bold")
+    axes[0, 0].set_ylabel("RMSE (m)")
+    axes[0, 0].set_xticks(x)
+    axes[0, 0].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3, axis="y")
+    for i, (v1, v2) in enumerate(zip(sb_rmse, sb_static_rmse)):
+        if v1 > 0:
+            axes[0, 0].text(
+                i - width / 2, v1 + max(sb_rmse) * 0.01, f"{v1:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+        if v2 > 0:
+            axes[0, 0].text(
+                i + width / 2, v2 + max(sb_rmse) * 0.01, f"{v2:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+
+    # Panel [0,1]: MAE — Reference (darkred) vs Static Correction (lightcoral)
+    axes[0, 1].bar(
+        x - width / 2, sb_mae, width,
+        label="Reference", color="darkred", alpha=0.6,
+    )
+    axes[0, 1].bar(
+        x + width / 2, sb_static_mae, width,
+        label="Static Correction", color="lightcoral", alpha=0.8,
+    )
+    axes[0, 1].set_title("MAE by Sea State", fontweight="bold")
+    axes[0, 1].set_ylabel("MAE (m)")
+    axes[0, 1].set_xticks(x)
+    axes[0, 1].set_xticklabels(sb_labels_plot, rotation=45, ha="right")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3, axis="y")
+    for i, (v1, v2) in enumerate(zip(sb_mae, sb_static_mae)):
+        if v1 > 0:
+            axes[0, 1].text(
+                i - width / 2, v1 + max(sb_mae) * 0.01, f"{v1:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+        if v2 > 0:
+            axes[0, 1].text(
+                i + width / 2, v2 + max(sb_mae) * 0.01, f"{v2:.3f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+
+    # Panel [1,0]: RMSE improvement % (green = static correction better, red = worse)
+    colors_imp = ["green" if v > 0 else "red" for v in sb_rmse_improvement_pct]
+    axes[1, 0].bar(sb_labels_plot, sb_rmse_improvement_pct, color=colors_imp, alpha=0.7)
+    axes[1, 0].axhline(y=0, color="black", linestyle="--", linewidth=1)
+    axes[1, 0].set_title("RMSE Improvement by Sea State", fontweight="bold")
+    axes[1, 0].set_ylabel("Improvement (%)")
+    axes[1, 0].tick_params(axis="x", rotation=45)
+    axes[1, 0].grid(True, alpha=0.3, axis="y")
+    imp_range = max(sb_rmse_improvement_pct) - min(sb_rmse_improvement_pct)
+    for i, v in enumerate(sb_rmse_improvement_pct):
+        axes[1, 0].text(
+            i,
+            v + imp_range * 0.02 if imp_range > 0 else v,
+            f"{v:.1f}%",
+            ha="center", va="bottom" if v > 0 else "top", fontsize=9,
+        )
+
+    # Panel [1,1]: Sample distribution
+    axes[1, 1].bar(sb_labels_plot, sb_pct, color="gold", alpha=0.7)
+    axes[1, 1].set_title("Sample Distribution by Sea State", fontweight="bold")
+    axes[1, 1].set_ylabel("Percentage of Samples (%)")
+    axes[1, 1].tick_params(axis="x", rotation=45)
+    axes[1, 1].grid(True, alpha=0.3, axis="y")
+    for i, (v, cnt) in enumerate(zip(sb_pct, sb_count)):
+        axes[1, 1].text(
+            i,
+            v + max(sb_pct) * 0.02,
+            f"{v:.1f}%\n({cnt:,})",
+            ha="center", va="bottom", fontsize=8,
+        )
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "08_sea_bin_performance.png", dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved → {output_dir / '08_sea_bin_performance.png'}")
+
+    # --- Per-year Plot 8 ---------------------------------------------------
+    def _plot_sea_bin(
+        labels, ref_rmse, static_rmse, ref_mae, static_mae, pct, counts,
+        title, save_path,
+    ):
+        imp_pct = [
+            (r - s) / r * 100 if r > 0 else 0.0
+            for r, s in zip(ref_rmse, static_rmse)
+        ]
+        fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+        fig.suptitle(title, fontsize=16, fontweight="bold")
+        x = np.arange(len(labels))
+        width = 0.35
+
+        # [0,0] RMSE
+        axes[0, 0].bar(x - width / 2, ref_rmse,    width, label="Reference",        color="darkblue",  alpha=0.6)
+        axes[0, 0].bar(x + width / 2, static_rmse, width, label="Static Correction", color="skyblue",   alpha=0.8)
+        axes[0, 0].set_title("RMSE by Sea State", fontweight="bold")
+        axes[0, 0].set_ylabel("RMSE (m)")
+        axes[0, 0].set_xticks(x)
+        axes[0, 0].set_xticklabels(labels, rotation=45, ha="right")
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3, axis="y")
+        for i, (v1, v2) in enumerate(zip(ref_rmse, static_rmse)):
+            if v1 > 0:
+                axes[0, 0].text(i - width / 2, v1 + max(ref_rmse) * 0.01, f"{v1:.3f}", ha="center", va="bottom", fontsize=8)
+            if v2 > 0:
+                axes[0, 0].text(i + width / 2, v2 + max(ref_rmse) * 0.01, f"{v2:.3f}", ha="center", va="bottom", fontsize=8)
+
+        # [0,1] MAE
+        axes[0, 1].bar(x - width / 2, ref_mae,    width, label="Reference",        color="darkred",   alpha=0.6)
+        axes[0, 1].bar(x + width / 2, static_mae, width, label="Static Correction", color="lightcoral", alpha=0.8)
+        axes[0, 1].set_title("MAE by Sea State", fontweight="bold")
+        axes[0, 1].set_ylabel("MAE (m)")
+        axes[0, 1].set_xticks(x)
+        axes[0, 1].set_xticklabels(labels, rotation=45, ha="right")
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3, axis="y")
+        for i, (v1, v2) in enumerate(zip(ref_mae, static_mae)):
+            if v1 > 0:
+                axes[0, 1].text(i - width / 2, v1 + max(ref_mae) * 0.01, f"{v1:.3f}", ha="center", va="bottom", fontsize=8)
+            if v2 > 0:
+                axes[0, 1].text(i + width / 2, v2 + max(ref_mae) * 0.01, f"{v2:.3f}", ha="center", va="bottom", fontsize=8)
+
+        # [1,0] RMSE improvement %
+        colors_imp = ["green" if v > 0 else "red" for v in imp_pct]
+        axes[1, 0].bar(labels, imp_pct, color=colors_imp, alpha=0.7)
+        axes[1, 0].axhline(y=0, color="black", linestyle="--", linewidth=1)
+        axes[1, 0].set_title("RMSE Improvement by Sea State", fontweight="bold")
+        axes[1, 0].set_ylabel("Improvement (%)")
+        axes[1, 0].tick_params(axis="x", rotation=45)
+        axes[1, 0].grid(True, alpha=0.3, axis="y")
+        imp_range = max(imp_pct) - min(imp_pct)
+        for i, v in enumerate(imp_pct):
+            axes[1, 0].text(i, v + imp_range * 0.02 if imp_range > 0 else v,
+                            f"{v:.1f}%", ha="center", va="bottom" if v > 0 else "top", fontsize=9)
+
+        # [1,1] Sample distribution
+        axes[1, 1].bar(labels, pct, color="gold", alpha=0.7)
+        axes[1, 1].set_title("Sample Distribution by Sea State", fontweight="bold")
+        axes[1, 1].set_ylabel("Percentage of Samples (%)")
+        axes[1, 1].tick_params(axis="x", rotation=45)
+        axes[1, 1].grid(True, alpha=0.3, axis="y")
+        for i, (v, cnt) in enumerate(zip(pct, counts)):
+            axes[1, 1].text(i, v + max(pct) * 0.02, f"{v:.1f}%\n({cnt:,})",
+                            ha="center", va="bottom", fontsize=8)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved → {save_path}")
+
+    for year in years:
+        sb_y_rmse, sb_y_static_rmse = [], []
+        sb_y_mae, sb_y_static_mae   = [], []
+        sb_y_pct, sb_y_count, sb_y_labels = [], [], []
+        total_y_count = sum(float(year_bin_count[year][b][sea_mask].sum()) for b in bin_names)
+
+        for bi, bname in enumerate(bin_names):
+            cnt_map = year_bin_count[year][bname]
+            n = float(cnt_map[sea_mask].sum())
+            if n == 0:
+                continue
+            valid_sea = sea_mask & (cnt_map > 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ref_rmse_map = np.where(cnt_map > 0, np.sqrt(year_bin_sq_sum[year][bname] / cnt_map), np.nan)
+                ref_mae_map  = np.where(cnt_map > 0, year_bin_abs_sum[year][bname] / cnt_map, np.nan)
+                # Static RMSE: E[(bias - pool_mean)²] = E[bias²] - 2*pm*E[bias] + pm²
+                pm = pool_bin_mean[bname]
+                mean_y_map = np.where(cnt_map > 0, year_bin_sum[year][bname] / cnt_map, 0.0)
+                sq_y_map   = np.where(cnt_map > 0, year_bin_sq_sum[year][bname] / cnt_map, np.nan)
+                static_var  = np.where(cnt_map > 0, sq_y_map - 2 * pm * mean_y_map + pm ** 2, np.nan)
+                static_rmse_map = np.where(~np.isnan(static_var), np.sqrt(np.maximum(static_var, 0.0)), np.nan)
+                static_mae_map  = np.where(cnt_map > 0, year_bin_abs_residual_sum[year][bname] / cnt_map, np.nan)
+
+            sb_y_rmse.append(float(np.nanmean(ref_rmse_map[valid_sea])))
+            sb_y_static_rmse.append(float(np.nanmean(static_rmse_map[valid_sea])))
+            sb_y_mae.append(float(np.nanmean(ref_mae_map[valid_sea])))
+            sb_y_static_mae.append(float(np.nanmean(static_mae_map[valid_sea])))
+            sb_y_count.append(int(n))
+            sb_y_pct.append(100.0 * n / total_y_count if total_y_count > 0 else 0.0)
+            sb_y_labels.append(bin_labels[bi])
+
+        if sb_y_rmse:
+            _plot_sea_bin(
+                sb_y_labels, sb_y_rmse, sb_y_static_rmse,
+                sb_y_mae, sb_y_static_mae, sb_y_pct, sb_y_count,
+                title=f"Sea-Bin Performance Analysis — {year} (Static Correction vs Reference)",
+                save_path=output_dir / f"08_{year}_sea_bin_performance.png",
+            )
+
+    # ================================================================
+    # PLOT 9: Spatial RMSE / MAE / improvement maps (evaluate_bunet style)
+    #
+    # "Reference"  = raw VHM0 used as-is  → error = bias itself
+    # "Corrector"  = static grand-mean correction applied per pixel
+    #                → residual = bias − grand_mean_bias
+    # Maps produced (one file each, matching evaluate_bunet naming):
+    #   09a_rmse_reference.png         sqrt(mean(bias²))      per pixel
+    #   09b_rmse_static_corrector.png  sqrt(Var(bias))        per pixel
+    #   09c_rmse_improvement.png       ref_rmse − corr_rmse   per pixel
+    #   09d_rmse_improvement_binary.png  same, blue/red binary cmap
+    #   09e_mae_reference.png          mean(|bias|)           per pixel
+    #   09f_mean_bias.png              grand_mean_bias        per pixel
+    # ================================================================
+    print("\n=== Plot 9: Spatial RMSE / MAE / improvement maps ===")
+
+    # --- lat/lon grids (from first file, hour 0) --------------------------
+    t0_hw = data0["tensor"][0]          # (H, W, C)
+    lat_grid = t0_hw[..., lat_idx].numpy()   # (H, W)
+    lon_grid = t0_hw[..., lon_idx].numpy()   # (H, W)
+
+    # --- pool pixel-level accumulators across all years -------------------
+    total_sq_bias  = sum(year_sq_sum[y]  for y in years)   # sum of bias²
+    total_abs_bias = sum(year_abs_sum[y] for y in years)   # sum of |bias|
+    # total_count and total_sum already computed above
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rmse_ref = np.where(total_count > 0,
+                            np.sqrt(total_sq_bias / total_count), np.nan)
+        mae_ref  = np.where(total_count > 0,
+                            total_abs_bias / total_count, np.nan)
+        # Static corrector residual RMSE = sqrt(mean((bias - grand_mean)²))
+        #   = sqrt(mean(bias²) - grand_mean²)  [when count is large]
+        #   equivalently = sqrt(total_var) which is already computed
+        rmse_corr = np.where(~np.isnan(total_var) & (total_count > 0),
+                             np.sqrt(np.maximum(total_var, 0.0)), np.nan)
+
+    improvement = rmse_ref - rmse_corr   # >0 means correction helps
+
+    # --- helper: one cartopy pcolormesh figure ----------------------------
+    def _save_geo_map(data, save_path, title, cmap, vmin, vmax, cbar_label, norm=None):
+        fig = plt.figure(figsize=(12, 7))
+        ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
+        ax.coastlines(resolution="10m", linewidth=0.5)
+        ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False,
+                     linewidth=0.5, alpha=0.5)
+        im = ax.pcolormesh(
+            lon_grid, lat_grid, data,
+            cmap=cmap,
+            vmin=vmin if norm is None else None,
+            vmax=vmax if norm is None else None,
+            norm=norm,
+            transform=ccrs.PlateCarree(),
+            shading="auto",
+        )
+        valid_lons = lon_grid[~np.isnan(lon_grid)]
+        valid_lats = lat_grid[~np.isnan(lat_grid)]
+        ax.set_extent([valid_lons.min(), valid_lons.max(),
+                       valid_lats.min(), valid_lats.max()],
+                      crs=ccrs.PlateCarree())
+        plt.colorbar(im, ax=ax, orientation="vertical",
+                     label=cbar_label, pad=0.05, shrink=0.8)
+        ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved → {save_path}")
+
+    cmap_jet = plt.get_cmap("jet").copy()
+    cmap_jet.set_bad("white")
+
+    vmax_rmse = np.nanpercentile(rmse_ref[sea_mask], 98)
+    vmax_mae  = np.nanpercentile(mae_ref[sea_mask],  98)
+
+    # 09a: Reference RMSE
+    _save_geo_map(
+        rmse_ref,
+        output_dir / "09a_rmse_reference.png",
+        title="Reference RMSE — sqrt(mean(bias²))  [raw VHM0 as predictor]",
+        cmap=cmap_jet, vmin=0, vmax=vmax_rmse, cbar_label="RMSE (m)",
+    )
+
+    # 09b: Static-corrector residual RMSE
+    vmax_corr = np.nanpercentile(rmse_corr[sea_mask & ~np.isnan(rmse_corr)], 98)
+    _save_geo_map(
+        rmse_corr,
+        output_dir / "09b_rmse_static_corrector.png",
+        title="Static-Corrector Residual RMSE — sqrt(Var(bias))  [after removing grand mean]",
+        cmap=cmap_jet, vmin=0, vmax=max(vmax_rmse, vmax_corr), cbar_label="RMSE (m)",
+    )
+
+    # 09c: RMSE improvement — symmetric diverging colormap
+    imp_abs_max = np.nanpercentile(np.abs(improvement[sea_mask & ~np.isnan(improvement)]), 98)
+    _save_geo_map(
+        improvement,
+        output_dir / "09c_rmse_improvement.png",
+        title="RMSE Improvement (Reference − Static Corrector)\n+red = correction helps, −blue = correction hurts",
+        cmap="RdBu", vmin=-imp_abs_max, vmax=imp_abs_max, cbar_label="ΔRMSE (m)",
+    )
+
+    # 09d: RMSE improvement — binary blue/red (exact match to evaluate_bunet)
+    cmap_binary = mcolors.LinearSegmentedColormap.from_list(
+        "improvement_binary", ["#0000FF", "#FF0000"], N=256
+    )
+    cmap_binary.set_bad("white")
+    norm_binary = mcolors.BoundaryNorm(
+        boundaries=[-imp_abs_max, 0, imp_abs_max], ncolors=256, clip=True
+    )
+    _save_geo_map(
+        improvement,
+        output_dir / "09d_rmse_improvement_binary.png",
+        title="RMSE Improvement binary (red = static correction better, blue = worse)",
+        cmap=cmap_binary, vmin=-imp_abs_max, vmax=imp_abs_max,
+        cbar_label="ΔRMSE (m)", norm=norm_binary,
+    )
+
+    # 09e: MAE reference
+    _save_geo_map(
+        mae_ref,
+        output_dir / "09e_mae_reference.png",
+        title="Reference MAE — mean(|bias|)  [raw VHM0 as predictor]",
+        cmap=cmap_jet, vmin=0, vmax=vmax_mae, cbar_label="MAE (m)",
+    )
+
+    # 09f: Grand mean bias (stationary component)
+    bias_abs_max = np.nanpercentile(np.abs(grand_mean_bias[sea_mask]), 98)
+    _save_geo_map(
+        grand_mean_bias,
+        output_dir / "09f_mean_bias.png",
+        title="Grand Mean Bias — mean(corrected − raw)  [stationary component]",
+        cmap="RdBu_r", vmin=-bias_abs_max, vmax=bias_abs_max, cbar_label="Bias (m)",
+    )
+
+    # ================================================================
+    # PLOT 10: VHM0 distributions — raw ERA5 / static correction / true wave
+    # Matches evaluate_bunet.plot_vhm0_distributions() style:
+    #   green  = corrected_VHM0 (true wave / reference)
+    #   orange = static per-bin correction (treated as "model")
+    #   red    = raw ERA5 VHM0 (uncorrected)
+    # Produces three files mirroring the three sub-plots in evaluate_bunet:
+    #   10a  all three
+    #   10b  static correction vs true wave  (model vs reference)
+    #   10c  true wave vs raw ERA5           (reference vs uncorrected)
+    # Also produces per-sea-state variants for extreme bins (≥ 11 m).
+    # ================================================================
+    print("\n=== Plot 10: VHM0 distributions ===")
+
+    from scipy import stats as _scipy_stats
+
+    _bin_centers = 0.5 * (VHM0_HIST_BINS[:-1] + VHM0_HIST_BINS[1:])
+    _x_grid = np.linspace(0, 15, 300)
+
+    def _hist_kde(hist_counts, bw_scale=0.5):
+        """Build a KDE from histogram counts using bin centres as weighted points."""
+        w = hist_counts.astype(np.float64)
+        total = w.sum()
+        if total == 0:
+            return np.zeros_like(_x_grid)
+        w_norm = w / total
+        std_est = np.sqrt(np.sum(w_norm * (_bin_centers - np.sum(w_norm * _bin_centers)) ** 2))
+        bw = bw_scale * std_est * total ** (-1 / 5) if std_est > 0 else 0.1
+        bw = max(bw, 1e-3)
+        kde = _scipy_stats.gaussian_kde(_bin_centers, weights=w + 1e-12, bw_method=bw)
+        return kde(_x_grid)
+
+    def _vhm0_range_hist(hist_full, lo, hi):
+        """Slice a histogram array to a VHM0 sub-range [lo, hi)."""
+        idx_lo = int(np.searchsorted(VHM0_HIST_BINS, lo, side="left"))
+        idx_hi = int(np.searchsorted(VHM0_HIST_BINS, hi, side="right")) - 1
+        sliced = hist_full.copy()
+        sliced[:idx_lo] = 0
+        sliced[idx_hi:] = 0
+        return sliced
+
+    def _save_dist_plot(kde_vals_list, labels, colors, title, fname, vhm0_range=None):
+        range_tag = f" (VHM0 {vhm0_range[0]}–{vhm0_range[1]} m)" if vhm0_range else ""
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        for kde_vals, label, color in zip(kde_vals_list, labels, colors):
+            ax.plot(_x_grid, kde_vals, label=label, color=color, linewidth=1.5, alpha=0.9)
+            ax.fill_between(_x_grid, kde_vals, alpha=0.15, color=color)
+        ax.set_xlabel("VHM0 (m)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Density", fontsize=12, fontweight="bold")
+        ax.set_title(title + range_tag, fontsize=13, fontweight="bold")
+        ax.legend(fontsize=11, framealpha=0.9, loc="upper right")
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 15)
+        plt.tight_layout()
+        plt.savefig(output_dir / fname, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved → {output_dir / fname}")
+
+    # --- full-distribution KDEs ---
+    kde_raw       = _hist_kde(vhm0_hist_raw)
+    kde_corrected = _hist_kde(vhm0_hist_corrected)
+    kde_static    = _hist_kde(vhm0_hist_static)
+
+    _save_dist_plot(
+        [kde_corrected, kde_static, kde_raw],
+        ["True wave (corrected_VHM0)", "Static per-bin correction", "Raw ERA5"],
+        ["green", "darkorange", "red"],
+        "VHM0 Distributions — True Wave vs Static Correction vs Raw ERA5",
+        "10a_vhm0_distributions.png",
+    )
+    _save_dist_plot(
+        [kde_corrected, kde_static],
+        ["True wave (corrected_VHM0)", "Static per-bin correction"],
+        ["green", "darkorange"],
+        "VHM0 Distribution — Static Correction vs True Wave",
+        "10b_vhm0_static_vs_true.png",
+    )
+    _save_dist_plot(
+        [kde_corrected, kde_raw],
+        ["True wave (corrected_VHM0)", "Raw ERA5"],
+        ["green", "red"],
+        "VHM0 Distribution — True Wave vs Raw ERA5",
+        "10c_vhm0_true_vs_raw.png",
+    )
+
+    # --- per-range variants for extreme sea states (matching evaluate_bunet usage) ---
+    for lo, hi in [(11, 12), (12, 13)]:
+        h_raw  = _vhm0_range_hist(vhm0_hist_raw,       lo, hi)
+        h_corr = _vhm0_range_hist(vhm0_hist_corrected, lo, hi)
+        h_stat = _vhm0_range_hist(vhm0_hist_static,    lo, hi)
+        if h_raw.sum() == 0:
+            print(f"  No samples in {lo}–{hi} m range, skipping.")
+            continue
+        suffix = f"_{lo}-{hi}m"
+        _save_dist_plot(
+            [_hist_kde(h_corr), _hist_kde(h_stat), _hist_kde(h_raw)],
+            ["True wave (corrected_VHM0)", "Static per-bin correction", "Raw ERA5"],
+            ["green", "darkorange", "red"],
+            f"VHM0 Distributions ({lo}–{hi} m)",
+            f"10a_vhm0_distributions{suffix}.png",
+            vhm0_range=(lo, hi),
+        )
+        _save_dist_plot(
+            [_hist_kde(h_corr), _hist_kde(h_stat)],
+            ["True wave (corrected_VHM0)", "Static per-bin correction"],
+            ["green", "darkorange"],
+            f"VHM0 — Static Correction vs True Wave",
+            f"10b_vhm0_static_vs_true{suffix}.png",
+            vhm0_range=(lo, hi),
+        )
+
+    # --- Per-year distribution plots -------------------------------------------
+    print("\n  Per-year VHM0 distribution plots …")
+    for year in years:
+        kde_raw_y  = _hist_kde(year_vhm0_hist_raw[year])
+        kde_corr_y = _hist_kde(year_vhm0_hist_corrected[year])
+        kde_stat_y = _hist_kde(year_vhm0_hist_static[year])
+
+        _save_dist_plot(
+            [kde_corr_y, kde_stat_y, kde_raw_y],
+            ["True wave (corrected_VHM0)", "Static per-bin correction", "Raw ERA5"],
+            ["green", "darkorange", "red"],
+            f"VHM0 Distributions {year}",
+            f"10a_vhm0_distributions_{year}.png",
+        )
+        _save_dist_plot(
+            [kde_corr_y, kde_stat_y],
+            ["True wave (corrected_VHM0)", "Static per-bin correction"],
+            ["green", "darkorange"],
+            f"VHM0 — Static Correction vs True Wave {year}",
+            f"10b_vhm0_static_vs_true_{year}.png",
+        )
+        _save_dist_plot(
+            [kde_corr_y, kde_raw_y],
+            ["True wave (corrected_VHM0)", "Raw ERA5"],
+            ["green", "red"],
+            f"VHM0 — True Wave vs Raw ERA5 {year}",
+            f"10c_vhm0_true_vs_raw_{year}.png",
+        )
 
     print(f"\nDone. Check the output directory for plots.")
 

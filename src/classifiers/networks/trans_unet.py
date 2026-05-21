@@ -121,6 +121,7 @@ class TransformerBranch(nn.Module):
         num_layers=6,
         num_heads=8,
         mlp_ratio=4.0,
+        dropout=0.0,
         use_coord_pos_enc=True,
         sea_mask_channel_index=None,
     ):
@@ -144,6 +145,7 @@ class TransformerBranch(nn.Module):
             d_model=emb_dim,
             nhead=num_heads,
             dim_feedforward=int(emb_dim * mlp_ratio),
+            dropout=dropout,
             activation="gelu",
             batch_first=True,
         )
@@ -242,6 +244,7 @@ class TransUNetGeo(nn.Module):
         num_layers=8,
         num_heads=8,
         use_mdn=False,
+        transformer_dropout=0.0,
         transformer_use_coord_pos_enc=True,
         transformer_sea_mask_channel_index=None,
     ):
@@ -273,6 +276,7 @@ class TransUNetGeo(nn.Module):
             patch_size=patch_size,
             num_layers=num_layers,
             num_heads=num_heads,
+            dropout=transformer_dropout,
             use_coord_pos_enc=transformer_use_coord_pos_enc,
             sea_mask_channel_index=transformer_sea_mask_channel_index,
         )
@@ -297,7 +301,7 @@ class TransUNetGeo(nn.Module):
                 # Efficient for related tasks like VHM0 and VTM02
                 self.task_heads[task] = nn.Conv2d(c1, 1, kernel_size=1)
 
-    def forward(self, x):
+    def extract_features(self, x):
         # Encoder
         x1d, x1 = self.d1(x)  # H/2
         x2d, x2 = self.d2(x1d)  # H/4
@@ -325,7 +329,10 @@ class TransUNetGeo(nn.Module):
         u3 = self.u3(u4, x3)
         u2 = self.u2(u3, x2)
         u1 = self.u1(u2, x1)  # Shared features: [B, c1, H, W]
+        return u1
 
+    def forward(self, x):
+        u1 = self.extract_features(x)
         # Multi-task predictions
         outputs = {}
         for task in self.auxiliary_tasks:
@@ -336,6 +343,205 @@ class TransUNetGeo(nn.Module):
             return outputs[self.auxiliary_tasks[0]]
 
         return outputs
+
+
+class MoETransUNetGeo(nn.Module):
+    """
+    Sea-state-aware Mixture-of-Experts wrapper around a shared TransUNet backbone.
+
+    The model predicts K candidate bias fields (one per expert) and a shared spatial
+    gate, then returns a soft mixture:
+        prediction = sum_k gate_weight_k * expert_output_k
+
+    Supports multi-task learning (shared gate, per-task expert heads).
+
+    When return_gate_maps=True, forward() returns a dict containing the prediction
+    plus auxiliary tensors for diagnostics and regularization losses:
+        - gate_weights      : softmax-normalized routing weights  [B, K, H, W]
+        - gate_logits       : raw gate scores                     [B, K, H, W]
+        - expert_diversity_loss : pairwise cosine-sim penalty on expert weights (scalar, None unless model.compute_diversity=True)
+        - uncertainty       : 1 - max_k(gate_weight_k)           [B, H, W]
+        - expert_outputs    : raw per-expert predictions
+
+    Args:
+        gate_input_mode     : "features" (data-driven) | "input_channels" (physics-informed)
+        gate_input_channels : list of input channel indices used when gate_input_mode="input_channels"
+        vhm0_channel_index  : deprecated shorthand; sets gate_input_channels=[idx] if not provided
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels=1,
+        auxiliary_tasks=None,
+        base_channels=64,
+        bottleneck_dim=1024,
+        patch_size=16,
+        num_layers=8,
+        num_heads=8,
+        num_experts=3,
+        gate_temperature=1.0,
+        gate_input_mode="features",
+        gate_input_channels=None,
+        vhm0_channel_index=0,
+        expert_dropout=0.0,
+        transformer_dropout=0.0,
+        return_gate_maps=True,
+        transformer_use_coord_pos_enc=True,
+        transformer_sea_mask_channel_index=None,
+    ):
+        super().__init__()
+        self.auxiliary_tasks = auxiliary_tasks or ["vhm0"]
+        if num_experts < 2:
+            raise ValueError("num_experts must be >= 2 for MoETransUNetGeo.")
+        if gate_temperature <= 0:
+            raise ValueError("gate_temperature must be > 0.")
+        if gate_input_mode not in {"features", "input_channels", "vhm0_only"}:
+            raise ValueError(
+                "gate_input_mode must be 'features', 'input_channels', or 'vhm0_only'."
+            )
+
+        self.num_experts = int(num_experts)
+        self.gate_temperature = float(gate_temperature)
+        # Normalise legacy mode name
+        self.gate_input_mode = (
+            "input_channels" if gate_input_mode == "vhm0_only" else gate_input_mode
+        )
+        self.return_gate_maps = return_gate_maps
+        # Computed on demand — set True by trainer when expert_diversity_weight > 0.
+        self.compute_diversity = False
+
+        # Physics-informed gate channels (multi-channel support)
+        if gate_input_channels is not None:
+            self.gate_input_channels = list(gate_input_channels)
+        elif self.gate_input_mode == "input_channels":
+            self.gate_input_channels = [int(vhm0_channel_index)]
+        else:
+            self.gate_input_channels = None
+
+        self.backbone = TransUNetGeo(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            auxiliary_tasks=self.auxiliary_tasks,
+            base_channels=base_channels,
+            bottleneck_dim=bottleneck_dim,
+            patch_size=patch_size,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            use_mdn=False,
+            transformer_dropout=transformer_dropout,
+            transformer_use_coord_pos_enc=transformer_use_coord_pos_enc,
+            transformer_sea_mask_channel_index=transformer_sea_mask_channel_index,
+        )
+        feature_channels = base_channels
+
+        # Per-task expert heads: shared gate, task-specific K experts
+        self.expert_heads = nn.ModuleDict()
+        for task in self.auxiliary_tasks:
+            task_experts = nn.ModuleList()
+            for _ in range(self.num_experts):
+                if expert_dropout > 0:
+                    task_experts.append(
+                        nn.Sequential(
+                            nn.Dropout2d(expert_dropout),
+                            nn.Conv2d(feature_channels, 1, kernel_size=1),
+                        )
+                    )
+                else:
+                    task_experts.append(nn.Conv2d(feature_channels, 1, kernel_size=1))
+            self.expert_heads[task] = task_experts
+
+        # Shared spatial gate (regime is physics, not task-specific)
+        if self.gate_input_mode == "features":
+            self.gate_head = nn.Sequential(
+                nn.Conv2d(feature_channels, feature_channels, kernel_size=3, padding=1),
+                nn.BatchNorm2d(feature_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(feature_channels, self.num_experts, kernel_size=1),
+            )
+        else:
+            n_gate_ch = len(self.gate_input_channels)
+            self.gate_head = nn.Sequential(
+                nn.Conv2d(n_gate_ch, 16, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(16, self.num_experts, kernel_size=1),
+            )
+
+    def _expert_weight_tensors(self):
+        """Return the final Conv2d weight tensor for every expert across all tasks."""
+        weights = []
+        for task in self.auxiliary_tasks:
+            for head in self.expert_heads[task]:
+                conv = head[-1] if isinstance(head, nn.Sequential) else head
+                weights.append(conv.weight)
+        return weights
+
+    def forward(self, x):
+        features = self.backbone.extract_features(x)  # [B, c1, H, W]
+
+        # Gate logits
+        if self.gate_input_mode == "input_channels":
+            gate_input = x[:, self.gate_input_channels]  # [B, n_ch, H, W]
+            gate_input = torch.nan_to_num(gate_input, nan=0.0, posinf=0.0, neginf=0.0)
+            if gate_input.shape[-2:] != features.shape[-2:]:
+                gate_input = F.interpolate(
+                    gate_input, size=features.shape[-2:], mode="bilinear", align_corners=False
+                )
+            gate_logits = self.gate_head(gate_input)
+        else:
+            gate_logits = self.gate_head(features)
+
+        gate_weights = torch.softmax(gate_logits / self.gate_temperature, dim=1)  # [B, K, H, W]
+
+        # Per-task soft mixture
+        task_predictions = {}
+        task_expert_outputs = {}
+        for task in self.auxiliary_tasks:
+            expert_outs = torch.stack(
+                [head(features) for head in self.expert_heads[task]], dim=1
+            )  # [B, K, 1, H, W]
+            task_predictions[task] = (expert_outs * gate_weights.unsqueeze(2)).sum(dim=1)
+            task_expert_outputs[task] = expert_outs
+
+        # Single-task backward compat: return tensor instead of dict
+        if len(self.auxiliary_tasks) == 1:
+            prediction = task_predictions[self.auxiliary_tasks[0]]
+            expert_outputs = task_expert_outputs[self.auxiliary_tasks[0]]
+        else:
+            prediction = task_predictions
+            expert_outputs = task_expert_outputs
+
+        if not self.return_gate_maps:
+            return prediction
+
+        # ── Auxiliary losses & diagnostics ──────────────────────────────────
+        # NOTE: load_balance_loss and gate_entropy are computed by the trainer from
+        # gate_weights with proper sea masking — no need to recompute here.
+
+        # Expert diversity loss: only when explicitly enabled (expensive on every step).
+        if self.compute_diversity:
+            weight_tensors = torch.stack(
+                [w.flatten() for w in self._expert_weight_tensors()], dim=0
+            )  # [K*T, D]
+            weight_tensors = F.normalize(weight_tensors, dim=1)
+            sim = weight_tensors @ weight_tensors.T  # [K*T, K*T]
+            K = weight_tensors.shape[0]
+            off_diag = ~torch.eye(K, dtype=torch.bool, device=weight_tensors.device)
+            expert_diversity_loss = sim[off_diag].mean()
+        else:
+            expert_diversity_loss = None
+
+        # Uncertainty: low max gate weight → ambiguous regime
+        uncertainty = 1.0 - gate_weights.max(dim=1).values  # [B, H, W]
+
+        return {
+            "prediction": prediction,
+            "expert_outputs": expert_outputs,
+            "gate_logits": gate_logits,
+            "gate_weights": gate_weights,
+            "expert_diversity_loss": expert_diversity_loss,
+            "uncertainty": uncertainty,
+        }
 
 
 class SimpleMLPGeo(nn.Module):
@@ -465,3 +671,45 @@ if __name__ == "__main__":
     print(f"Input: {x.shape}")
     for task_name, (pi, mu, sigma) in outputs.items():
         print(f"  → {task_name}: pi={pi.shape}, mu={mu.shape}, sigma={sigma.shape}")
+
+    print("\n" + "=" * 60)
+    print("Testing Single-Task MoETransUNetGeo")
+    print("=" * 60)
+    model_moe_single = MoETransUNetGeo(
+        in_channels=8,
+        auxiliary_tasks=["vhm0"],
+        num_experts=3,
+        patch_size=8,
+        base_channels=32,
+        gate_input_mode="features",
+    )
+    x = torch.randn(2, 8, 64, 64)
+    out = model_moe_single(x)
+    print(f"Input: {x.shape}")
+    print(f"  prediction:           {out['prediction'].shape}")
+    print(f"  gate_weights:         {out['gate_weights'].shape}")
+    print(f"  uncertainty:          {out['uncertainty'].shape}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss']}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss'].item():.4f}")
+
+    print("\n" + "=" * 60)
+    print("Testing Multi-Task MoETransUNetGeo (VHM0 + VTM02)")
+    print("=" * 60)
+    model_moe_multi = MoETransUNetGeo(
+        in_channels=8,
+        auxiliary_tasks=["vhm0", "vtm02"],
+        num_experts=3,
+        patch_size=8,
+        base_channels=32,
+        gate_input_mode="input_channels",
+        gate_input_channels=[0, 1],  # VHM0 + wind speed channels
+    )
+    x = torch.randn(2, 8, 64, 64)
+    out = model_moe_multi(x)
+    print(f"Input: {x.shape}")
+    for task_name, pred in out["prediction"].items():
+        print(f"  → {task_name}: {pred.shape}")
+    print(f"  gate_weights:         {out['gate_weights'].shape}")
+    print(f"  uncertainty:          {out['uncertainty'].shape}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss']}")
+    print(f"  expert_diversity_loss:{out['expert_diversity_loss'].item():.4f}")

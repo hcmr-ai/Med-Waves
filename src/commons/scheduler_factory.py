@@ -82,6 +82,26 @@ def create_scheduler(
     # ========== CosineAnnealingLR ==========
     elif scheduler_type == "CosineAnnealingLR":
         t_max_cfg = scheduler_config.get("T_max", 50)
+        t_max_epochs = scheduler_config.get("T_max_epochs", None)
+
+        if t_max_epochs is not None:
+            # T_max_epochs: N  →  T_max = N × steps_per_epoch
+            # This is the correct way to specify a per-epoch cosine when the
+            # scheduler runs at interval="step" (per-batch).
+            t_max_epochs = int(t_max_epochs)
+            if total_steps is not None and max_epochs is not None and max_epochs > 0:
+                steps_per_epoch = max(1, int(round(total_steps / max_epochs)))
+                t_max = t_max_epochs * steps_per_epoch
+                print(
+                    f"CosineAnnealingLR: T_max_epochs={t_max_epochs}, "
+                    f"steps_per_epoch={steps_per_epoch}, T_max={t_max} steps"
+                )
+            else:
+                t_max = t_max_epochs  # fallback: warn, treat as raw steps
+                print(
+                    f"Warning: T_max_epochs={t_max_epochs} but total_steps/max_epochs "
+                    "unavailable — using value as raw step count."
+                )
         if isinstance(t_max_cfg, str) and t_max_cfg.lower() == "auto":
             if total_steps is not None and total_steps > 0:
                 t_max = int(total_steps)

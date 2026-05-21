@@ -32,6 +32,8 @@ import torch
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from scipy import stats as _scipy_stats
+
 from src.evaluation.evaluation_plots import (
     plot_rmse_maps as plot_rmse_maps_fn,
 )
@@ -234,20 +236,36 @@ def main():
     bin_labels = {b["name"]: b["label"] for b in sea_bins}
 
     results = {}
-    sea_bin_accumulators = {
-        bin_config["name"]: {
-            "count": np.int64(0),
-            "sum_mae": np.float64(0.0),
-            "sum_mse": np.float64(0.0),
-            "sum_bias": np.float64(0.0),
-            "sum_baseline_mae": np.float64(0.0),
-            "sum_baseline_mse": np.float64(0.0),
-            "sum_baseline_bias": np.float64(0.0),
-            "count_model_better": np.int64(0),
-            "count_model_worse": np.int64(0),
+
+    def _empty_sea_bin_accumulators():
+        return {
+            bin_config["name"]: {
+                "count": np.int64(0),
+                "sum_mae": np.float64(0.0),
+                "sum_mse": np.float64(0.0),
+                "sum_bias": np.float64(0.0),
+                "sum_baseline_mae": np.float64(0.0),
+                "sum_baseline_mse": np.float64(0.0),
+                "sum_baseline_bias": np.float64(0.0),
+                "count_model_better": np.int64(0),
+                "count_model_worse": np.int64(0),
+            }
+            for bin_config in sea_bins
         }
-        for bin_config in sea_bins
-    }
+
+    sea_bin_accumulators = _empty_sea_bin_accumulators()
+    # Per-year sea-bin accumulators (same structure, one per eval year)
+    year_sea_bin_accumulators = {y: _empty_sea_bin_accumulators() for y in args.eval_years}
+
+    # VHM0 histogram accumulators for distribution plots
+    VHM0_HIST_BINS = np.linspace(0, 15, 301)   # 300 bins, 0.05 m resolution
+    _n_hist = len(VHM0_HIST_BINS) - 1
+    vhm0_hist_true       = np.zeros(_n_hist, dtype=np.float64)  # corrected_VHM0
+    vhm0_hist_static     = np.zeros(_n_hist, dtype=np.float64)  # raw + static_map
+    vhm0_hist_raw        = np.zeros(_n_hist, dtype=np.float64)  # raw VHM0
+    year_vhm0_hist_true  = {y: np.zeros(_n_hist, dtype=np.float64) for y in args.eval_years}
+    year_vhm0_hist_static= {y: np.zeros(_n_hist, dtype=np.float64) for y in args.eval_years}
+    year_vhm0_hist_raw   = {y: np.zeros(_n_hist, dtype=np.float64) for y in args.eval_years}
     spatial_error_sq_model = np.zeros((H, W), dtype=np.float64)
     spatial_error_abs_model = np.zeros((H, W), dtype=np.float64)
     spatial_error_sq_baseline = np.zeros((H, W), dtype=np.float64)
@@ -334,21 +352,16 @@ def main():
                     sc_bin_err[bname] += np.sum(sc_e)
                     bin_count[bname] += in_bin.sum()
 
-                    sea_bin_accumulators[bname]["count"] += in_bin.sum()
-                    sea_bin_accumulators[bname]["sum_mae"] += np.sum(np.abs(sc_e))
-                    sea_bin_accumulators[bname]["sum_mse"] += np.sum(sc_e ** 2)
-                    sea_bin_accumulators[bname]["sum_bias"] += np.sum(sc_e)
-                    sea_bin_accumulators[bname]["sum_baseline_mae"] += np.sum(
-                        np.abs(nc_e)
-                    )
-                    sea_bin_accumulators[bname]["sum_baseline_mse"] += np.sum(nc_e ** 2)
-                    sea_bin_accumulators[bname]["sum_baseline_bias"] += np.sum(nc_e)
-                    sea_bin_accumulators[bname]["count_model_better"] += np.sum(
-                        np.abs(sc_e) < np.abs(nc_e)
-                    )
-                    sea_bin_accumulators[bname]["count_model_worse"] += np.sum(
-                        np.abs(sc_e) > np.abs(nc_e)
-                    )
+                    for acc in (sea_bin_accumulators, year_sea_bin_accumulators[year]):
+                        acc[bname]["count"]              += in_bin.sum()
+                        acc[bname]["sum_mae"]            += np.sum(np.abs(sc_e))
+                        acc[bname]["sum_mse"]            += np.sum(sc_e ** 2)
+                        acc[bname]["sum_bias"]           += np.sum(sc_e)
+                        acc[bname]["sum_baseline_mae"]   += np.sum(np.abs(nc_e))
+                        acc[bname]["sum_baseline_mse"]   += np.sum(nc_e ** 2)
+                        acc[bname]["sum_baseline_bias"]  += np.sum(nc_e)
+                        acc[bname]["count_model_better"] += np.sum(np.abs(sc_e) < np.abs(nc_e))
+                        acc[bname]["count_model_worse"]  += np.sum(np.abs(sc_e) > np.abs(nc_e))
 
                 valid_count = valid.astype(np.float64)
                 spatial_count += valid_count
@@ -364,6 +377,17 @@ def main():
                 spatial_error_abs_model += spatial_model_abs_h
                 spatial_error_sq_baseline += spatial_baseline_sq_h
                 spatial_error_abs_baseline += spatial_baseline_abs_h
+
+                # VHM0 distribution histograms
+                cor_valid  = cor_v.ravel()
+                raw_valid  = raw_v.ravel()
+                stat_valid = (raw_v + static_v).ravel()
+                _h_true   = np.histogram(cor_valid,  bins=VHM0_HIST_BINS)[0]
+                _h_raw    = np.histogram(raw_valid,  bins=VHM0_HIST_BINS)[0]
+                _h_static = np.histogram(stat_valid, bins=VHM0_HIST_BINS)[0]
+                vhm0_hist_true   += _h_true;  year_vhm0_hist_true[year]   += _h_true
+                vhm0_hist_raw    += _h_raw;   year_vhm0_hist_raw[year]    += _h_raw
+                vhm0_hist_static += _h_static; year_vhm0_hist_static[year] += _h_static
 
             if (fi + 1) % 20 == 0 or fi == len(file_list) - 1:
                 print(f"  {year}: {fi+1}/{len(file_list)} files", flush=True)
@@ -405,6 +429,21 @@ def main():
                 if nc_bin_abs[bname] > 0
                 else 0.0,
             }
+
+        # Per-year sea-bin performance plot
+        year_metrics = compute_sea_bin_metrics_from_accumulators(
+            sea_bins=sea_bins,
+            sea_bin_accumulators=year_sea_bin_accumulators[year],
+        )
+        year_out = output_dir / str(year)
+        year_out.mkdir(parents=True, exist_ok=True)
+        plot_sea_bin_metrics_fn(
+            sea_bin_metrics=year_metrics,
+            sea_bins=sea_bins,
+            target_column="corrected_VHM0",
+            unit="m",
+            output_dir=year_out,
+        )
 
     # ==================================================================
     # STEP 3: Print results
@@ -598,7 +637,7 @@ def main():
     plt.savefig(output_dir / "baseline_per_bin_rmse_improvement_bars.png", dpi=150)
     plt.close()
 
-    # Export the same sea-bin performance figure as evaluate_bunet.py
+    # Export the same sea-bin performance figure as evaluate_bunet.py (overall)
     plot_sea_bin_metrics_fn(
         sea_bin_metrics=sea_bin_metrics,
         sea_bins=sea_bins,
@@ -606,6 +645,83 @@ def main():
         unit="m",
         output_dir=output_dir,
     )
+
+    # ------------------------------------------------------------------
+    # VHM0 distribution plots (overall + per year)
+    # Uses histogram-based KDE — no need to store all individual samples.
+    # Three files per scope (matching evaluate_bunet style):
+    #   vhm0_distributions.png                — all three curves
+    #   vhm0_distributions_model_vs_reference.png — static correction vs true wave
+    #   vhm0_distributions_reference_vs_uncorrected.png — true wave vs raw ERA5
+    # ------------------------------------------------------------------
+    _bin_centers = 0.5 * (VHM0_HIST_BINS[:-1] + VHM0_HIST_BINS[1:])
+    _x_grid = np.linspace(0, 15, 300)
+
+    def _hist_kde(hist_counts):
+        w = hist_counts.astype(np.float64)
+        total = w.sum()
+        if total == 0:
+            return np.zeros_like(_x_grid)
+        w_norm = w / total
+        std_est = np.sqrt(np.sum(w_norm * (_bin_centers - np.sum(w_norm * _bin_centers)) ** 2))
+        bw = max(0.5 * std_est * total ** (-1 / 5), 1e-3) if std_est > 0 else 0.1
+        kde = _scipy_stats.gaussian_kde(_bin_centers, weights=w + 1e-12, bw_method=bw)
+        return kde(_x_grid)
+
+    def _save_dist_plot(kde_list, labels, colors, title, save_path):
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        for kde_vals, label, color in zip(kde_list, labels, colors):
+            ax.plot(_x_grid, kde_vals, label=label, color=color, linewidth=1.5, alpha=0.9)
+            ax.fill_between(_x_grid, kde_vals, alpha=0.15, color=color)
+        ax.set_xlabel("VHM0 (m)", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Density", fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.legend(fontsize=11, framealpha=0.9, loc="upper right")
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, 15)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved → {save_path}")
+
+    def _save_dist_triple(h_true, h_static, h_raw, out_dir, suffix=""):
+        kde_true   = _hist_kde(h_true)
+        kde_static = _hist_kde(h_static)
+        kde_raw    = _hist_kde(h_raw)
+        tag = f" {suffix}" if suffix else ""
+        _save_dist_plot(
+            [kde_true, kde_static, kde_raw],
+            ["True wave (corrected_VHM0)", "Static bias map", "Raw ERA5"],
+            ["green", "blue", "red"],
+            f"VHM0 Distributions{tag}",
+            out_dir / f"vhm0_distributions{suffix.replace(' ', '_')}.png",
+        )
+        _save_dist_plot(
+            [kde_true, kde_static],
+            ["True wave (corrected_VHM0)", "Static bias map"],
+            ["green", "blue"],
+            f"VHM0 Distribution Comparison (Model vs Reference){tag}",
+            out_dir / f"vhm0_distributions_model_vs_reference{suffix.replace(' ', '_')}.png",
+        )
+        _save_dist_plot(
+            [kde_true, kde_raw],
+            ["True wave (corrected_VHM0)", "Raw ERA5"],
+            ["green", "red"],
+            f"VHM0 Distribution Comparison (Reference vs Uncorrected){tag}",
+            out_dir / f"vhm0_distributions_reference_vs_uncorrected{suffix.replace(' ', '_')}.png",
+        )
+
+    print("\n=== VHM0 distribution plots ===")
+    _save_dist_triple(vhm0_hist_true, vhm0_hist_static, vhm0_hist_raw, output_dir)
+    for year in sorted(year_vhm0_hist_true):
+        year_out = output_dir / str(year)
+        year_out.mkdir(parents=True, exist_ok=True)
+        _save_dist_triple(
+            year_vhm0_hist_true[year],
+            year_vhm0_hist_static[year],
+            year_vhm0_hist_raw[year],
+            year_out,
+        )
 
     # Export the same RMSE/MAE spatial maps as evaluate_bunet.py
     spatial_errors_model = [

@@ -29,8 +29,8 @@ class CachedWaveDataset(Dataset):
         normalize_target: Normalize target values
         fs: S3 filesystem instance
         max_cache_size: Maximum number of files to cache
-        region_filter: Region filter string ("atlantic", "mediterranean", or None)
-                      Filters pixels based on Gibraltar Strait boundary (lon=-5.5°)
+        region_filter: Region filter string ("atlantic", "mediterranean", "aegean", or None)
+                      Filters pixels based on geographic boundaries.
 
     Returns:
         Single task: X, y_tensor, mask, vhm0
@@ -55,6 +55,7 @@ class CachedWaveDataset(Dataset):
         max_cache_size=20,
         region_filter=None,
         add_sea_mask_channel=False,
+        add_domain_mean_vhm0_channel=False,
         predict_residual_to_prior=False,
         prior_source="none",
         static_bias_map_path=None,
@@ -100,9 +101,10 @@ class CachedWaveDataset(Dataset):
             else self.FEATURES_ORDER
         )
         self.region_filter = (
-            region_filter  # Region filter: "atlantic", "mediterranean", or None
+            region_filter  # Region filter: "atlantic", "mediterranean", "aegean", or None
         )
         self.add_sea_mask_channel = add_sea_mask_channel
+        self.add_domain_mean_vhm0_channel = add_domain_mean_vhm0_channel
         if self.predict_residual_to_prior:
             if self.residual_prior_task is None:
                 if len(self.target_columns) == 1:
@@ -179,6 +181,14 @@ class CachedWaveDataset(Dataset):
                 BISCAY_LAT = 43.0
                 BISCAY_LON = 0.0
                 biscay_mask = (lat_data > BISCAY_LAT) & (lon_data < BISCAY_LON)
+                AEGEAN_LON_MIN, AEGEAN_LON_MAX = 23.0, 28.0
+                AEGEAN_LAT_MIN, AEGEAN_LAT_MAX = 35.0, 42.0
+                aegean_mask = (
+                    (lat_data >= AEGEAN_LAT_MIN)
+                    & (lat_data <= AEGEAN_LAT_MAX)
+                    & (lon_data >= AEGEAN_LON_MIN)
+                    & (lon_data <= AEGEAN_LON_MAX)
+                )
 
                 # Find which columns (longitude) and rows (latitude) to keep
                 # For each column, check if ANY pixel in that column is in the target region
@@ -186,6 +196,8 @@ class CachedWaveDataset(Dataset):
                     region_condition = (lon_data < GIBRALTAR_LON) | biscay_mask
                 elif self.region_filter == "mediterranean":
                     region_condition = (lon_data >= GIBRALTAR_LON) & ~biscay_mask
+                elif self.region_filter == "aegean":
+                    region_condition = aegean_mask
                 else:
                     raise ValueError(f"Unknown region_filter: {self.region_filter}")
 
@@ -218,6 +230,13 @@ class CachedWaveDataset(Dataset):
                         (self.cropped_lat_grid > BISCAY_LAT) & (self.cropped_lon_grid < BISCAY_LON)
                     )
                     exclude = is_med
+                elif self.region_filter == "aegean":
+                    exclude = ~(
+                        (self.cropped_lat_grid >= AEGEAN_LAT_MIN)
+                        & (self.cropped_lat_grid <= AEGEAN_LAT_MAX)
+                        & (self.cropped_lon_grid >= AEGEAN_LON_MIN)
+                        & (self.cropped_lon_grid <= AEGEAN_LON_MAX)
+                    )
                 else:
                     exclude = None
                 if exclude is not None and exclude.any():
@@ -292,11 +311,15 @@ class CachedWaveDataset(Dataset):
         if self.region_filter is not None:
             print("\n=== REGION FILTERING ACTIVE ===")
             print(f"  Filtering to: {self.region_filter.upper()}")
-            print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
             if self.region_filter == "atlantic":
+                print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
                 print("  Keeping pixels: lon < -5.5° OR (lat > 43° AND lon < 0°)")
             elif self.region_filter == "mediterranean":
+                print("  Boundary: Gibraltar Strait (lon=-5.5°) + Bay of Biscay (lat>43°, lon<0°)")
                 print("  Keeping pixels: lon >= -5.5° AND NOT (lat > 43° AND lon < 0°)")
+            elif self.region_filter == "aegean":
+                print("  Boundary: Aegean box (lat 35..42, lon 23..28)")
+                print("  Keeping pixels: 35 <= lat <= 42 AND 23 <= lon <= 28")
             print("================================\n")
         else:
             print("  No region filtering (using all pixels)")
@@ -506,6 +529,15 @@ class CachedWaveDataset(Dataset):
             + 1,
         ]
 
+        # Precompute domain-mean VHM0 from the full (pre-patch) field.
+        # This scalar captures the amplitude regime of the snapshot and is used
+        # as a conditioning channel so the model can scale corrections across
+        # climate regimes at inference time (critical for 1950-1990 generalization).
+        _domain_mean_raw = None
+        if self.add_domain_mean_vhm0_channel:
+            _valid = vhm0[~torch.isnan(vhm0)]
+            _domain_mean_raw = _valid.mean().item() if _valid.numel() > 0 else 0.0
+
         # Extract targets for each task
         targets = {}
         for task_name, target_col in self.target_columns.items():
@@ -603,11 +635,26 @@ class CachedWaveDataset(Dataset):
             else:
                 X = self.normalizer.transform_torch(X, normalize_target=False)
 
-        # Optional sea mask channel (1=sea, 0=land), appended last.
-        # Append after normalization so normalizer channel stats remain valid.
+        # Optional sea mask channel (1=sea, 0=land), appended after normalization
+        # so normalizer channel stats remain valid.
         if self.add_sea_mask_channel:
             sea_mask = (~torch.isnan(vhm0)).float()
             X = torch.cat([X, sea_mask], dim=-1)
+
+        # Optional domain-mean VHM0 channel: broadcasts the snapshot's basin-mean
+        # wave height as a constant spatial channel. Normalized with VHM0 stats (channel 0)
+        # so it is on the same scale as other input features. This gives the model an
+        # explicit amplitude handle for OOD generalization (1950-1990 prediction).
+        if self.add_domain_mean_vhm0_channel and _domain_mean_raw is not None:
+            dm = torch.tensor(_domain_mean_raw, dtype=torch.float32)
+            if self.normalizer is not None and 0 in self.normalizer.stats_:
+                stats = self.normalizer.stats_[0]
+                if isinstance(stats, tuple):
+                    mean, std = stats
+                    dm = (dm - mean) / (std + 1e-6)
+            H_x, W_x = X.shape[0], X.shape[1]
+            domain_mean_ch = dm.expand(H_x, W_x).unsqueeze(-1)  # (H, W, 1)
+            X = torch.cat([X, domain_mean_ch], dim=-1)
 
         # Convert to (C, H, W)
         X = X.permute(2, 0, 1).contiguous()
