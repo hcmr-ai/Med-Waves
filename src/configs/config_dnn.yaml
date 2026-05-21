@@ -68,7 +68,7 @@ data:
   # target_column: corrected_VHM0 # "corrected_VTM02" # Target variable
   target_columns: # Multi-task: {task_name: column_name}. Single-task: {task_name: column_name}
     vhm0: "corrected_VHM0"
-    # vtm02: "corrected_VTM02"
+    vtm02: "corrected_VTM02"
 
   excluded_columns: [
       "time",
@@ -110,7 +110,7 @@ model:
   lambda_adv: 0.1 # Weight for adversarial loss
   n_discriminator_updates: 3 # Number of times to update discriminator per generator update (for GAN training)
   discriminator_lr_multiplier: 2.0 # Multiplier for discriminator learning rate (e.g., 2.0 = 2x generator LR)
-  residual_penalty_lambda: 0.005 # L2 penalty weight on predicted residual (active only in residual mode)
+  residual_penalty_lambda: 0.1 # L2 penalty weight on predicted residual (active only in residual mode)
   # TransUNet-specific knobs (used only when model_type: "transunet")
   transunet_base_channels: 16
   transunet_bottleneck_dim: 128
@@ -144,7 +144,7 @@ model:
     # verbose: true # Print LR changes
 
     # Additional scheduler parameters
-    T_max: 5 # For step-based CosineAnnealingLR: uses total optimizer steps
+    T_max: 5475 # For step-based CosineAnnealingLR: uses total optimizer steps
     T_max_epochs: 5
     eta_min: 1e-6
     warmup_steps: 0.01 # For CosineAnnealingLR: warmup steps
@@ -155,8 +155,8 @@ model:
   tasks_config:
     - name: "vhm0"
       weight: 1.0
-    # - name: "vtm02"
-    #   weight: 1.0
+    - name: "vtm02"
+      weight: 1.0
 # Training configuration
 training:
   batch_size: 32
@@ -181,7 +181,7 @@ training:
   prefetch_factor: 2 # Lower prefetch to reduce queued batches in RAM
   val_check_interval: null
   use_swa: false
-  use_ema: true
+  use_ema: false
   finetune_model: false
   freeze_encoder_layers: false
   pixel_switch_threshold_m: 0.45
@@ -195,8 +195,8 @@ checkpoint:
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/dnn_training_subsample_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_atlantic_filtered/epoch=14-val_loss=0.04.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_atlantic/epoch=02-val_loss=0.16.ckpt
-  resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean_16_128_1layer_dropout_0.2_features_gate_ema_residual_penalty_0.005/epoch=09-val_loss=0.06.ckpt
-  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean_16_128_1layer_dropout_0.2_features_gate_ema_residual_penalty_0.005
+  resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1/epoch=10-val_loss=0.25.ckpt
+  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
   s3_sync_dir: null # s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
@@ -205,15 +205,15 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean_16_128_1layer_dropout_0.2_features_gate_ema_residual_penalty_0.005
-  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_weight_decay_1e-3_cosine_annealing_lr_bias_correction_vhm0_mediterranean_16_128_1layer_dropout_0.2_features_gate_ema_residual_penalty_0.005
+  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
+  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
   use_comet: true
   use_tensorboard: false
   comet_tags:
     [
       "wave_height",
       "moe_transunet",
-      "residual_penalty_0.005",
+      "residual_absolute_penalty_0.1",
       "lambda_lr",
       "bias_correction",
       "vhm0",
@@ -221,4 +221,4 @@ logging:
       "mediterranean",
       "cosine_annealing_lr",
     ]
-  comet_notes: "MoE TransUNet smaller: base_ch=16, bottleneck=128, 1 transformer layer, dropout=0.2, gate_temperature=1.0, gate_balance=0.0, gate_input_mode=features, EMA — testing whether reduced capacity fixes best_epoch=0 overfitting, residual penalty 0.005"
+  comet_notes: "MoE TransUNet smaller: base_ch=16, bottleneck=128, 1 transformer layer, dropout=0.2, gate_temperature=1.0, gate_balance=0.0, gate_input_mode=features, residual absolute penalty 0.1"

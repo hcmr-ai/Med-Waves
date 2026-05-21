@@ -202,6 +202,35 @@ def evaluate(dataset, denoise, subset="all"):
     count_improved = np.sum(improvement_pct > 0)
     percentage_improved = 100 * count_improved / len(improvement_pct)
 
+    def _write_case_stats(case_name, mask=None):
+        if mask is None:
+            sub = df
+            sub_imp = improvement_pct
+        else:
+            sub = df[mask]
+            sub_imp = improvement_pct[mask]
+        if len(sub) == 0:
+            f.write(f"\n=== {case_name} Error Stats ===\nNo samples.\n")
+            return
+
+        sub_abs_unc = np.abs(sub["y_unco"] - sub["y_true"])
+        sub_abs_pred = np.abs(sub["y_pred"] - sub["y_true"])
+        sub_sq_unc = (sub["y_unco"] - sub["y_true"]) ** 2
+        sub_sq_pred = (sub["y_pred"] - sub["y_true"]) ** 2
+
+        f.write(f"\n=== {case_name} Error Stats ===\n")
+        f.write(f"Count: {len(sub)} ({100 * len(sub) / len(df):.2f}% of current section)\n")
+        f.write("Absolute error (uncorrected) describe:\n")
+        f.write(f"{sub_abs_unc.describe()}\n")
+        f.write("Absolute error (corrected) describe:\n")
+        f.write(f"{sub_abs_pred.describe()}\n")
+        f.write("Squared error (uncorrected) describe:\n")
+        f.write(f"{sub_sq_unc.describe()}\n")
+        f.write("Squared error (corrected) describe:\n")
+        f.write(f"{sub_sq_pred.describe()}\n")
+        f.write("Relative improvement (%) describe:\n")
+        f.write(f"{sub_imp.describe()}\n")
+
     f.write("\n=== Per-sample Relative Improvement (%) ===\n")
     f.write(f"Mean: {mean_improvement:.2f}%\n")
     f.write(f"Std: {std_improvement:.2f}%\n")
