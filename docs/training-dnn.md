@@ -69,6 +69,21 @@ The checked-in [`config_dnn.yaml`](../src/configs/config_dnn.yaml) is not a neut
 
 For new experiments, derive a fresh config rather than mutating the base file casually.
 
+## Experiment Tracking
+
+The repo uses Comet ML as an experiment tracker.
+
+For the DNN path, Comet is controlled from the `logging` section of [`src/configs/config_dnn.yaml`](../src/configs/config_dnn.yaml), especially:
+- `use_comet`
+- `comet_tags`
+- `comet_notes`
+- `experiment_name`
+
+In practice:
+- `experiment_name` is the run name shown in Comet
+- training metrics, artifacts, and some metadata are logged from [`src/pipelines/training/dnn_trainer.py`](../src/pipelines/training/dnn_trainer.py)
+- the trainer can fall back to TensorBoard if Comet is disabled
+
 ## Residual Penalty Sweeps
 
 Use the repo wrapper:

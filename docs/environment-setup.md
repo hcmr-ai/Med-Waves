@@ -21,6 +21,7 @@ Operationally important packages:
 - `torch`
 - `lightning`
 - `transformers`
+- `comet-ml`
 - `s3fs`
 - `azure-storage-blob`
 - `polars`
@@ -34,6 +35,7 @@ Confirm:
 - dataset path in the config exists
 - blob storage mounts exist if the config points to `/mnt/blobstorage` or `/mnt/blobstorage-scalers`
 - GPU visibility is correct if using `training.accelerator: gpu`
+- Comet credentials are available if experiment tracking is enabled
 
 Example:
 
@@ -42,6 +44,13 @@ ls /mnt/blobstorage
 ls /mnt/blobstorage-scalers
 poetry run python -c "import torch; print(torch.cuda.is_available())"
 ```
+
+If Comet tracking is enabled in config, the machine also needs the usual Comet environment variables or login state, for example:
+- `COMET_API_KEY`
+- optionally `COMET_WORKSPACE`
+- optionally `COMET_PROJECT_NAME`
+
+The checked-in configs already carry project or workspace fields in YAML for some workflows, but the API credential still needs to exist in the runtime environment.
 
 ## Common Operator Bootstrap
 

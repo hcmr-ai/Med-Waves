@@ -4,6 +4,8 @@ Med-WAV is a research and operations repository for wave reanalysis correction. 
 
 This repository is configuration-driven. The current DNN workflow uses [`src/configs/config_dnn.yaml`](src/configs/config_dnn.yaml) with training in [`src/pipelines/training/dnn_trainer.py`](src/pipelines/training/dnn_trainer.py) and evaluation in [`src/pipelines/evaluation/evaluate_bunet.py`](src/pipelines/evaluation/evaluate_bunet.py).
 
+The repo also uses Comet ML for experiment tracking in multiple training workflows.
+
 ## Status
 
 - Active path: DNN training and evaluation under `src/pipelines/training` and `src/pipelines/evaluation`
