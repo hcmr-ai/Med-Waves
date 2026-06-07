@@ -1,7 +1,8 @@
 """
 Train and evaluate EDCDF corrector per region (Atlantic / Mediterranean).
 
-Loads parquet files from S3 (or local), filters by longitude-based region boundary,
+Loads parquet files from mounted blob storage or another local path by default, with
+optional S3 support, filters by longitude-based region boundary,
 fits a proper (non-incremental) EDCDF per region, evaluates on held-out test years,
 and saves predictions, metrics, and models.
 
@@ -35,8 +36,8 @@ from tqdm import tqdm
 from src.classifiers.edcdf_corrector import EDCDFCorrector
 
 S3_BUCKET = "medwav-dev-data"
-S3_PARQUET_BASE = "s3://medwav-dev-data/parquet/hourly_extra_features"
-LOCAL_OUTPUT_BASE = "data/edcdf_regional"
+S3_PARQUET_BASE = "/mnt/blobstorage/parquet/hourly_extra_features"
+LOCAL_OUTPUT_BASE = "/mnt/blobstorage/diagnostics/edcdf_regional"
 
 GIBRALTAR_LON = -5.5
 
