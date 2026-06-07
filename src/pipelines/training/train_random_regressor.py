@@ -1,3 +1,11 @@
+"""
+Legacy research script for random sampling-based baseline experiments.
+
+This file is not part of the documented Med-WAV operator workflow. It is kept
+for historical comparison and older experiment reproduction, but it relies on
+older assumptions around paths, logging, and output layout.
+"""
+
 from datetime import datetime
 from pathlib import Path
 

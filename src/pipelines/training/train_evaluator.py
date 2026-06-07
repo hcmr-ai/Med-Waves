@@ -1,3 +1,11 @@
+"""
+Legacy research script for incremental corrector experiments.
+
+This file is not part of the documented Med-WAV operator workflow. It uses
+incremental or batchwise fitting for Delta, EDCDF, and EQM correctors and is
+coupled to older researcher-specific paths and Comet logging assumptions.
+"""
+
 import json
 from pathlib import Path
 from typing import List, Type
