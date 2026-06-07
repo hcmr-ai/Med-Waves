@@ -1,94 +1,143 @@
 # Config Reference
 
-This document is a practical guide to [`src/configs/config_dnn.yaml`](../src/configs/config_dnn.yaml). It is not a full field-by-field schema; it focuses on the settings that matter operationally during handover.
+This is a practical guide to the main config files under [`src/configs`](../src/configs). It is not a full schema. The goal is to make it easy to identify which config to start from and which fields are operationally important.
 
-## Data Section
+## Quick Map
 
-Important fields:
-- `data_path`: root path for training/evaluation data
-- `file_pattern`: expected file pattern, currently `WAVEAN*.pt`
-- `train_year`, `val_year`, `test_year`: year-based split definition
-- `target_columns`: active prediction targets
-- `excluded_columns`: features removed from model inputs
-- `predict_bias`: train model to predict correction bias rather than the corrected variable directly
-- `predict_residual_to_prior`: residual-learning mode relative to a prior bias
-- `region_filter`: restricts the operational region
+`config_dnn.yaml`
+- DNN training on preprocessed `.pt` tensors
+- used by [`src/pipelines/training/dnn_trainer.py`](../src/pipelines/training/dnn_trainer.py)
 
-Operational note:
-- `predict_bias` and `predict_residual_to_prior` are central to understanding what the model output means. Do not change them casually.
+`config_full_dataset.yaml`
+- full-dataset or classical-model training on parquet data
+- used by the full-dataset training pipeline
 
-## Model Section
+`config_evaluation.yaml`
+- evaluation for the full-dataset or parquet-based model family
 
-Important fields:
-- `model_type`
-- `in_channels`
-- `learning_rate`
-- `loss_type`
-- `weight_decay`
-- `optimizer_type`
-- `residual_penalty_lambda`
+`config_model_per_point.yaml`
+- per-point training on parquet data
+- used by [`src/pipelines/training/train_model_per_point.py`](../src/pipelines/training/train_model_per_point.py)
+- if this path is revisited, also check the legacy per-point implementation under [`scripts/trainers/`](../scripts/trainers)
 
-Current active architecture in the checked-in config:
-- `model_type: "moe_transunet"`
+## Shared Patterns
 
-## Residual Penalty
+Most configs follow the same logic:
+- `data`: where files live and how splits are defined
+- `model`: which estimator or architecture to use
+- `feature_block` or equivalent: what target is learned and which features are excluded
+- `training`, `evaluation`, `output`, or `checkpoint`: runtime behavior and artifact destinations
 
-Current config:
-- `residual_penalty_lambda: 0.1`
+The most important distinction across configs is the data format:
+- DNN configs use preprocessed `.pt` tensors
+- model-per-point and full-dataset configs use parquet tables
 
-Practical interpretation in the current code path:
-- this acts as an extra penalty term on predicted bias/residual magnitude
-- it is in addition to optimizer `weight_decay`
+## `config_dnn.yaml`
+
+Use this for:
+- UNet-style, TransUNet-style, MoE, and related tensor models
+
+Key areas:
+- `data.data_path`: points to the `.pt` tensor dataset
+- `data.file_pattern`: expected file pattern, usually `WAVEAN*.pt`
+- `data.train_year`, `data.val_year`, `data.test_year`: year-based split
+- `data.target_columns`: prediction targets
+- `data.excluded_columns`: features removed from model inputs
+- `data.predict_bias`: predict correction bias instead of corrected value directly
+- `data.predict_residual_to_prior`: residual-learning mode relative to a prior
+- `model.model_type`: network family
+- `model.in_channels`: must match the active feature set
+- `model.loss_type`: active loss family
+- `model.residual_penalty_lambda`: extra penalty on predicted bias or residual magnitude
+- `training.batch_size`, `training.num_workers`, `training.precision`: main memory and throughput knobs
+- `checkpoint.resume_from_checkpoint`, `checkpoint.checkpoint_dir`, `logging.log_dir`, `logging.experiment_name`: tightly coupled run-identity fields
+
+Important operational note:
+- for a fresh run, do not change only `experiment_name` or only `checkpoint_dir`
+- update the checkpoint and logging fields together
+
+## `config_model_per_point.yaml`
+
+Use this for:
+- per-point models trained from parquet rather than tensor grids
 
 Handover note:
-- the YAML comment says this is active only in residual mode, but the current trainer/loss path also applies it when `predict_bias: true`
+- before relying on this path, also inspect the legacy per-point code under [`scripts/trainers/`](../scripts/trainers)
+- the repo contains both current `src/` and older previous-researcher per-point surfaces
 
-## MoE Auxiliary Weights
+Key areas:
+- `data.data_path`: parquet root
+- `data.file_pattern`: usually `*.parquet`
+- `data.split`: split strategy and years or months
+- `feature_block.predict_bias`: output semantics
+- `feature_block.features_to_exclude`: feature filtering
+- `feature_block.sampling_strategy`: how rows are sampled
+- `feature_block.regional_training`: optional region filtering
+- `model`: estimator settings for the per-point trainer
+- `evaluation` and output-related sections: result generation and artifact saving
 
-These knobs exist:
-- `gate_entropy_weight`
-- `gate_balance_weight`
-- `gate_prior_weight`
-- `expert_diversity_weight`
+Important operational note:
+- this config is row-based, not grid-based
+- changes to sampling strategy can materially change the training set size and class balance
 
-In the checked-in config they are all `0.0`, so they are effectively disabled.
+## `config_full_dataset.yaml`
 
-## Training Section
+Use this for:
+- classical ML or full-dataset experiments on parquet data
 
-Important fields:
-- `batch_size`
-- `max_epochs`
-- `num_workers`
-- `accelerator`
-- `devices`
-- `precision`
-- `early_stopping_patience`
-- `monitor`
+Typical model types in this config family:
+- `xgb`
+- `rf`
+- `elasticnet`
+- `lasso`
+- `ridge`
+- `eqm`
+- `delta`
 
-Operational note:
-- The checked-in values are tuned for a specific environment. If memory pressure changes, start with `batch_size`, `num_workers`, and data caching settings.
+Key areas:
+- `model.type`: estimator family
+- `model.*`: estimator-specific hyperparameters
+- `data.data_path`: parquet root
+- `data.split`: year-based or other split mode
+- `feature_block.predict_bias`: target semantics
+- `feature_block.features_to_exclude`: feature filtering
+- `feature_block.max_samples_per_file` and `sampling_strategy`: main sampling controls
+- `feature_block.regional_training`: optional region filtering
+- `feature_block.scaler`: tabular scaling mode
 
-## Checkpoint And Logging Sections
+Important operational note:
+- this config is for parquet-based training, not `.pt` tensors
+- it is easier to compare tabular baselines here than in the DNN config
 
-These fields are tightly coupled:
-- `resume_from_checkpoint`
-- `checkpoint_dir`
-- `log_dir`
-- `experiment_name`
+## `config_evaluation.yaml`
 
-Do not update only one of them for a new experiment. For fresh runs, create a derived config or use a wrapper that rewrites all experiment-specific destinations consistently.
+Use this for:
+- evaluation of the full-dataset or parquet-based model family
 
-## Recommended Practice For New Runs
+Key areas:
+- `data.model_path`: trained model location
+- `data.data_path`: parquet dataset location
+- `feature_block`: must stay aligned with the training-time feature logic
+- `evaluation.year` and related settings: what period is evaluated
+- `output.output_dir`: local output directory
+- `output.s3`: optional remote result destination
+- `diagnostics`: which plots and reports to create
 
-For new experiments:
-1. keep the base config as a reference
-2. generate a derived config for the run
-3. update:
-   - `residual_penalty_lambda` or other experimental knobs
-   - `resume_from_checkpoint`
-   - `checkpoint_dir`
-   - `log_dir`
-   - `experiment_name`
+Important operational note:
+- this config is not the main DNN evaluation surface
+- DNN evaluation is documented separately in [`evaluation_dnn.md`](evaluation_dnn.md)
 
-The residual penalty sweep wrapper already follows this pattern:
-- [`scripts/run_residual_penalty_sweep.sh`](../scripts/run_residual_penalty_sweep.sh)
+## Which Config To Start From
+
+If the task is:
+- tensor DNN training: start from `config_dnn.yaml`
+- parquet per-point training: start from `config_model_per_point.yaml`
+- classical ML or full-dataset training: start from `config_full_dataset.yaml`
+- parquet-based model evaluation: start from `config_evaluation.yaml`
+
+## Safe Editing Rules
+
+- Confirm whether the pipeline expects `.pt` or parquet before changing `data_path`.
+- Keep target semantics consistent: `predict_bias`, residual modes, and target columns should not be changed casually.
+- Treat artifact paths as part of experiment identity.
+- For new experiments, prefer a derived config instead of rewriting the checked-in base config in place.

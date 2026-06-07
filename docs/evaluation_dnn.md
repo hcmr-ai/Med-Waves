@@ -5,10 +5,15 @@
 Recommended DNN evaluation path:
 - [`src/pipelines/evaluation/evaluate_bunet.py`](../src/pipelines/evaluation/evaluate_bunet.py)
 
+Memory-efficient variant:
+- [`src/pipelines/evaluation/evaluate_bunet_lowmem.py`](../src/pipelines/evaluation/evaluate_bunet_lowmem.py)
+  - use this when full-grid evaluation would otherwise consume too much RAM
+  - intended as a drop-in replacement for `evaluate_bunet.py`
+
 Existing orchestration wrapper:
 - [`src/pipelines/evaluation/full_evaluation.sh`](../src/pipelines/evaluation/full_evaluation.sh)
 
-Additional paths exist in the repo, including low-memory and older evaluation variants. Use the main path above unless there is a specific reason not to.
+Additional older evaluation variants also exist in the repo. Use `evaluate_bunet.py` or `evaluate_bunet_lowmem.py` unless there is a specific reason not to.
 
 ## Standard Command
 
@@ -26,6 +31,22 @@ Useful options:
 - `--timestamps-csv`
 - `--save-predictions`
 - `--denoise-abs-threshold`
+
+## Low-Memory Command
+
+```bash
+poetry run python src/pipelines/evaluation/evaluate_bunet_lowmem.py \
+  --config src/configs/config_dnn.yaml \
+  --checkpoint /path/to/checkpoint.ckpt \
+  --output-dir ./evaluation_results \
+  --max-plot-samples 10000000
+```
+
+Why it exists:
+- avoids the worst RAM spikes during full-grid evaluation
+- keeps spatial-error accumulation in running sums instead of unbounded per-batch lists
+- caps stored plot samples through random subsampling
+- is meant to produce the same metrics and outputs as `evaluate_bunet.py`
 
 ## Full Evaluation Script
 
