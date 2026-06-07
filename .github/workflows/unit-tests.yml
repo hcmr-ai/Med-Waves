@@ -6,6 +6,7 @@ on:
     paths:
       - "src/**"
       - "tests/unit/**"
+      - "scripts/**"
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
