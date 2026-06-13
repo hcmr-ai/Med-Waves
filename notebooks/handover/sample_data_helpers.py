@@ -123,9 +123,12 @@ def find_first_available_artifact(
 
 
 def choose_variable(candidates: list[str]) -> str:
+    candidates_lower = {candidate.lower(): candidate for candidate in candidates}
     for name in PREFERRED_VARIABLES:
         if name in candidates:
             return name
+        if name.lower() in candidates_lower:
+            return candidates_lower[name.lower()]
     return candidates[0]
 
 
@@ -179,8 +182,7 @@ def inspect_parquet(path: str | Path, artifact_key: str) -> ArtifactView:
     columns = schema.names
     variable_name = choose_variable(columns)
 
-    selected_columns = [c for c in ["time", "latitude", "longitude", variable_name] if c in columns]
-    table = pq.read_table(path, columns=selected_columns or columns[: min(8, len(columns))])
+    table = pq.read_table(path)
     df = table.to_pandas()
 
     if "time" in df.columns:
@@ -236,8 +238,10 @@ def inspect_pt(path: str | Path, artifact_key: str) -> ArtifactView:
 
     if tensor.ndim == 4:
         field_values = tensor[0, :, :, var_idx].numpy()
+        feature_sample_values = tensor[0, 0, 0, :].numpy()
     elif tensor.ndim == 3:
         field_values = tensor[:, :, var_idx].numpy()
+        feature_sample_values = tensor[0, 0, :].numpy()
     else:
         raise ValueError(f"Unexpected tensor shape for {path}: {tuple(tensor.shape)}")
 
@@ -249,12 +253,17 @@ def inspect_pt(path: str | Path, artifact_key: str) -> ArtifactView:
         "feature_cols": feature_cols,
         "selected_variable": variable_name,
     }
-    preview = pd.DataFrame({"feature_cols": feature_cols})
+    preview = pd.DataFrame(
+        {
+            "feature_cols": feature_cols,
+            "sample_value_t0_y0_x0": feature_sample_values,
+        }
+    )
     return ArtifactView(
         artifact_key=artifact_key,
         variable_name=variable_name,
         summary=summary,
-        preview=preview.head(15),
+        preview=preview,
         spatial_grid=field_values,
         histogram_values=histogram_values,
     )
@@ -273,7 +282,7 @@ def inspect_artifact(path: str | Path, artifact_key: str) -> ArtifactView:
 
 def render_artifact_view(view: ArtifactView) -> None:
     print(f"Artifact: {view.artifact_key} ({ARTIFACT_DESCRIPTIONS.get(view.artifact_key, view.artifact_key)})")
-    print(f"Selected variable: {view.variable_name}")
+    # print(f"Selected variable: {view.variable_name}")
     print()
     for key, value in view.summary.items():
         print(f"{key}: {value}")
@@ -283,7 +292,8 @@ def render_artifact_view(view: ArtifactView) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     if view.spatial_grid is not None:
-        im = axes[0].imshow(view.spatial_grid, aspect="auto")
+        # Use a Cartesian-style origin so spatial slices are not vertically flipped.
+        im = axes[0].imshow(view.spatial_grid, aspect="auto", origin="lower")
         axes[0].set_title(f"Spatial slice: {view.variable_name}")
         plt.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04)
     else:
