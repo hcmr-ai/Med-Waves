@@ -1,16 +1,28 @@
-from comet_ml.api import API
+import io
+import math
+import re
+import sys
+from collections import defaultdict
 from pathlib import Path
+
+from comet_ml.api import API
 from PIL import Image, ImageOps
 from tqdm import tqdm
-import re
-import math
-import io
-from collections import defaultdict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.commons.comet_utils import (
+    get_comet_api_key,
+    get_comet_project_name,
+    get_comet_workspace,
+)
 
 # ---------- Config ----------
-API_KEY     = "y2tkTNGtg7kP3HX9mfdy8JHaM"
-WORKSPACE   = "ioannisgkinis"
-PROJECT     = "hcmr-ai"         # e.g., "med-wav" or similar
+API_KEY     = get_comet_api_key(required=True)
+WORKSPACE   = get_comet_workspace(required=True)
+PROJECT     = get_comet_project_name(required=True)         # e.g., "med-wav" or similar
 EXPERIMENT_KEYS = ["d39937d34aeb4544800345356e3106b8"]                 # e.g., ["abc1234567890...", "def0987..."] or None for all in project
 TAG_FILTER  = None                     # e.g., "val" or None
 FILENAME_REGEX = r"map__season__.*?__(mae|rmse|bias)__.*?\.svg$"  # Look for map__season__*__(mae|rmse|bias)__*.svg files

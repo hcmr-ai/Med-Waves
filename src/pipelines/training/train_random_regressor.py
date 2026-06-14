@@ -15,6 +15,8 @@ from comet_ml import ExistingExperiment, Experiment
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tqdm import tqdm
 
+from src.commons.comet_utils import get_comet_api_key, resolve_comet_settings
+
 
 class RandomDeltaSampling:
     def __init__(
@@ -29,11 +31,9 @@ class RandomDeltaSampling:
         self.error_distribution = {}
         self.log_plots_per_file = log_plots_per_file
         if comet_experiment is None:
-            self.comet = Experiment(
-                api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-                project_name="hcmr-ai",
-                workspace="ioannisgkinis",
-            )
+            comet_kwargs = resolve_comet_settings(require_api_key=True)
+            comet_kwargs.pop("project", None)
+            self.comet = Experiment(**comet_kwargs)
             exp_name = f"random_regressor_bias_correction_{datetime.now().strftime('%Y%m%d_%H%M')}"
             self.comet.set_name(exp_name)
         else:
@@ -548,7 +548,7 @@ def main(run_id: int):
 
     if plot_from_logged:
         experiment = ExistingExperiment(
-            api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
+            api_key=get_comet_api_key(required=True),
             previous_experiment="1575e3591c534bc5841bc7cfba07d10c",
         )
         reg = RandomDeltaSampling(comet_experiment=experiment)

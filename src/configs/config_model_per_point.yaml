@@ -242,8 +242,8 @@ diagnostics:
 # Logging configuration
 logging:
   use_comet: true
-  comet_project: hcmr-ai
-  comet_workspace: ioannisgkinis
+  comet_project: null # Prefer COMET_PROJECT_NAME from environment for handover-safe setup
+  comet_workspace: null # Prefer COMET_WORKSPACE from environment for handover-safe setup
 
 # Memory monitoring configuration
 memory_monitoring:
