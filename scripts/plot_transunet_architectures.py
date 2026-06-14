@@ -192,9 +192,8 @@ def main() -> None:
     input_shape = (args.batch_size, in_channels, args.height, args.width)
 
     for model_type in ("transunet", "moe_transunet"):
-        model = build_model(config, model_type)
         torchview_path = render_torchview_graph(
-            model=model,
+            model=build_model(config, model_type),
             output_dir=output_dir,
             stem=f"{model_type}_torchview",
             input_shape=input_shape,
@@ -205,7 +204,7 @@ def main() -> None:
 
         if args.include_autograd:
             torchviz_path = render_torchviz_graph(
-                model=model,
+                model=build_model(config, model_type),
                 output_dir=output_dir,
                 stem=f"{model_type}_torchviz",
                 input_shape=input_shape,
