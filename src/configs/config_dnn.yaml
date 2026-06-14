@@ -196,7 +196,7 @@ checkpoint:
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_mediterranean/epoch=02-val_loss=0.10.ckpt
   # resume_from_checkpoint: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_vhm0_vtm02_atlantic/epoch=02-val_loss=0.16.ckpt
   resume_from_checkpoint: null
-  checkpoint_dir: /mnt/blobstorage/checkpoints/checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
+  checkpoint_dir: /mnt/blobstorage/checkpoints/<fill_me_checkpoint_dir>
   s3_sync_dir: null # s3://medwav-dev-data/checkpoints/dnn_training_extended_subsampled_step_5_100_val_22_test_23_transunet_18-21_mse_64_lambda_lr_bias_correction_cos_delta_mediterranean # S3 backup for spot instances
   save_last: true
   sync_frequency: 2 # Sync to S3 every N epochs
@@ -205,8 +205,8 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_dir: /mnt/blobstorage/logs_dnn_training_extended_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_masked_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
-  experiment_name: checkpoints_subsampled_step_5_100_val_22_test_23_moe_transunet_pos_enc_sea_mask_18-21_bin_balanced_smooth_l1_32_cosine_annealing_lr_bias_correction_vhm0_vtm02_mediterranean_16_128_1layer_dropout_0.2_features_gate_residual_absolute_penalty_0.1
+  log_dir: /mnt/blobstorage/<fill_me_log_dir>
+  experiment_name: <fill_me_experiment_name>
   use_comet: true
   use_tensorboard: false
   comet_tags:
