@@ -85,6 +85,7 @@ Install repo-local skills into Codex, Claude, and Cursor:
 This repo ships with repo-local agent skills under [`skills/`](skills).
 
 Current skills:
+
 - [`medwav-blobfuse-mounts`](skills/medwav-blobfuse-mounts/SKILL.md): operator guidance for Azure blobfuse2 setup using [`scripts/azure/setup_blobfuse_mounts.sh`](scripts/azure/setup_blobfuse_mounts.sh)
 - [`medwav-poetry-full-install`](skills/medwav-poetry-full-install/SKILL.md): full Poetry-based environment setup for Med-WAV, including Poetry bootstrap, dependency install, and torch/CUDA verification
 
@@ -95,11 +96,13 @@ Install repo skills into supported agent environments with:
 ```
 
 Supported targets:
+
 - Codex
 - Claude
 - Cursor
 
 Use the skill when the task is to:
+
 - mount the Med-WAV Azure Blob containers
 - explain or troubleshoot blobfuse setup
 - adapt the mount workflow for different storage account, container, cache, or mount-path overrides
@@ -121,10 +124,3 @@ Use the skill when the task is to:
 - [`docs/evaluation_dnn.md`](docs/evaluation_dnn.md): DNN evaluation entrypoints and outputs
 - [`docs/baseline-models.md`](docs/baseline-models.md): EDCDF, static-map, full-dataset, MLP, and model-per-point baseline paths
 - [`docs/config-reference.md`](docs/config-reference.md): practical guide to `config_dnn.yaml`
-
-## Known Handover Caveats
-
-- Many default paths are hardcoded to `/mnt/...` locations and assume mounted cloud-backed storage.
-- The current DNN config contains an explicit `resume_from_checkpoint` and experiment-specific logging/checkpoint paths; do not assume it is safe for a fresh experiment without editing or generating a derived config.
-- Some evaluation scripts are large and evolved organically. Prefer the main documented path before using older or parallel variants.
-- Some repo areas contain exploratory or historical code. Treat the docs above as the source of truth for the documented workflows.
