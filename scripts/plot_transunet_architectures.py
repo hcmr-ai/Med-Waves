@@ -96,18 +96,31 @@ def render_torchview_graph(
 ) -> Path:
     from torchview import draw_graph
 
-    graph = draw_graph(
-        model,
-        input_size=input_shape,
-        graph_name=stem,
-        depth=depth,
-        device="meta",
-        expand_nested=expand_nested,
-        hide_inner_tensors=False,
-        hide_module_functions=False,
-        show_shapes=True,
-        save_graph=False,
-    )
+    def _draw(device: str):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "graph_name": stem,
+            "depth": depth,
+            "device": device,
+            "expand_nested": expand_nested,
+            "hide_inner_tensors": False,
+            "hide_module_functions": False,
+            "show_shapes": True,
+            "save_graph": False,
+        }
+        if device == "meta":
+            kwargs["input_size"] = input_shape
+        else:
+            kwargs["input_data"] = torch.randn(*input_shape, device=device)
+        return draw_graph(**kwargs)
+
+    try:
+        graph = _draw("meta")
+    except NotImplementedError as exc:
+        if "meta tensor" not in str(exc).lower():
+            raise
+        model = model.to("cpu").eval()
+        graph = _draw("cpu")
 
     visual_graph = getattr(graph, "visual_graph", None)
     if visual_graph is None:
