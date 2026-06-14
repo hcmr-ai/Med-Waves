@@ -7,7 +7,7 @@ Requirements in the runtime environment:
 - optional python package: torchviz (for autograd execution graph)
 
 Example:
-    poetry run python scripts/plot_transunet_architectures.py \
+    poetry run python scripts/visualization/plot_transunet_architectures.py \
       --config src/configs/config_dnn.yaml \
       --output-dir artifacts/architecture_plots \
       --height 64 --width 64 \
@@ -24,7 +24,7 @@ from typing import Any
 import torch
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 

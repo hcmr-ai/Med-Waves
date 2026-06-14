@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TransUNet Schematic</title>
+  <style>
+    :root {
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #3b82f6;
+      --io: #bfdbfe;
+      --encoder: #ffedd5;
+      --feature: #bbf7d0;
+      --mix: #fae8ff;
+      --panel: rgba(255,255,255,0.88);
+      --border: rgba(51,65,85,0.24);
+      --shadow: 0 10px 28px rgba(15,23,42,0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 14px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, #dbeafe 0, transparent 24%),
+        radial-gradient(circle at top right, #fae8ff 0, transparent 18%),
+        linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    }
+    .page {
+      max-width: 1780px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 40px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    .subtitle {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .diagram {
+      display: grid;
+      gap: 14px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 170px 38px minmax(200px, 1fr) 38px minmax(200px, 1fr) 38px 170px;
+      gap: 8px;
+      align-items: center;
+    }
+    .row.compact {
+      grid-template-columns: repeat(9, minmax(90px, 1fr));
+    }
+    .box {
+      border: 2px solid rgba(51,65,85,0.78);
+      border-radius: 16px;
+      padding: 12px 10px;
+      text-align: center;
+      box-shadow: var(--shadow);
+      min-height: 82px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .io { background: var(--io); }
+    .encoder { background: var(--encoder); }
+    .feature { background: var(--feature); }
+    .mix { background: var(--mix); }
+    .title {
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+    .value {
+      font-size: 20px;
+      margin-top: 6px;
+    }
+    .note {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .arrow {
+      text-align: center;
+      color: var(--line);
+      font-size: 20px;
+      font-weight: 800;
+    }
+    .section {
+      border: 2px dashed rgba(148,163,184,0.75);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.55);
+    }
+    .section h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      text-align: center;
+    }
+    .stack {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(90px, 1fr));
+      gap: 10px;
+    }
+    .legend {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(255,255,255,0.78);
+      border: 1px solid rgba(148,163,184,0.35);
+      padding: 7px 10px;
+      border-radius: 999px;
+    }
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(71,85,105,0.45);
+    }
+    .footer {
+      margin-top: 8px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    @media (max-width: 1280px) {
+      .row, .row.compact, .stack {
+        grid-template-columns: 1fr;
+      }
+      .arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>TransUNet Schematic</h1>
+    <p class="subtitle">in_channels=16 | tasks=vhm0, vtm02 | base=16 | bottleneck=128 | patch_size=15 | transformer_layers=1 | transformer_heads=4</p>
+
+    <div class="diagram">
+      <div class="row">
+        <div class="box io">
+          <div class="title">Input tensor</div>
+          <div class="value">C=16</div>
+          <div class="note">64×64 grid</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="box encoder">
+          <div class="title">Transformer branch</div>
+          <div class="note">patch embedding</div>
+          <div class="value">15×15</div>
+          <div class="note">1 layer, 4 heads</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="box mix">
+          <div class="title">Fusion</div>
+          <div class="note">CNN encoder features + transformer branch</div>
+        </div>
+        <div class="arrow">→</div>
+        <div class="box feature">
+          <div class="title">Bottleneck</div>
+          <div class="value">128</div>
+          <div class="note">8×8</div>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Encoder Path</h2>
+        <div class="stack">
+          <div class="box encoder"><div class="title">Encoder 1</div><div class="value">16</div><div class="note">64×64</div></div>
+          <div class="box encoder"><div class="title">Encoder 2</div><div class="value">32</div><div class="note">32×32</div></div>
+          <div class="box encoder"><div class="title">Encoder 3</div><div class="value">64</div><div class="note">16×16</div></div>
+          <div class="box encoder"><div class="title">Encoder 4</div><div class="value">128</div><div class="note">8×8</div></div>
+        </div>
+      </div>
+
+      <div class="row compact">
+        <div class="box feature"><div class="title">Decoder 1</div><div class="value">128</div><div class="note">8×8</div></div>
+        <div class="arrow">→</div>
+        <div class="box feature"><div class="title">Decoder 2</div><div class="value">64</div><div class="note">16×16</div></div>
+        <div class="arrow">→</div>
+        <div class="box feature"><div class="title">Decoder 3</div><div class="value">32</div><div class="note">32×32</div></div>
+        <div class="arrow">→</div>
+        <div class="box feature"><div class="title">Decoder 4</div><div class="value">16</div><div class="note">64×64</div></div>
+        <div class="arrow">→</div>
+        <div class="box mix"><div class="title">Task heads</div><div class="note">one 1×1 conv per task</div></div>
+      </div>
+
+      <div class="row">
+        <div></div><div></div><div></div><div></div><div></div><div class="arrow">→</div>
+        <div class="box io"><div class="title">Prediction</div><div class="note">vhm0, vtm02</div></div>
+      </div>
+
+      <div class="legend">
+        <div class="legend-item"><span class="swatch" style="background:var(--io)"></span>Input / output</div>
+        <div class="legend-item"><span class="swatch" style="background:var(--encoder)"></span>Encoder / transformer</div>
+        <div class="legend-item"><span class="swatch" style="background:var(--feature)"></span>Bottleneck / decoder</div>
+        <div class="legend-item"><span class="swatch" style="background:var(--mix)"></span>Fusion / task heads</div>
+      </div>
+
+      <div class="footer">Transformer branch + CNN encoder → fused bottleneck → decoder → task heads</div>
+    </div>
+  </div>
+</body>
+</html>
