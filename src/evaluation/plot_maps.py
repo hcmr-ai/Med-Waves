@@ -183,11 +183,14 @@ def evaluate(dataset, denoise, subset="all"):
 
     improved_samples = np.sum(df["delta"] > 0)
     improvement = 100 * (improved_samples / len(df))
-    f.write(f"Per point squared improvement stats:\n{df["delta"].describe()}\n\n"
-            f"(y_unc - y_true)^2 - (y_pred-y_true)^2 Globally: doesn't group by per location to count the improvement of the location\n\n"
-            f"Improved samples (including hours): {improved_samples}\n"
-            f"Improvement (samples percentage): {improvement}\n"
-            f"Mean Improvement (mean_delta): {df['delta'].mean()},s={df['delta'].std()}\n")
+    f.write(
+        f"Per point squared improvement stats:\n{df['delta'].describe()}\n\n"
+        "(y_unc - y_true)^2 - (y_pred-y_true)^2 Globally: "
+        "doesn't group by per location to count the improvement of the location\n\n"
+        f"Improved samples (including hours): {improved_samples}\n"
+        f"Improvement (samples percentage): {improvement}\n"
+        f"Mean Improvement (mean_delta): {df['delta'].mean()},s={df['delta'].std()}\n"
+    )
 
     #----- Per sample relative improvement ----- #
     eps = 1e-8

@@ -205,7 +205,6 @@ def main():
     plt.ylabel("Density")
     if args.xmin is not None or args.xmax is not None:
         plt.xlim(left=args.xmin, right=args.xmax)
-    
 
     plt.legend()
     plt.tight_layout()

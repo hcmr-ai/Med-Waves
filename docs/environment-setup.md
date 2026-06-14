@@ -47,10 +47,10 @@ poetry run python -c "import torch; print(torch.cuda.is_available())"
 
 If Comet tracking is enabled in config, the machine also needs the usual Comet environment variables or login state, for example:
 - `COMET_API_KEY`
-- optionally `COMET_WORKSPACE`
-- optionally `COMET_PROJECT_NAME`
+- `COMET_WORKSPACE`
+- `COMET_PROJECT_NAME`
 
-The checked-in configs already carry project or workspace fields in YAML for some workflows, but the API credential still needs to exist in the runtime environment.
+For handover-safe operation, the repo now expects all three Comet values to come from the runtime environment when Comet is enabled rather than from checked-in YAML defaults.
 
 ## Common Operator Bootstrap
 

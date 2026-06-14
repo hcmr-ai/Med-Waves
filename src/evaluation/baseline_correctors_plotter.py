@@ -7,6 +7,8 @@ import numpy as np
 import polars as pl
 from comet_ml import ExistingExperiment
 
+from src.commons.comet_utils import get_comet_api_key
+
 
 class PredictionPlotter:
     def __init__(self, prediction_dir: str, comet_exp: ExistingExperiment):
@@ -442,7 +444,7 @@ def main(run_id: int, corrector: str):
             "DiffCorrector": "d39937d34aeb4544800345356e3106b8",
         }
         experiment = ExistingExperiment(
-            api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
+            api_key=get_comet_api_key(required=True),
             previous_experiment=run_to_experiment_map[corrector],
         )
         subfolder = (
@@ -462,7 +464,7 @@ def main(run_id: int, corrector: str):
             4: "f2f2a8da31584694bcc0ac54d1ff3044",
         }
         experiment = ExistingExperiment(
-            api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
+            api_key=get_comet_api_key(required=True),
             previous_experiment=run_to_experiment_map[run_id],
         )
         # For random_regressor, use the numeric run directory

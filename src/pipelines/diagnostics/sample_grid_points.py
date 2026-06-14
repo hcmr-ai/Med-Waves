@@ -288,7 +288,7 @@ def run(
 
         print(f"  Sampled {len(sampled['latitude'])} points:")
         for i, (lat, lon) in enumerate(
-            zip(sampled["latitude"], sampled["longitude"]), start=1
+            zip(sampled["latitude"], sampled["longitude"], strict=False), start=1
         ):
             print(f"    {i:2d}. lat={lat:.4f}  lon={lon:.4f}")
 
@@ -317,7 +317,7 @@ def _save_csvs(
         dest = out / f"sampled_grid_points_{region}.csv"
         rows = [
             {"region": region, "latitude": float(lat), "longitude": float(lon)}
-            for lat, lon in zip(coords["latitude"], coords["longitude"])
+            for lat, lon in zip(coords["latitude"], coords["longitude"], strict=False)
         ]
         _write_csv(rows, dest)
         print(f"  Saved {region} CSV  → {dest}")
@@ -404,7 +404,7 @@ def _save_map(
         )
         # Annotate each point with its index
         for idx, (lat, lon) in enumerate(
-            zip(coords["latitude"], coords["longitude"]), start=1
+            zip(coords["latitude"], coords["longitude"], strict=False), start=1
         ):
             ax.text(
                 lon + 0.15,

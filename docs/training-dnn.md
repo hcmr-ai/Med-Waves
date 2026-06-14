@@ -79,6 +79,11 @@ For the DNN path, Comet is controlled from the `logging` section of [`src/config
 - `comet_notes`
 - `experiment_name`
 
+Runtime credential and routing inputs come from environment variables:
+- `COMET_API_KEY`
+- `COMET_WORKSPACE`
+- `COMET_PROJECT_NAME`
+
 In practice:
 - `experiment_name` is the run name shown in Comet
 - training metrics, artifacts, and some metadata are logged from [`src/pipelines/training/dnn_trainer.py`](../src/pipelines/training/dnn_trainer.py)

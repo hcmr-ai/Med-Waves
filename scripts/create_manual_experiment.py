@@ -3,19 +3,26 @@
 Script to manually create a new Comet ML experiment for DiffCorrector evaluation
 """
 
-from comet_ml import Experiment
 from datetime import datetime
+from pathlib import Path
+import sys
+
+from comet_ml import Experiment
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.commons.comet_utils import resolve_comet_settings
 
 def create_manual_experiment():
     """
     Create a new Comet ML experiment manually
     """
     # Create a new experiment
-    experiment = Experiment(
-        api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-        project_name="hcmr-ai",
-        workspace="ioannisgkinis"
-    )
+    comet_kwargs = resolve_comet_settings(require_api_key=True)
+    comet_kwargs.pop("project", None)
+    experiment = Experiment(**comet_kwargs)
     
     # Set experiment name and description
     experiment_name = f"DiffCorrector_manual_evaluation_{datetime.now().strftime('%Y%m%d_%H%M')}"

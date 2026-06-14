@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.commons.comet_utils import resolve_comet_settings
+
 try:
     from comet_ml import Experiment
 except ImportError:
@@ -47,10 +49,14 @@ class ExperimentLogger:
                 )
 
                 # Initialize Comet experiment
+                comet_kwargs = resolve_comet_settings(
+                    project_name=self.logging_config.get("project_name"),
+                    workspace=self.logging_config.get("workspace"),
+                    require_api_key=True,
+                )
+                comet_kwargs.pop("project", None)
                 self.experiment = Experiment(
-                    api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-                    project_name=self.logging_config.get("project_name", "hcmr-ai"),
-                    workspace=self.logging_config.get("workspace", "ioannisgkinis"),
+                    **comet_kwargs,
                     experiment_name=experiment_name,
                     auto_param_logging=False,
                     auto_metric_logging=False,

@@ -660,7 +660,6 @@ Training Summary:
         if not self.val_sea_bin_metrics:
             return
 
-        from matplotlib.cm import ScalarMappable
         from matplotlib.colors import Normalize
 
         bin_groups = [
@@ -697,7 +696,7 @@ Training Summary:
             cmap = plt.get_cmap("coolwarm")
             norm = Normalize(vmin=0, vmax=len(self.SEA_BINS) - 1)
 
-            for ax, (group_title, group_bins) in zip(axes, bin_groups):
+            for ax, (group_title, group_bins) in zip(axes, bin_groups, strict=False):
                 for bin_name in group_bins:
                     bin_idx = self.SEA_BINS.index(bin_name) if bin_name in self.SEA_BINS else 0
                     color = cmap(norm(bin_idx))
@@ -941,7 +940,7 @@ Training Summary:
                 alpha=0.6,
                 color="darkred",
             )
-    
+
             ax1.set_xlabel("Wave Height Range")
             ax1.set_ylabel("MAE (m)")
             ax1.set_title("Mean Absolute Error: Model vs Baseline")
@@ -949,7 +948,7 @@ Training Summary:
             ax1.set_xticklabels(bin_labels, rotation=45, ha="right")
             ax1.legend()
             ax1.grid(True, alpha=0.3)
-    
+
             # Add value labels on bars
             for bar, value in zip(bars1_train_model, train_maes, strict=False):
                 ax1.text(
@@ -982,7 +981,9 @@ Training Summary:
                         va="bottom",
                         fontsize=7,
                     )
-            for i, (bar, value) in enumerate(zip(bars1_val_baseline, val_baseline_maes, strict=False)):
+            for i, (bar, value) in enumerate(
+                zip(bars1_val_baseline, val_baseline_maes, strict=False)
+            ):
                 # Only show if baseline data exists (check against the bin in the metrics dict)
                 if self.SEA_BINS[i] in final_val_baseline_metrics:
                     ax1.text(
@@ -993,7 +994,7 @@ Training Summary:
                         va="bottom",
                         fontsize=7,
                     )
-    
+
             # Plot 2: RMSE comparison (Model vs Baseline)
             ax2 = axes[0, 1]
             bars2_train_model = ax2.bar(
@@ -1028,7 +1029,7 @@ Training Summary:
                 alpha=0.6,
                 color="darkorange",
             )
-    
+
             ax2.set_xlabel("Wave Height Range")
             ax2.set_ylabel("RMSE (m)")
             ax2.set_title("Root Mean Square Error: Model vs Baseline")
@@ -1036,7 +1037,7 @@ Training Summary:
             ax2.set_xticklabels(bin_labels, rotation=45, ha="right")
             ax2.legend()
             ax2.grid(True, alpha=0.3)
-    
+
             # Add value labels on bars
             for bar, value in zip(bars2_train_model, train_rmses, strict=False):
                 ax2.text(
@@ -1069,7 +1070,9 @@ Training Summary:
                         va="bottom",
                         fontsize=7,
                     )
-            for i, (bar, value) in enumerate(zip(bars2_val_baseline, val_baseline_rmses, strict=False)):
+            for i, (bar, value) in enumerate(
+                zip(bars2_val_baseline, val_baseline_rmses, strict=False)
+            ):
                 # Only show if baseline data exists (check against the bin in the metrics dict)
                 if self.SEA_BINS[i] in final_val_baseline_metrics:
                     ax2.text(
@@ -1080,7 +1083,7 @@ Training Summary:
                         va="bottom",
                         fontsize=7,
                     )
-    
+
             # Plot 3: Bias comparison (Model vs Baseline)
             ax3 = axes[1, 0]
             bars3_train_model = ax3.bar(
@@ -1115,7 +1118,7 @@ Training Summary:
                 alpha=0.6,
                 color="indigo",
             )
-    
+
             ax3.set_xlabel("Wave Height Range")
             ax3.set_ylabel("Bias (m)")
             ax3.set_title("Bias: Model vs Baseline")
@@ -1124,10 +1127,12 @@ Training Summary:
             ax3.legend()
             ax3.grid(True, alpha=0.3)
             ax3.axhline(y=0, color="black", linestyle="-", alpha=0.3)
-    
+
             # Add value labels on bars (for bias, handle negative values correctly)
             for bar, value in zip(bars3_train_model, train_biases, strict=False):
-                y_pos = bar.get_height() + 0.001 if value >= 0 else bar.get_height() - 0.015
+                y_pos = (
+                    bar.get_height() + 0.001 if value >= 0 else bar.get_height() - 0.015
+                )
                 ax3.text(
                     bar.get_x() + bar.get_width() / 2,
                     y_pos,
@@ -1137,7 +1142,9 @@ Training Summary:
                     fontsize=7,
                 )
             for bar, value in zip(bars3_val_model, val_biases, strict=False):
-                y_pos = bar.get_height() + 0.001 if value >= 0 else bar.get_height() - 0.015
+                y_pos = (
+                    bar.get_height() + 0.001 if value >= 0 else bar.get_height() - 0.015
+                )
                 ax3.text(
                     bar.get_x() + bar.get_width() / 2,
                     y_pos,
@@ -1162,7 +1169,9 @@ Training Summary:
                         va="bottom" if value >= 0 else "top",
                         fontsize=7,
                     )
-            for i, (bar, value) in enumerate(zip(bars3_val_baseline, val_baseline_biases, strict=False)):
+            for i, (bar, value) in enumerate(
+                zip(bars3_val_baseline, val_baseline_biases, strict=False)
+            ):
                 # Only show if baseline data exists (check against the bin in the metrics dict)
                 if self.SEA_BINS[i] in final_val_baseline_metrics:
                     y_pos = (
@@ -1176,7 +1185,7 @@ Training Summary:
                         va="bottom" if value >= 0 else "top",
                         fontsize=7,
                     )
-    
+
             # Plot 4: Sample counts (Model only - same for baseline)
             ax4 = axes[1, 1]
             bars4_train = ax4.bar(
@@ -1190,7 +1199,7 @@ Training Summary:
             bars4_val = ax4.bar(
                 x + width / 2, val_counts, width, label="Val", alpha=0.8, color="pink"
             )
-    
+
             ax4.set_xlabel("Wave Height Range")
             ax4.set_ylabel("Sample Count")
             ax4.set_title("Sample Distribution by Sea State")
@@ -1198,7 +1207,7 @@ Training Summary:
             ax4.set_xticklabels(bin_labels, rotation=45, ha="right")
             ax4.legend()
             ax4.grid(True, alpha=0.3)
-    
+
             # Add value labels on bars
             for bar, value in zip(bars4_train, train_counts, strict=False):
                 ax4.text(
@@ -1218,7 +1227,7 @@ Training Summary:
                     va="bottom",
                     fontsize=8,
                 )
-    
+
             plt.tight_layout()
 
             figure_name = (

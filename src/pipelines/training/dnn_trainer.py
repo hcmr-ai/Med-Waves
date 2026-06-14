@@ -65,6 +65,7 @@ from commons.callbacks.exponential_moving_average import EMAWeightAveraging
 from commons.callbacks.freeze_layers import FreezeEncoderCallback
 from commons.callbacks.pixel_switch_threshold import PixelSwitchThresholdCallback
 from commons.callbacks.s3_callback import S3CheckpointSyncCallback
+from commons.comet_utils import resolve_comet_settings
 from commons.dataloaders import create_data_loaders
 from commons.helpers import DNNConfig
 
@@ -189,6 +190,74 @@ def _log_training_artifacts(comet_logger, config_file):
     except Exception as e:
         logger.error(f"Failed to log git information: {e}")
         pass  # Git not available or not a git repo
+
+
+def create_experiment_loggers(config: DNNConfig, config_path: str):
+    """Create TensorBoard and Comet loggers from config."""
+    use_comet = config.config["logging"]["use_comet"]
+    use_tensorboard = config.config["logging"].get("use_tensorboard", not use_comet)
+
+    tensorboard_logger = None
+    if use_tensorboard:
+        tensorboard_logger = TensorBoardLogger(
+            save_dir=config.config["logging"].get(
+                "resolved_tensorboard_log_dir", config.config["logging"]["log_dir"]
+            ),
+            name=config.config["logging"]["experiment_name"],
+        )
+
+    comet_kwargs = resolve_comet_settings(
+        project_name=config.config["logging"].get("comet_project"),
+        workspace=config.config["logging"].get("comet_workspace"),
+        require_api_key=use_comet,
+    )
+    comet_kwargs.pop("project_name", None)
+    comet_logger = CometLogger(
+        **comet_kwargs,
+        name=config.config["logging"]["experiment_name"],
+        tags=config.config["logging"].get("comet_tags", []),
+        # Simplified logging options to avoid parameter issues
+        log_graph=True,
+        auto_metric_logging=True,
+        auto_param_logging=True,
+    )
+
+    if use_comet:
+        logger.info(f"Comet experiment URL: {comet_logger.experiment.url}")
+        _log_training_artifacts(comet_logger, config_path)
+
+        # Log additional experiment metadata
+        comet_logger.experiment.log_other("python_version", sys.version)
+        comet_logger.experiment.log_other("pytorch_version", torch.__version__)
+        comet_logger.experiment.log_other("lightning_version", lightning.__version__)
+        comet_logger.experiment.log_other("experiment_type", "wave_height_correction")
+        comet_logger.experiment.log_other("model_architecture", "U-Net")
+        comet_logger.experiment.log_other(
+            "training_data_year", config.config["data"]["train_year"]
+        )
+        comet_logger.experiment.log_other(
+            "validation_data_year", config.config["data"]["val_year"]
+        )
+        comet_logger.experiment.log_other(
+            "target_columns", config.config["data"]["target_columns"]
+        )
+        comet_logger.experiment.log_other(
+            "predict_bias", config.config["data"]["predict_bias"]
+        )
+
+    loggers = []
+    if tensorboard_logger is not None:
+        loggers.append(tensorboard_logger)
+    if use_comet:
+        loggers.append(comet_logger)
+    if not loggers:
+        logger.warning(
+            "No external logger enabled (use_comet=false, use_tensorboard=false);"
+            " Lightning will use its default logger."
+        )
+        loggers = True
+
+    return loggers, comet_logger, tensorboard_logger
 
 
 def create_callbacks(config: DNNConfig) -> list:
@@ -580,64 +649,7 @@ def main():
     callbacks = create_callbacks(config)
 
     # Create loggers
-    use_comet = config.config["logging"]["use_comet"]
-    use_tensorboard = config.config["logging"].get("use_tensorboard", not use_comet)
-    tensorboard_logger = None
-    if use_tensorboard:
-        tensorboard_logger = TensorBoardLogger(
-            save_dir=config.config["logging"].get(
-                "resolved_tensorboard_log_dir", config.config["logging"]["log_dir"]
-            ),
-            name=config.config["logging"]["experiment_name"],
-        )
-    comet_logger = CometLogger(
-        api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-        workspace="ioannisgkinis",
-        project="hcmr-ai",
-        name=config.config["logging"]["experiment_name"],
-        tags=config.config["logging"].get("comet_tags", []),
-        # Simplified logging options to avoid parameter issues
-        log_graph=True,
-        auto_metric_logging=True,
-        auto_param_logging=True,
-    )
-
-    # Log training artifacts (scripts, config, git info)
-    if use_comet:
-        logger.info(f"Comet experiment URL: {comet_logger.experiment.url}")
-        _log_training_artifacts(comet_logger, args.config)
-
-        # Log additional experiment metadata
-        comet_logger.experiment.log_other("python_version", sys.version)
-        comet_logger.experiment.log_other("pytorch_version", torch.__version__)
-        comet_logger.experiment.log_other("lightning_version", lightning.__version__)
-        comet_logger.experiment.log_other("experiment_type", "wave_height_correction")
-        comet_logger.experiment.log_other("model_architecture", "U-Net")
-        comet_logger.experiment.log_other(
-            "training_data_year", config.config["data"]["train_year"]
-        )
-        comet_logger.experiment.log_other(
-            "validation_data_year", config.config["data"]["val_year"]
-        )
-        comet_logger.experiment.log_other(
-            "target_columns", config.config["data"]["target_columns"]
-        )
-        comet_logger.experiment.log_other(
-            "predict_bias", config.config["data"]["predict_bias"]
-        )
-
-    # Use both loggers
-    loggers = []
-    if tensorboard_logger is not None:
-        loggers.append(tensorboard_logger)
-    if use_comet:
-        loggers.append(comet_logger)
-    if not loggers:
-        logger.warning(
-            "No external logger enabled (use_comet=false, use_tensorboard=false);"
-            " Lightning will use its default logger."
-        )
-        loggers = True
+    loggers, _, _ = create_experiment_loggers(config, args.config)
 
     # Create trainer
     training_config = config.config["training"]

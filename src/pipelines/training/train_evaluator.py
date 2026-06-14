@@ -19,6 +19,7 @@ from tqdm import tqdm
 from src.classifiers.delta_corrector import DeltaCorrector
 from src.classifiers.edcdf_corrector import EDCDFCorrector
 from src.classifiers.eqm_corrector import EQMCorrector
+from src.commons.comet_utils import resolve_comet_settings
 
 
 def save_corrector_model(corrector, output_dir: Path, corrector_name: str, run_id: str):
@@ -477,11 +478,9 @@ def train_and_evaluate_corrector(
     print(f"📁 All outputs saved to: {output_dir}")
 
 
-experiment = Experiment(
-    api_key="y2tkTNGtg7kP3HX9mfdy8JHaM",
-    project_name="hcmr-ai",
-    workspace="ioannisgkinis",
-)
+_comet_kwargs = resolve_comet_settings(require_api_key=True)
+_comet_kwargs.pop("project", None)
+experiment = Experiment(**_comet_kwargs)
 
 # Define data directory and patterns
 train_dir = Path("/data/tsolis/AI_project/parquet/augmented_with_labels/hourly")
