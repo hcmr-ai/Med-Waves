@@ -31,6 +31,58 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.classifiers.model_factory import create_model
 
 
+class TransUNetBackboneWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model.extract_features(x)
+
+
+class MoEBackboneWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model.backbone.extract_features(x)
+
+
+class MoEGateWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.model.backbone.extract_features(x)
+        if self.model.gate_input_mode == "input_channels":
+            gate_input = x[:, self.model.gate_input_channels]
+            gate_input = torch.nan_to_num(gate_input, nan=0.0, posinf=0.0, neginf=0.0)
+            if gate_input.shape[-2:] != features.shape[-2:]:
+                gate_input = torch.nn.functional.interpolate(
+                    gate_input,
+                    size=features.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            return self.model.gate_head(gate_input)
+        return self.model.gate_head(features)
+
+
+class MoEExpertWrapper(torch.nn.Module):
+    def __init__(self, model: torch.nn.Module, task_name: str, expert_index: int = 0):
+        super().__init__()
+        self.model = model
+        self.task_name = task_name
+        self.expert_index = expert_index
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.model.backbone.extract_features(x)
+        head = self.model.expert_heads[self.task_name][self.expert_index]
+        return head(features)
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
@@ -93,6 +145,9 @@ def render_torchview_graph(
     input_shape: tuple[int, int, int, int],
     depth: int,
     expand_nested: bool,
+    hide_inner_tensors: bool,
+    hide_module_functions: bool,
+    roll: bool,
 ) -> Path:
     from torchview import draw_graph
 
@@ -103,10 +158,11 @@ def render_torchview_graph(
             "depth": depth,
             "device": device,
             "expand_nested": expand_nested,
-            "hide_inner_tensors": False,
-            "hide_module_functions": False,
+            "hide_inner_tensors": hide_inner_tensors,
+            "hide_module_functions": hide_module_functions,
             "show_shapes": True,
             "save_graph": False,
+            "roll": roll,
         }
         if device == "meta":
             kwargs["input_size"] = input_shape
@@ -136,6 +192,106 @@ def render_torchview_graph(
     if not out_path.exists():
         raise FileNotFoundError(f"torchview render did not produce expected file: {out_path}")
     return out_path
+
+
+def render_torchview_suite(
+    config: dict[str, Any],
+    output_dir: Path,
+    input_shape: tuple[int, int, int, int],
+    depth: int,
+    expand_nested: bool,
+    simple: bool,
+) -> list[Path]:
+    paths: list[Path] = []
+    hide_inner_tensors = simple
+    hide_module_functions = simple
+    roll = simple
+
+    transunet = build_model(config, "transunet")
+    paths.append(
+        render_torchview_graph(
+            model=TransUNetBackboneWrapper(transunet) if simple else transunet,
+            output_dir=output_dir,
+            stem="transunet_backbone_torchview" if simple else "transunet_torchview",
+            input_shape=input_shape,
+            depth=4 if simple else depth,
+            expand_nested=expand_nested,
+            hide_inner_tensors=hide_inner_tensors,
+            hide_module_functions=hide_module_functions,
+            roll=roll,
+        )
+    )
+    if simple:
+        paths.append(
+            render_torchview_graph(
+                model=transunet,
+                output_dir=output_dir,
+                stem="transunet_full_torchview",
+                input_shape=input_shape,
+                depth=3,
+                expand_nested=False,
+                hide_inner_tensors=True,
+                hide_module_functions=True,
+                roll=True,
+            )
+        )
+
+    moe = build_model(config, "moe_transunet")
+    tasks = resolve_tasks(config)
+    paths.append(
+        render_torchview_graph(
+            model=MoEBackboneWrapper(moe) if simple else moe,
+            output_dir=output_dir,
+            stem="moe_backbone_torchview" if simple else "moe_transunet_torchview",
+            input_shape=input_shape,
+            depth=4 if simple else depth,
+            expand_nested=expand_nested,
+            hide_inner_tensors=hide_inner_tensors,
+            hide_module_functions=hide_module_functions,
+            roll=roll,
+        )
+    )
+    if simple:
+        paths.append(
+            render_torchview_graph(
+                model=MoEGateWrapper(moe),
+                output_dir=output_dir,
+                stem="moe_gate_torchview",
+                input_shape=input_shape,
+                depth=3,
+                expand_nested=False,
+                hide_inner_tensors=True,
+                hide_module_functions=True,
+                roll=True,
+            )
+        )
+        paths.append(
+            render_torchview_graph(
+                model=MoEExpertWrapper(moe, task_name=tasks[0], expert_index=0),
+                output_dir=output_dir,
+                stem=f"moe_expert0_{tasks[0]}_torchview",
+                input_shape=input_shape,
+                depth=3,
+                expand_nested=False,
+                hide_inner_tensors=True,
+                hide_module_functions=True,
+                roll=True,
+            )
+        )
+        paths.append(
+            render_torchview_graph(
+                model=moe,
+                output_dir=output_dir,
+                stem="moe_full_torchview",
+                input_shape=input_shape,
+                depth=3,
+                expand_nested=False,
+                hide_inner_tensors=True,
+                hide_module_functions=True,
+                roll=True,
+            )
+        )
+    return paths
 
 
 def render_torchviz_graph(
@@ -181,6 +337,7 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--expand-nested", action="store_true")
     parser.add_argument("--include-autograd", action="store_true")
+    parser.add_argument("--simple", action="store_true")
     args = parser.parse_args()
 
     assert_graphviz_available()
@@ -191,18 +348,19 @@ def main() -> None:
     in_channels = int(config["model"]["in_channels"])
     input_shape = (args.batch_size, in_channels, args.height, args.width)
 
-    for model_type in ("transunet", "moe_transunet"):
-        torchview_path = render_torchview_graph(
-            model=build_model(config, model_type),
-            output_dir=output_dir,
-            stem=f"{model_type}_torchview",
-            input_shape=input_shape,
-            depth=args.depth,
-            expand_nested=args.expand_nested,
-        )
+    torchview_paths = render_torchview_suite(
+        config=config,
+        output_dir=output_dir,
+        input_shape=input_shape,
+        depth=args.depth,
+        expand_nested=args.expand_nested,
+        simple=args.simple,
+    )
+    for torchview_path in torchview_paths:
         print(f"Wrote {torchview_path}")
 
-        if args.include_autograd:
+    if args.include_autograd:
+        for model_type in ("transunet", "moe_transunet"):
             torchviz_path = render_torchviz_graph(
                 model=build_model(config, model_type),
                 output_dir=output_dir,
