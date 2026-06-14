@@ -106,15 +106,22 @@ def render_torchview_graph(
         hide_inner_tensors=False,
         hide_module_functions=False,
         show_shapes=True,
-        save_graph=True,
-        filename=stem,
-        directory=str(output_dir),
+        save_graph=False,
     )
 
-    out_path = output_dir / f"{stem}.svg"
+    visual_graph = getattr(graph, "visual_graph", None)
+    if visual_graph is None:
+        raise RuntimeError("torchview did not return a visual_graph object.")
+
+    visual_graph.format = "svg"
+    rendered = visual_graph.render(
+        filename=stem,
+        directory=str(output_dir),
+        cleanup=True,
+    )
+    out_path = Path(rendered)
     if not out_path.exists():
-        raise FileNotFoundError(f"torchview did not write expected file: {out_path}")
-    _ = graph
+        raise FileNotFoundError(f"torchview render did not produce expected file: {out_path}")
     return out_path
 
 
