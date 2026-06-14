@@ -15,8 +15,8 @@ from IPython.display import display
 
 DEFAULT_PATH_PATTERNS: dict[str, dict[str, str | None]] = {
     "azure": {
-        "nc_raw_uncorrected": None,
-        "nc_reference": None,
+        "nc_raw_uncorrected": "/mnt/blobstorage/raw/without_reduced/WAVEAN{date}.nc",
+        "nc_reference": "/mnt/blobstorage/raw/with_reduced/WAVEAN{date}.nc",
         "parquet_engineered": "/mnt/blobstorage/parquet/hourly_extra_features/year={year}/WAVEAN{date}.parquet",
         "pt_preprocessed": "/mnt/local_datasets/preprocessed_extended_subsampled_step_5/WAVEAN{date}.pt",
         "pt_preprocessed_blob": "/mnt/blobstorage/preprocessed_extended_subsampled_step_5/WAVEAN{date}.pt",
