@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MoE TransUNet Schematic</title>
+  <style>
+    :root {
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #2563eb;
+      --accent: #f59e0b;
+      --io: #bfdbfe;
+      --encoder: #ffedd5;
+      --feature: #bbf7d0;
+      --mix: #fae8ff;
+      --aux: #ddd6fe;
+      --panel: rgba(255,255,255,0.88);
+      --border: rgba(51,65,85,0.24);
+      --shadow: 0 10px 28px rgba(15,23,42,0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 14px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, #dbeafe 0, transparent 22%),
+        radial-gradient(circle at top right, #fae8ff 0, transparent 18%),
+        linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    }
+    .page {
+      max-width: 1840px;
+      margin: 0 auto;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 40px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    .subtitle {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .box {
+      border: 2px solid rgba(51,65,85,0.78);
+      border-radius: 16px;
+      padding: 12px 10px;
+      text-align: center;
+      box-shadow: var(--shadow);
+      min-height: 80px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .io { background: var(--io); }
+    .encoder { background: var(--encoder); }
+    .feature { background: var(--feature); }
+    .mix { background: var(--mix); }
+    .aux { background: var(--aux); }
+    .title {
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+    .value {
+      font-size: 20px;
+      margin-top: 6px;
+    }
+    .note {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 170px 36px minmax(200px, 1fr) 36px minmax(170px, 1fr) 36px 180px;
+      gap: 8px;
+      align-items: center;
+    }
+    .arrow {
+      text-align: center;
+      color: var(--line);
+      font-size: 20px;
+      font-weight: 800;
+    }
+    .arrow.accent { color: var(--accent); }
+    .section {
+      border: 2px dashed rgba(148,163,184,0.75);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.55);
+      margin-top: 14px;
+    }
+    .section h2 {
+      margin: 0 0 14px;
+      font-size: 24px;
+      text-align: center;
+    }
+    .stack4 {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(88px, 1fr));
+      gap: 10px;
+    }
+    .branches {
+      display: grid;
+      grid-template-columns: 1fr 32px 1.15fr;
+      gap: 10px;
+      align-items: start;
+      margin-top: 14px;
+    }
+    .branch-title {
+      font-size: 21px;
+      font-weight: 800;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+    .branch-stack {
+      display: grid;
+      gap: 9px;
+    }
+    .micro-note {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .formula-strip {
+      margin-top: 18px;
+      border: 1px solid rgba(148,163,184,0.45);
+      background: rgba(255,255,255,0.82);
+      border-radius: 18px;
+      padding: 12px 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .formula-card {
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(248,250,252,0.9);
+      border: 1px solid rgba(203,213,225,0.8);
+    }
+    .formula-title {
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      color: #334155;
+    }
+    .formula-main {
+      font-size: 16px;
+      color: #0f172a;
+    }
+    .legend {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(255,255,255,0.78);
+      border: 1px solid rgba(148,163,184,0.35);
+      padding: 7px 10px;
+      border-radius: 999px;
+    }
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(71,85,105,0.45);
+    }
+    .footer {
+      margin-top: 8px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    @media (max-width: 1280px) {
+      .row, .stack4, .branches, .formula-strip {
+        grid-template-columns: 1fr;
+      }
+      .arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>MoE TransUNet Schematic</h1>
+    <p class="subtitle">in_channels=16 | tasks=vhm0, vtm02 | experts=3 | gate_mode=features | gate_temperature=1.0</p>
+
+    <div class="row">
+      <div class="box io"><div class="title">Input tensor</div><div class="value">C=16</div><div class="note">64×64 grid</div></div>
+      <div class="arrow">→</div>
+      <div class="box feature">
+        <div class="title">Shared TransUNet backbone</div>
+        <div class="note">shared encoder, transformer fusion, bottleneck, decoder</div>
+        <div class="value">shared features = 16</div>
+        <div class="note">decoded 64×64 feature map</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="box mix">
+        <div class="title">MoE routing stage</div>
+        <div class="note">gate branch + expert branch operate on the shared backbone output</div>
+      </div>
+      <div class="arrow accent">→</div>
+      <div class="box io"><div class="title">Prediction</div><div class="note">weighted MoE output</div></div>
+    </div>
+
+    <div class="section">
+      <h2>Shared Backbone</h2>
+      <div class="stack4">
+        <div class="box encoder"><div class="title">Encoder 1</div><div class="value">16</div><div class="note">64×64</div></div>
+        <div class="box encoder"><div class="title">Encoder 2</div><div class="value">32</div><div class="note">32×32</div></div>
+        <div class="box encoder"><div class="title">Encoder 3</div><div class="value">64</div><div class="note">16×16</div></div>
+        <div class="box encoder"><div class="title">Encoder 4</div><div class="value">128</div><div class="note">8×8</div></div>
+      </div>
+
+      <div class="stack4" style="margin-top:18px;">
+        <div class="box mix"><div class="title">Transformer branch</div><div class="note">patch embedding + 1 layer / 4 heads</div></div>
+        <div class="box mix"><div class="title">Fusion</div><div class="note">CNN + transformer</div></div>
+        <div class="box feature"><div class="title">Bottleneck</div><div class="value">128</div><div class="note">8×8</div></div>
+        <div class="box feature"><div class="title">Decoded shared features</div><div class="value">16</div><div class="note">64×64</div></div>
+      </div>
+    </div>
+
+    <div class="branches">
+      <div>
+        <div class="branch-title">Gate Branch</div>
+        <div class="branch-stack">
+          <div class="box encoder">
+            <div class="title">Gate head</div>
+            <div class="value">mode = features</div>
+            <div class="note">reads shared backbone features</div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="box mix">
+            <div class="title">Gate logits</div>
+            <div class="note">3 spatial routing scores</div>
+            <div class="micro-note">one score map per expert</div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="box mix">
+            <div class="title">Softmax / temperature</div>
+            <div class="note">gate weights</div>
+            <div class="micro-note">weights sum to 1 per pixel</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow">→</div>
+
+      <div>
+        <div class="branch-title">Expert Branch</div>
+        <div class="branch-stack">
+          <div class="box mix">
+            <div class="title">Expert heads</div>
+            <div class="value">3 per task</div>
+            <div class="note">1×1 conv each</div>
+            <div class="micro-note">each head predicts one candidate correction map</div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="box mix">
+            <div class="title">Expert outputs</div>
+            <div class="note">3 candidate maps per task</div>
+            <div class="micro-note">expert 1, expert 2, expert 3</div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="box feature">
+            <div class="title">Weighted sum</div>
+            <div class="value" style="font-size:22px;">Σ gate_k · expert_k</div>
+            <div class="micro-note">pixel-wise routing chooses how much each expert contributes</div>
+          </div>
+          <div class="arrow">↓</div>
+          <div class="box aux">
+            <div class="title">Uncertainty</div>
+            <div class="note">1 - max gate</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="formula-strip">
+      <div class="formula-card">
+        <div class="formula-title">Per-Pixel Gate Example</div>
+        <div class="formula-main">gate = [0.10, 0.70, 0.20]</div>
+      </div>
+      <div class="formula-card">
+        <div class="formula-title">Mixture At That Pixel</div>
+        <div class="formula-main">output = 0.10·E1 + 0.70·E2 + 0.20·E3</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><span class="swatch" style="background:var(--io)"></span>Input / output</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--encoder)"></span>Encoder / gate</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--feature)"></span>Bottleneck / shared features / mixture result</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--mix)"></span>Transformer / fusion / logits / experts / softmax</div>
+      <div class="legend-item"><span class="swatch" style="background:var(--aux)"></span>Uncertainty</div>
+    </div>
+
+    <div class="footer">Shared backbone → gate logits → gate weights, plus expert outputs → pixel-wise weighted mixture → prediction</div>
+  </div>
+</body>
+</html>

@@ -55,6 +55,12 @@ yarl = ">=1.17.0,<2.0.0,!=1.24.0"
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.12.1"
 pre-commit = "^4.2.0"
+ipykernel = "^7.3.0"
+
+[tool.poetry.group.viz.dependencies]
+graphviz = "*"
+torchview = "*"
+torchviz = "*"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.0"
@@ -64,4 +70,3 @@ pytest-cov = "^6.0"
 name = "torch-stable"
 url = "https://download.pytorch.org/whl/cu128"
 priority = "explicit"
-

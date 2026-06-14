@@ -14,6 +14,9 @@ Current project standard:
 From current Microsoft Learn documentation, the `NVadsA10_v5` family uses NVIDIA A10 GPUs and AMD EPYC 74F3V CPUs, and `Standard_NV12ads_A10_v5` is a `12 vCPU / 110 GiB` size with a `360 GiB` temp disk. That series ships with a GRID license and uses partial A10 GPU slices. Sources:
 - https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/gpu-accelerated/nvadsa10v5-series
 
+For a quick external pricing/spec lookup for the exact VM size, see Vantage’s `NV12ads A10 v5` page:
+- https://instances.vantage.sh/azure/vm/nv12ads-v5?currency=USD
+
 ## Recommended Provisioning Choices
 
 Recommended defaults for this repo:
