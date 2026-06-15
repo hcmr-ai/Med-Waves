@@ -1531,7 +1531,7 @@ class WaveBiasCorrector(pl.LightningModule):
         sample = self._val_gate_sample
         if sample is not None:
             import numpy as np
-            from matplotlib.cm import get_cmap
+            import matplotlib as mpl
 
             # Uncertainty map — [H, W] float → grayscale uint8
             if "uncertainty" in sample:
@@ -1545,7 +1545,7 @@ class WaveBiasCorrector(pl.LightningModule):
                 dominant = gw.argmax(axis=0).astype(np.float32)  # [H, W]
                 # Normalise to [0, 1] then apply a qualitative colormap
                 dominant_norm = dominant / max(gw.shape[0] - 1, 1)
-                cmap = get_cmap("tab10")
+                cmap = mpl.colormaps.get_cmap("tab10")
                 rgb = (cmap(dominant_norm)[:, :, :3] * 255).astype(np.uint8)  # [H, W, 3]
                 self._log_image("moe/val_dominant_expert", rgb)
 

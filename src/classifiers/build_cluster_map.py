@@ -10,7 +10,7 @@ from pathlib import Path
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import matplotlib.cm as cm
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -500,7 +500,7 @@ def plot_cluster_rectangles(
     unique_cells = df.select(["lat", "lon", "cluster_id"]).unique(subset=["cluster_id"])
 
     cluster_ids = unique_cells["cluster_id"].to_numpy()
-    cmap = cm.get_cmap("tab20", len(cluster_ids))  # categorical colormap
+    cmap = mpl.colormaps.get_cmap("tab20").resampled(len(cluster_ids))  # categorical colormap
 
     for idx, row in enumerate(unique_cells.iter_rows(named=True)):
         lat = float(row["lat"])
