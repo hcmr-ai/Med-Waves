@@ -199,7 +199,22 @@ def plot_spatial_rmse_map(
     ax = plt.axes(projection=ccrs.PlateCarree())
 
     # Add coastlines and geographic features
-    ax.coastlines(resolution="10m", linewidth=0.5)
+    try:
+        ax.coastlines(resolution="10m", linewidth=0.5)
+    except Exception as exc:
+        logger.warning(
+            "High-resolution coastline rendering failed (%s: %s). Falling back to 110m.",
+            type(exc).__name__,
+            exc,
+        )
+        try:
+            ax.coastlines(resolution="110m", linewidth=0.5)
+        except Exception as exc2:
+            logger.warning(
+                "Fallback coastline rendering failed (%s: %s). Continuing without coastlines.",
+                type(exc2).__name__,
+                exc2,
+            )
     ax.gridlines(
         draw_labels=True,
         dms=True,
@@ -232,15 +247,18 @@ def plot_spatial_rmse_map(
         # Zoom into the filtered region with a small margin
         margin_lat = (geo_bounds["lat_max"] - geo_bounds["lat_min"]) * 0.1
         margin_lon = (geo_bounds["lon_max"] - geo_bounds["lon_min"]) * 0.1
-        ax.set_extent(
-            [
-                geo_bounds["lon_min"] - margin_lon,
-                geo_bounds["lon_max"] + margin_lon,
-                geo_bounds["lat_min"] - margin_lat,
-                geo_bounds["lat_max"] + margin_lat,
-            ],
-            crs=ccrs.PlateCarree(),
-        )
+        try:
+            ax.set_extent(
+                [
+                    geo_bounds["lon_min"] - margin_lon,
+                    geo_bounds["lon_max"] + margin_lon,
+                    geo_bounds["lat_min"] - margin_lat,
+                    geo_bounds["lat_max"] + margin_lat,
+                ],
+                crs=ccrs.PlateCarree(),
+            )
+        except Exception:
+            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
 
         # Add rectangle showing the filtered region
         rect = mpatches.Rectangle(
@@ -264,15 +282,18 @@ def plot_spatial_rmse_map(
         )
     else:
         # Use data bounds
-        ax.set_extent(
-            [
-                np.nanmin(lon_grid),
-                np.nanmax(lon_grid),
-                np.nanmin(lat_grid),
-                np.nanmax(lat_grid),
-            ],
-            crs=ccrs.PlateCarree(),
-        )
+        try:
+            ax.set_extent(
+                [
+                    np.nanmin(lon_grid),
+                    np.nanmax(lon_grid),
+                    np.nanmin(lat_grid),
+                    np.nanmax(lat_grid),
+                ],
+                crs=ccrs.PlateCarree(),
+            )
+        except Exception:
+            ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
 
     ax.set_title(title, fontsize=14, fontweight="bold", pad=10)
     ax.set_xlabel("Longitude", fontsize=12)

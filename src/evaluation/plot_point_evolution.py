@@ -238,8 +238,11 @@ def plot_point_on_map(
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return
-    except ImportError:
-        pass
+    except Exception as exc:
+        print(
+            f"Warning: Cartopy map rendering failed in plot_point_on_map "
+            f"({type(exc).__name__}: {exc}). Falling back to plain matplotlib."
+        )
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter([plon], [plat], c="crimson", s=100, zorder=10, edgecolors="black", linewidths=0.9)
@@ -324,8 +327,11 @@ def plot_points_overview_map(
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         return
-    except ImportError:
-        pass
+    except Exception as exc:
+        print(
+            f"Warning: Cartopy map rendering failed in plot_points_overview_map "
+            f"({type(exc).__name__}: {exc}). Falling back to plain matplotlib."
+        )
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter(lons, lats, c="crimson", s=55, zorder=10, edgecolors="black", linewidths=0.5)

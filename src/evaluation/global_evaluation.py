@@ -25,6 +25,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from plot_maps import plot_dist, plot_scatter_per_wave_bin, rmse  # noqa: E402
 
+
+def _safe_set_extent(ax, extent):
+    try:
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+    except Exception:
+        ax.set_extent([-180, 180, -90, 90], crs=ccrs.PlateCarree())
+
+
+def _safe_add_basemap_features(ax):
+    try:
+        ax.add_feature(cfeature.LAND, facecolor="#f0f0f0")
+        ax.add_feature(cfeature.OCEAN, facecolor="#fff")
+        ax.coastlines(resolution="10m", linewidth=0.6)
+    except Exception as exc:
+        print(
+            f"Warning: basemap rendering failed in save_map "
+            f"({type(exc).__name__}: {exc}). Trying low-resolution coastline fallback."
+        )
+        try:
+            ax.coastlines(resolution="110m", linewidth=0.6)
+        except Exception as exc2:
+            print(
+                f"Warning: coastline fallback failed in save_map "
+                f"({type(exc2).__name__}: {exc2})."
+            )
+
 # =============================================================================
 # SETTINGS
 # =============================================================================
@@ -411,10 +437,8 @@ def save_map(loc_df, col, title, path, cmap="YlOrRd", vmin=None, vmax=None):
     vmin = vmin if vmin is not None else 0
     im = ax.pcolormesh(Lon, Lat, Z.values, cmap=cmap, vmin=vmin, vmax=vmax,
                        shading="auto", transform=ccrs.PlateCarree())
-    ax.set_extent(PLOTS["map_extent"])
-    ax.add_feature(cfeature.LAND, facecolor="#f0f0f0")
-    ax.add_feature(cfeature.OCEAN, facecolor="#fff")
-    ax.coastlines(resolution="10m", linewidth=0.6)
+    _safe_set_extent(ax, PLOTS["map_extent"])
+    _safe_add_basemap_features(ax)
     plt.colorbar(im, ax=ax, shrink=0.9).set_label(col)
     ax.set_title(title, fontweight="bold")
     plt.tight_layout()

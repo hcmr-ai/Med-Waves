@@ -56,18 +56,8 @@ def plot_map(data_type):
         linewidths=0.3,
         alpha=0.3
     )
-    # subtle gridlines
-    gl = ax.gridlines(
-        draw_labels=True,
-        linewidth=0.3,
-        color="gray",
-        alpha=0.4,
-        linestyle="--"
-    )
-    gl.top_labels = False
-    gl.right_labels = False
-    gl.xlabel_style = {"size": 9}
-    gl.ylabel_style = {"size": 9}
+    # NOTE: Cartopy gridliner with labels can trigger GEOS LinearRing crashes
+    # in some coastline/extent combinations. Keep maps stable by skipping it.
 
     # ---- colorbar ----
     cbar = plt.colorbar(im, ax=ax, orientation="vertical", pad=0.02, shrink=0.9)
@@ -648,7 +638,7 @@ if __name__ == "__main__":
 
         plt.tight_layout()
         plt.savefig("sea_grid_cells_5798.pdf", dpi=300, bbox_inches="tight")
-        plt.show()
+        plt.close(fig)
 
 
         # Evaluate all
