@@ -20,8 +20,10 @@ Use these as the documented operator paths unless the user explicitly asks for a
 - training architecture: [`docs/training-architecture.md`](docs/training-architecture.md)
 - DNN training: [`docs/training-dnn.md`](docs/training-dnn.md)
 - DNN evaluation: [`docs/evaluation_dnn.md`](docs/evaluation_dnn.md)
+- full evaluation script outputs: [`docs/full-evaluation-outputs.md`](docs/full-evaluation-outputs.md)
 - baseline and alternative models: [`docs/baseline-models.md`](docs/baseline-models.md)
 - config semantics: [`docs/config-reference.md`](docs/config-reference.md)
+- DNN config full reference: [`docs/config-dnn-reference.md`](docs/config-dnn-reference.md)
 
 ## Working Assumptions
 

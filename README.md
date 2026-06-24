@@ -122,5 +122,7 @@ Use the skill when the task is to:
 - [`scripts/README.md`](scripts/README.md): curated guide to the `scripts/` directory
 - [`docs/training-dnn.md`](docs/training-dnn.md): DNN training workflow
 - [`docs/evaluation_dnn.md`](docs/evaluation_dnn.md): DNN evaluation entrypoints and outputs
+- [`docs/full-evaluation-outputs.md`](docs/full-evaluation-outputs.md): step-by-step artifact map for `full_evaluation.sh`
 - [`docs/baseline-models.md`](docs/baseline-models.md): EDCDF, static-map, full-dataset, MLP, and model-per-point baseline paths
 - [`docs/config-reference.md`](docs/config-reference.md): practical guide to `config_dnn.yaml`
+- [`docs/config-dnn-reference.md`](docs/config-dnn-reference.md): full field-by-field reference for `config_dnn.yaml`
