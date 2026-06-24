@@ -57,6 +57,9 @@ Why it exists:
 4. `plot_points.py`
 5. `native_plots_and_summary.py`
 
+Detailed artifact-by-step output reference:
+- [`full-evaluation-outputs.md`](full-evaluation-outputs.md)
+
 This script is tightly coupled to:
 - `/mnt/Med-WAV`
 - `/mnt/blobstorage`

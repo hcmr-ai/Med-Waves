@@ -36,6 +36,7 @@ The most important distinction across configs is the data format:
 
 Use this for:
 - UNet-style, TransUNet-style, MoE, and related tensor models
+- full variable-by-variable details in [`config-dnn-reference.md`](config-dnn-reference.md)
 
 Key areas:
 - `data.data_path`: points to the `.pt` tensor dataset
